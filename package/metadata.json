@@ -1,0 +1,20 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "maci.stgn@gmail.com",
+                "Name": "Marcel Wysocki"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "Claude, Codex, and Grok usage quotas: session, weekly, and monthly credit limits",
+        "Icon": "office-chart-pie",
+        "Id": "com.maci.quota-widget",
+        "License": "MIT",
+        "Name": "AI Quota",
+        "Version": "1.0.0",
+        "Website": "https://github.com/maci0/quota-widget"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
