@@ -214,7 +214,6 @@ class CursorSummaryFuzz(unittest.TestCase):
         first = self._check(json.loads(json.dumps(SEED_CORPUS[0])))
         by_label = {p["label"]: p for p in first["periods"]}
         self.assertEqual(first["plan"], "Pro")
-        self.assertEqual(first["limit_type"], "user")
         self.assertEqual(by_label["Included"]["util"], 40)
         self.assertEqual(by_label["Auto + Composer"]["util"], 10)
         self.assertEqual(by_label["API"]["util"], 40)

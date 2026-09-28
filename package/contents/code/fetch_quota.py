@@ -1053,7 +1053,6 @@ def _claude_weekly(data: JsonDict) -> list[JsonDict]:
                     "label": label,
                     "util": _finite_number(item.get("percent")),
                     "resets_ms": iso_to_ms(item.get("resets_at")),
-                    "kind": kind,
                 }
             )
             if len(weekly) >= MAX_WEEKLY_LIMITS:
@@ -1073,7 +1072,6 @@ def _claude_weekly(data: JsonDict) -> list[JsonDict]:
                 "label": label,
                 "util": _finite_number(block.get("utilization")),
                 "resets_ms": iso_to_ms(block.get("resets_at")),
-                "kind": key,
             }
         )
     return weekly
@@ -1189,8 +1187,6 @@ def fetch_claude() -> JsonDict:
                 "monthly_limit": _finite_number(extra.get("monthly_limit")),
             },
             "spend": {
-                "enabled": bool(spend.get("enabled")),
-                "percent": _finite_number(spend.get("percent")),
                 "used_minor": _finite_number(spend_used.get("amount_minor")),
                 "currency": _as_text(
                     spend_used.get("currency") or extra.get("currency")
@@ -1379,7 +1375,6 @@ def _parse_grok_period(cfg: JsonDict) -> JsonDict:
                     credit_pct = _finite_number(float(credit_raw))
             util = round(credit_pct, 1) if credit_pct is not None else None
         used = limit = None
-        start_ms = iso_to_ms(period.get("start") or cfg.get("billingPeriodStart"))
         end_ms = iso_to_ms(period.get("end") or cfg.get("billingPeriodEnd"))
     else:
         # Legacy monthly shape: $ used of $ limit (values in cents).
@@ -1396,9 +1391,6 @@ def _parse_grok_period(cfg: JsonDict) -> JsonDict:
             if used is not None and limit is not None and limit > 0
             else None
         )
-        start_ms = iso_to_ms(
-            cfg.get("billingPeriodStart") or cfg.get("billing_period_start")
-        )
         end_ms = iso_to_ms(cfg.get("billingPeriodEnd") or cfg.get("billing_period_end"))
         if label == "Usage":
             label = "Monthly"
@@ -1409,7 +1401,6 @@ def _parse_grok_period(cfg: JsonDict) -> JsonDict:
         "used": used,
         "limit": limit,
         "on_demand_cap": on_demand,
-        "period_start_ms": start_ms,
         "resets_ms": end_ms,
         "unit": "cents",
         "currency": "USD",
@@ -1427,9 +1418,9 @@ def fetch_grok() -> JsonDict:
         if refreshed:
             entry = refreshed
 
-    state = {"entry": entry}
-
     def get_cfg(url: str) -> tuple[int, JsonDict | None]:
+        nonlocal entry
+
         def call(token: str) -> tuple[int, object]:
             return fetch_json(
                 url,
@@ -1440,16 +1431,16 @@ def fetch_grok() -> JsonDict:
                 },
             )
 
-        token = state["entry"].get("key")
+        token = entry.get("key")
         if not isinstance(token, str) or not token:
             return 0, None
         status, data = call(token)
         if status == 401:
-            refreshed = _refresh_grok(auth_key, state["entry"])
+            refreshed = _refresh_grok(auth_key, entry)
             if not refreshed:
                 return 401, None
-            state["entry"] = refreshed
-            token = state["entry"].get("key")
+            entry = refreshed
+            token = entry.get("key")
             if not isinstance(token, str) or not token:
                 return 401, None
             status, data = call(token)
@@ -1474,7 +1465,7 @@ def fetch_grok() -> JsonDict:
         seen.add(key)
         periods.append(p)
 
-    account = _account_id(state["entry"].get("key"), auth_key)
+    account = _account_id(entry.get("key"), auth_key)
     if not periods:
         # Neither call yielded a meter; report the failure, not the call that
         # happened to answer 200 with a payload that had no period in it.
@@ -1568,8 +1559,6 @@ def _codex_window(block: JsonDict | None, name: str) -> JsonDict | None:
         "label": _codex_window_label(window_s_i, name),
         "util": util,
         "resets_ms": resets_ms,
-        "window_seconds": window_s_i,
-        "kind": name,
     }
 
 
@@ -1737,7 +1726,6 @@ def fetch_codex() -> JsonDict:
                 "has_credits": bool(credits.get("has_credits")),
                 "balance": _amount(credits.get("balance")),
                 "unlimited": bool(credits.get("unlimited")),
-                "overage_limit_reached": bool(credits.get("overage_limit_reached")),
             },
             "reset_credits": reset_credits,
         }
@@ -2019,7 +2007,6 @@ def parse_cursor_summary(data: JsonDict, plan_hint: str | None = None) -> JsonDi
         "ok": True,
         "plan": plan,
         "unlimited": unlimited,
-        "limit_type": _as_text(data.get("limitType")),
         "periods": periods,
         "resets_ms": cycle_end,
     }

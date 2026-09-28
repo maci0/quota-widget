@@ -1239,7 +1239,7 @@ class NonFiniteReadingTest(unittest.TestCase):
         )
         assert window is not None
         self.assertEqual(window["util"], 42.0)
-        self.assertEqual(window["window_seconds"], 604800)
+        self.assertEqual(window["label"], "Weekly")
 
     def test_cursor_meter_rejects_non_finite_amounts(self) -> None:
         meter = fetch_quota._cursor_meter(
