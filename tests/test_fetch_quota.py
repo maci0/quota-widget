@@ -46,14 +46,6 @@ _SANDBOX_ENV = {
     "QUOTA_WIDGET_CACHE": str(Path(_SANDBOX.name) / "cache"),
 }
 
-# Short names a test binds a credential file to, and the env var that carries it.
-_CRED_ENV = {
-    "CLAUDE_CRED": "QUOTA_WIDGET_CLAUDE_CREDENTIALS",
-    "CODEX_AUTH": "QUOTA_WIDGET_CODEX_AUTH",
-    "GROK_AUTH": "QUOTA_WIDGET_GROK_AUTH",
-    "CURSOR_AUTH_JSON": "QUOTA_WIDGET_CURSOR_AUTH",
-}
-
 # The Cursor state.vscdb tables a fixture may build: the one the reader looks
 # in, and any other name for the test that proves a missing table reads empty.
 _FIXTURE_TABLES = ("ItemTable", "Other")
@@ -527,17 +519,11 @@ class ClaudeRateLimitTest(unittest.TestCase):
             fetch_quota._account_id(_fake_jwt("user_01OTHER")),
         )
 
-        def fake_http(
-            url: str,
-            headers: dict[str, str],
-            *,
-            timeout: float = 12.0,
-            data: bytes | None = None,
-            method: str | None = None,
-        ) -> tuple[int, object, object]:
-            return 429, {"error": {"type": "rate_limit_error"}}, {"Retry-After": "0"}
-
-        with patch.object(fetch_quota, "fetch_http", fake_http):
+        with patch.object(
+            fetch_quota,
+            "fetch_http",
+            _http_returning(429, _RATE_LIMIT, {"Retry-After": "0"}),
+        ):
             out = fetch_quota.fetch_claude()
         self.assertEqual(out, {"ok": False, "error": "http-429"})
 
@@ -547,17 +533,11 @@ class ClaudeRateLimitTest(unittest.TestCase):
         payload["claudeAiOauth"]["accessToken"] = "opaque-token"
         cred_path.write_text(json.dumps(payload))
 
-        def fake_http(
-            url: str,
-            headers: dict[str, str],
-            *,
-            timeout: float = 12.0,
-            data: bytes | None = None,
-            method: str | None = None,
-        ) -> tuple[int, object, object]:
-            return 200, {"five_hour": {"utilization": 5}}, None
-
-        with patch.object(fetch_quota, "fetch_http", fake_http):
+        with patch.object(
+            fetch_quota,
+            "fetch_http",
+            _http_returning(200, {"five_hour": {"utilization": 5}}),
+        ):
             out = fetch_quota.fetch_claude()
         self.assertTrue(out["ok"])
         self.assertFalse((Path(self.tmp.name) / "claude.json").exists())
@@ -650,29 +630,15 @@ class ClaudeRateLimitTest(unittest.TestCase):
         payload["claudeAiOauth"]["expiresAt"] = 1
         cred_path.write_text(json.dumps(payload))
 
-        def fake_json(
-            url: str,
-            headers: dict[str, str],
-            *,
-            timeout: float = 12.0,
-            data: bytes | None = None,
-            method: str | None = None,
-        ) -> tuple[int, object]:
-            return 429, _RATE_LIMIT
-
-        def fake_http(
-            url: str,
-            headers: dict[str, str],
-            *,
-            timeout: float = 12.0,
-            data: bytes | None = None,
-            method: str | None = None,
-        ) -> tuple[int, object, object]:
-            return 401, {"error": {"type": "authentication_error"}}, None
-
         with (
-            patch.object(fetch_quota, "fetch_json", fake_json),
-            patch.object(fetch_quota, "fetch_http", fake_http),
+            patch.object(
+                fetch_quota, "fetch_json", _http_returning_pair(429, _RATE_LIMIT)
+            ),
+            patch.object(
+                fetch_quota,
+                "fetch_http",
+                _http_returning(401, {"error": {"type": "authentication_error"}}),
+            ),
         ):
             out = fetch_quota.fetch_claude()
         self.assertEqual(out, {"ok": False, "error": "http-429"})
@@ -2421,19 +2387,13 @@ class RefreshRunsOnceTest(unittest.TestCase):
                 "expires_in": 28800,
             }
 
-        def fake_http(
-            url: str,
-            headers: dict[str, str],
-            *,
-            timeout: float = 12.0,
-            data: bytes | None = None,
-            method: str | None = None,
-        ) -> tuple[int, object, object]:
-            return 200, {"five_hour": {"utilization": 4}}, None
-
         with (
             patch.object(fetch_quota, "fetch_json", fake_json),
-            patch.object(fetch_quota, "fetch_http", fake_http),
+            patch.object(
+                fetch_quota,
+                "fetch_http",
+                _http_returning(200, {"five_hour": {"utilization": 4}}),
+            ),
         ):
             first = fetch_quota.fetch_claude()
             second = fetch_quota.fetch_claude()
@@ -2483,16 +2443,6 @@ class RefreshRunsOnceTest(unittest.TestCase):
                 "expires_in": 28800,
             }
 
-        def fake_http(
-            url: str,
-            headers: dict[str, str],
-            *,
-            timeout: float = 12.0,
-            data: bytes | None = None,
-            method: str | None = None,
-        ) -> tuple[int, object, object]:
-            return 200, {"five_hour": {"utilization": 4}}, None
-
         results: list[JsonDict] = []
 
         def run() -> None:
@@ -2500,7 +2450,11 @@ class RefreshRunsOnceTest(unittest.TestCase):
 
         with (
             patch.object(fetch_quota, "fetch_json", fake_json),
-            patch.object(fetch_quota, "fetch_http", fake_http),
+            patch.object(
+                fetch_quota,
+                "fetch_http",
+                _http_returning(200, {"five_hour": {"utilization": 4}}),
+            ),
         ):
             first = threading.Thread(target=run)
             first.start()

@@ -233,6 +233,13 @@ PlasmoidItem {
         return localeDateTimeStr(resetMs)
     }
 
+    // Every meter states its countdown the same way, so one phrasing lives
+    // here rather than in each row's delegate.
+    function resetsIn(resetMs) {
+        if (!resetMs) return ""
+        return qsTr("Resets in %1").arg(remainStr(resetMs))
+    }
+
     // Decimal separator, digit grouping, and the digits themselves follow the
     // user's locale, so a German reading gets "12,5" and a CJK or Arabic one
     // gets its own digits.
@@ -649,8 +656,7 @@ PlasmoidItem {
                                 util: root.claude && root.claude.session
                                     ? root.claude.session.util : null
                                 detail: root.claude && root.claude.session
-                                    ? qsTr("Resets in %1")
-                                        .arg(remainStr(root.claude.session.resets_ms))
+                                    ? resetsIn(root.claude.session.resets_ms)
                                     : ""
                                 subdetail: root.claude && root.claude.session
                                     ? resetAtStr(root.claude.session.resets_ms) : ""
@@ -675,10 +681,7 @@ PlasmoidItem {
                                     required property var modelData
                                     label: modelData.label || qsTr("Weekly")
                                     util: modelData.util
-                                    detail: modelData.resets_ms
-                                        ? qsTr("Resets in %1")
-                                            .arg(remainStr(modelData.resets_ms))
-                                        : ""
+                                    detail: resetsIn(modelData.resets_ms)
                                     subdetail: modelData.resets_ms
                                         ? resetAtStr(modelData.resets_ms) : ""
                                 }
@@ -761,10 +764,7 @@ PlasmoidItem {
                                         ? qsTr("%1 spend").arg(modelData.label || qsTr("usage"))
                                         : (modelData.label || qsTr("usage"))
                                     util: modelData.util
-                                    detail: modelData.resets_ms
-                                        ? qsTr("Resets in %1")
-                                            .arg(remainStr(modelData.resets_ms))
-                                        : ""
+                                    detail: resetsIn(modelData.resets_ms)
                                     subdetail: periodSubdetail(modelData)
                                 }
                             }
@@ -831,10 +831,7 @@ PlasmoidItem {
                                     required property var modelData
                                     label: modelData.label || qsTr("usage")
                                     util: modelData.util
-                                    detail: modelData.resets_ms
-                                        ? qsTr("Resets in %1")
-                                            .arg(remainStr(modelData.resets_ms))
-                                        : ""
+                                    detail: resetsIn(modelData.resets_ms)
                                     subdetail: modelData.resets_ms
                                         ? resetAtStr(modelData.resets_ms) : ""
                                 }
@@ -921,10 +918,7 @@ PlasmoidItem {
                                     label: qsTr("%1 limit")
                                         .arg(modelData.label || qsTr("usage"))
                                     util: modelData.util
-                                    detail: modelData.resets_ms
-                                        ? qsTr("Resets in %1")
-                                            .arg(remainStr(modelData.resets_ms))
-                                        : ""
+                                    detail: resetsIn(modelData.resets_ms)
                                     subdetail: periodSubdetail(modelData)
                                 }
                             }

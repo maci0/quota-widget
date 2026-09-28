@@ -150,6 +150,12 @@ def _http_retryable(status: int) -> bool:
     return status in (429, 503) or status >= 500
 
 
+def _http_error(status: int) -> JsonDict:
+    """Failure payload for a provider call. Status 0 is the fetcher's own code
+    for a request that never got a response, and reads as "net" to the panel."""
+    return {"ok": False, "error": f"http-{status}" if status else "net"}
+
+
 class ConfigError(ValueError):
     """A configuration value is unset-but-empty, unparsable, or out of range."""
 
@@ -347,13 +353,25 @@ class Config:
         }
 
 
-def _env_path(env: Mapping[str, str], name: str, default: Path) -> Path:
+def _env_value(env: Mapping[str, str], name: str) -> str | None:
+    """The stripped value of name, or None when it is unset.
+
+    Unset-but-empty is a config error, not a default: a variable exported
+    empty reads as a setting the user made and the fetcher would ignore.
+    """
     raw = env.get(name)
     if raw is None:
-        return default
+        return None
     value = raw.strip()
     if not value:
         raise ConfigError(f"{name} is set but empty")
+    return value
+
+
+def _env_path(env: Mapping[str, str], name: str, default: Path) -> Path:
+    value = _env_value(env, name)
+    if value is None:
+        return default
     path = Path(value).expanduser()
     if not path.is_absolute():
         raise ConfigError(f"{name} must be an absolute path, got {value!r}")
@@ -363,12 +381,9 @@ def _env_path(env: Mapping[str, str], name: str, default: Path) -> Path:
 def _env_number(
     env: Mapping[str, str], name: str, default: float, maximum: float
 ) -> float:
-    raw = env.get(name)
-    if raw is None:
+    value = _env_value(env, name)
+    if value is None:
         return default
-    value = raw.strip()
-    if not value:
-        raise ConfigError(f"{name} is set but empty")
     try:
         number = float(value)
     except ValueError as exc:
@@ -393,12 +408,9 @@ def _xdg_dir(env: Mapping[str, str], name: str, default: Path) -> Path:
 def _env_seconds(env: Mapping[str, str], name: str, default: int, maximum: int) -> int:
     """Whole seconds. A fraction would truncate to 0 and silently disable the
     cache the caller asked to shorten, so it is rejected instead."""
-    raw = env.get(name)
-    if raw is None:
+    value = _env_value(env, name)
+    if value is None:
         return default
-    value = raw.strip()
-    if not value:
-        raise ConfigError(f"{name} is set but empty")
     try:
         seconds = int(value)
     except ValueError as exc:
@@ -1097,7 +1109,7 @@ def fetch_claude() -> JsonDict:
             cached = _stale_cache("claude", account)
             if cached:
                 return cached
-        return {"ok": False, "error": f"http-{status}" if status else "net"}
+        return _http_error(status)
 
     plan = plan_label(oauth.get("subscriptionType"), oauth.get("rateLimitTier"))
     weekly = _claude_weekly(data)
@@ -1181,6 +1193,30 @@ def _token_expired(entry: JsonDict, skew_s: int = TOKEN_SKEW_S) -> bool:
     return when <= now_utc() + dt.timedelta(seconds=skew_s)
 
 
+def _post_refresh(url: str, refresh: str, client_id: str) -> JsonDict | None:
+    """Exchange a refresh token at a token endpoint, or None on any failure."""
+    body = urllib.parse.urlencode(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": client_id,
+        }
+    ).encode()
+    status, tok = fetch_json(
+        url,
+        {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        data=body,
+        method="POST",
+    )
+    if status != 200 or not isinstance(tok, dict) or not tok.get("access_token"):
+        return None
+    return tok
+
+
 def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
     """Refresh OIDC access token and persist the new tokens atomically."""
     with _refresh_lock():
@@ -1208,24 +1244,8 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
         if not isinstance(token_url, str) or not token_url:
             return None
 
-        body = urllib.parse.urlencode(
-            {
-                "grant_type": "refresh_token",
-                "refresh_token": refresh,
-                "client_id": client_id,
-            }
-        ).encode()
-        status, tok = fetch_json(
-            token_url,
-            {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-                "User-Agent": USER_AGENT,
-            },
-            data=body,
-            method="POST",
-        )
-        if status != 200 or not isinstance(tok, dict) or not tok.get("access_token"):
+        tok = _post_refresh(token_url, refresh, client_id)
+        if tok is None:
             return None
 
         new_entry = dict(entry)
@@ -1411,7 +1431,7 @@ def fetch_grok() -> JsonDict:
             cached = _stale_cache("grok", account)
             if cached:
                 return cached
-        return {"ok": False, "error": f"http-{status}" if status else "net"}
+        return _http_error(status)
 
     result = _reading({"ok": True, "plan": "Grok", "periods": periods})
     _write_provider_cache("grok", result, account)
@@ -1535,24 +1555,8 @@ def _refresh_codex(auth: JsonDict) -> JsonDict | None:
         if not refresh:
             return None
 
-        body = urllib.parse.urlencode(
-            {
-                "grant_type": "refresh_token",
-                "refresh_token": refresh,
-                "client_id": CODEX_CLIENT_ID,
-            }
-        ).encode()
-        status, tok = fetch_json(
-            CODEX_TOKEN_URL,
-            {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-                "User-Agent": USER_AGENT,
-            },
-            data=body,
-            method="POST",
-        )
-        if status != 200 or not isinstance(tok, dict) or not tok.get("access_token"):
+        tok = _post_refresh(CODEX_TOKEN_URL, refresh, CODEX_CLIENT_ID)
+        if tok is None:
             return None
 
         new_tokens = dict(tokens)
@@ -1638,7 +1642,7 @@ def fetch_codex() -> JsonDict:
             cached = _stale_cache("codex", account)
             if cached:
                 return cached
-        return {"ok": False, "error": f"http-{status}" if status else "net"}
+        return _http_error(status)
 
     plan_type = data.get("plan_type") or "Codex"
     plan = str(plan_type).replace("_", " ").title()
@@ -1993,9 +1997,9 @@ def fetch_cursor() -> JsonDict:
         cached = _stale_cache("cursor", account)
         if cached:
             return cached
-        return {"ok": False, "error": f"http-{status}"}
+        return _http_error(status)
     if status != 200 or not isinstance(data, dict):
-        return {"ok": False, "error": f"http-{status}" if status else "net"}
+        return _http_error(status)
 
     result = _reading(parse_cursor_summary(data, auth.get("plan")))
     _write_provider_cache("cursor", result, account)
