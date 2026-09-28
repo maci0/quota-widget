@@ -2677,13 +2677,18 @@ HELP = f"""{USAGE_LINE}
 
 Poll each configured provider's usage endpoint and print one JSON object on
 stdout. Plasmashell polls this script every 2 minutes, so stdout stays pure
-JSON: diagnostics go to stderr. The exit code is 0 whenever JSON was printed,
-including a config error (the JSON then carries "error": "config").
+JSON: diagnostics go to stderr.
 
 options:
   --print-config  print the resolved config (paths, knobs, key source) and exit
   --clear-cache   delete every cached reading and the account key, then exit
   -h, --help      print this help and exit
+
+exit codes:
+  0  a payload was printed, including a config error (the JSON then carries
+     "error": "config", so a poll that cannot run is still a poll the panel
+     can read) and a provider that raised (that one prints "error": "net")
+  2  an argument the fetcher does not take, named on stderr
 
 environment:
 {ENV_HELP}

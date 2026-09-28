@@ -101,6 +101,63 @@ class UnreleasedTest(unittest.TestCase):
                 self.assertIn("now", bullet, "a breaking entry must state the new one")
 
 
+class DocumentedContractTest(unittest.TestCase):
+    """The tables the release notes promise are in step with the code.
+
+    The Unreleased section tells a user that every knob is listed in the
+    README and that the widget settings are documented with their defaults.
+    Both are hand-written tables beside code that changes, so nothing but a
+    test keeps them true.
+    """
+
+    def setUp(self) -> None:
+        self.root = project_root()
+        self.readme = (self.root / "README.md").read_text(encoding="utf-8")
+
+    def _table_rows(self, header: str) -> list[list[str]]:
+        """The cells of every data row of the markdown table headed `header`."""
+        _, separator, table = self.readme.partition(f"| {header} |")
+        assert separator, f"README has no table headed {header}"
+        rows: list[list[str]] = []
+        for line in table.splitlines()[1:]:
+            if not line:
+                continue  # the blank line that closes the table
+            if not line.startswith("|"):
+                break
+            cells = [cell.strip().strip("`") for cell in line.split("|")[1:-1]]
+            if set(cells[0]) <= set("-: "):
+                continue  # the separator row under the header
+            rows.append(cells)
+        return rows
+
+    def test_readme_lists_every_knob_and_no_others(self) -> None:
+        documented = {
+            cells[0]
+            for cells in self._table_rows("Variable")
+            if cells[0].startswith("QUOTA_")
+        }
+        self.assertEqual(documented, set(fetch_quota.KNOWN_ENV))
+
+    def test_readme_settings_table_matches_main_xml(self) -> None:
+        config = self.root / "package" / "contents" / "config" / "main.xml"
+        main_xml = config.read_text(encoding="utf-8")
+        entries: dict[str, dict[str, str]] = {}
+        for block in re.findall(r"<entry\b.*?</entry>", main_xml, re.DOTALL):
+            found = re.search(r'name="([^"]+)"', block)
+            assert found is not None, block
+            bounds = dict(re.findall(r"<(default|min|max)>([^<]+)</\1>", block))
+            entries[found.group(1)] = bounds
+
+        rows = self._table_rows("Setting")
+        self.assertEqual({cells[0] for cells in rows}, set(entries))
+        for name, default, span, _meaning in rows:
+            with self.subTest(setting=name):
+                self.assertEqual(default, entries[name].get("default"))
+                low, high = entries[name].get("min"), entries[name].get("max")
+                if low is not None and high is not None:
+                    self.assertEqual(span, f"{low} to {high}")
+
+
 class DevDependencyRangeTest(unittest.TestCase):
     """Every gate tool is floored at a reviewed release and capped below its
     next major. `uv add` writes an uncapped range, and a re-lock that widens

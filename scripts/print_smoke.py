@@ -24,6 +24,12 @@ positional arguments:
 
 options:
   -h, --help  print this help and exit
+
+exit codes:
+  0  a summary was printed for every provider
+  1  the dump is missing, unreadable, or carries a config error (detail on
+     stderr; a config error prints nothing on stdout)
+  2  an argument that is not a dump path, named on stderr
 """
 
 

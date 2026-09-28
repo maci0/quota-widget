@@ -47,6 +47,11 @@ A release is: an entry in `CHANGELOG.md` under the new version, that version in
 that does it. The tag message states what changed for a user, not the commit
 list.
 
+The manifest version names the last tagged release, so a tree between releases
+reports that version to Plasma while carrying the `Unreleased` changes above
+it. Do not bump it early: `tests/test_release.py` fails on a version with no
+dated section in the changelog, which is what keeps the number a released one.
+
 Bump by what breaks an installed widget, not by how big the diff is. The fetcher
 JSON and the `main.xml` keys are the contract: a change to either that an older
 plasmoid or an older `main.xml` cannot read is a major, a new provider, gauge, or

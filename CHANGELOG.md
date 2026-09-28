@@ -10,6 +10,10 @@ and the `main.xml` config keys. Changes to either are listed as breaking, and a
 plasmoid installed from an older package can only read what its own fetcher
 prints, so a fetcher and UI shipped together never break each other.
 
+The `[1.0.0]` and `[1.1.0]` sections below were written after those tags: the
+1.1.0 tag (`release 1.1.0`) carries no changelog, so those two are a
+reconstruction of the release history, not a record written at the time.
+
 ## [Unreleased]
 
 Next release: 2.0.0. `CONTRIBUTING.md` classes a change to the fetcher JSON or
@@ -25,15 +29,25 @@ fails if a Breaking entry lands in this section without a matching next version.
   quietly doing nothing; now the run aborts with `error: "config"` before any
   provider is called, naming the variable, and the panel shows the
   configuration failure. Every name this version reads is listed by
-  `fetch_quota.py --help` and in the README table, and the two lists share one
-  table in the source. To upgrade: remove or rename any `QUOTA_WIDGET_*`
-  variable that is not in that list. A variable left over from a build older
-  than the one that dropped it is the usual cause; the fetcher names it.
+  `fetch_quota.py --help` and in the README table, and a test compares that
+  table against the fetcher's own list of knobs, so a knob that lands in one
+  and not the other fails the gate. To upgrade: remove or rename any
+  `QUOTA_WIDGET_*` variable that is not in that list. A variable left over from
+  a build older than the one that dropped it is the usual cause; the fetcher
+  names it.
 - A Cursor `403` is reported as `http-403`. Before, a rejected request was
   reported as `http-401`, which `errText()` renders as "Sign in to Cursor"; now
   it renders as "Unavailable", and a signed-out Cursor is still `http-401`. A
   consumer matching Cursor on `http-401` to mean a rejection matches
   `http-403` now.
+- A Claude session whose refresh token the provider rejected is reported as
+  `http-401`, not `http-429`. Before, any Claude `401` answered while a
+  refresh token was present was reported as `http-429`, so a revoked session
+  and a throttled refresh were one code; now the `429` label depends on the
+  refresh actually being throttled, and a rejected refresh asks for a fresh
+  sign-in. The card read "Rate-limited" on a revoked session until the user
+  cleared a sign-in line that never came. A consumer matching Claude on
+  `http-429` to mean "a refresh token was present" matches `http-401` now.
 
 ### Added
 
@@ -81,9 +95,10 @@ fails if a Breaking entry lands in this section without a matching next version.
   for tests and smoke runs.
 - `docs/THREAT_MODEL.md`: entry points, trust boundaries, assets, and the
   threats that apply to each, with file references.
-- `--help` on the fetcher and on `print_smoke.py`, listing the flags, the
-  environment variables, and the exit codes. Help is answered before the
-  environment is read, so it works on a broken config.
+- `--help` on the fetcher and on `print_smoke.py`, listing each one's flags,
+  the exit codes it can return, and (on the fetcher) the environment variables
+  it reads. Help is answered before the environment is read, so it works on a
+  broken config.
 - `install.sh --uninstall` removes the installed widget and leaves the provider
   cache and the plasmoid settings in place.
 - `fetch_quota.py --clear-cache` erases everything the widget keeps: the cached
@@ -210,11 +225,6 @@ fails if a Breaking entry lands in this section without a matching next version.
   already retired the stored refresh token. The pin is now bounded to the range
   `now_utc()` can represent, so an impossible clock is a config error like every
   other knob.
-- A Claude session whose refresh token the provider rejected was reported as
-  `http-429`, and the card read "Rate-limited" until the user cleared the sign-in
-  line that never came. The 429 label now depends on the refresh being
-  throttled, not on a refresh token merely being present, so a revoked session
-  asks for a fresh sign-in.
 - `spend.exponent`, `spend.currency`, `extra_usage.currency`, Codex
   `rate_limit.allowed`, and the Codex credit balance reached the widget JSON with
   whatever type and value the wire held. A `NaN`, an `Infinity`, or a non-string
