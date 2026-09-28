@@ -1,6 +1,6 @@
 # Agent Rules
 
-Inherits the universal rules in `../maci0/AGENTS.md`. Local notes below; they do not weaken parent rules.
+Inherits the universal rules in `~/.agents/AGENTS.md`. Local notes below; they do not weaken parent rules.
 
 ## What this is
 
@@ -16,10 +16,14 @@ Dev and CI use `uv` (`uv run pytest`, `uv run black`, `uv run ruff`, `uv run myp
 
 - `package/`: plasmoid (metadata, QML, fetcher)
 - `tests/`: pytest
-- `scripts/`: install helpers
+- `scripts/print_smoke.py`: prints a fetched JSON dump (`install.sh` writes `.scratch/smoke.json`)
+- `install.sh`: root symlink installer
 - `.scratch/`: gitignored local scratch (never `/tmp`)
 
 Project marker: `package/metadata.json`. Scripts walk up to that file.
+
+`install.sh` deletes `~/.local/share/plasma/plasmoids/com.maci.quota-widget` before
+symlinking. Run it only when the user asks to install or upgrade, never as a build or test step.
 
 ## Providers
 
