@@ -121,6 +121,20 @@ fails if a Breaking entry lands in this section without a matching next version.
 
 ### Changed
 
+- A cache directory that holds entries but no `account-salt` is reported in
+  the journal. That is what a restore which left the key behind, or a lost key,
+  looks like, and every entry in it reads as a miss, so the 429 fallback
+  quietly stopped working with nothing to say why. The line fires once, on the
+  poll that finds the directory in that state.
+- The README "Local state" table now names every file the widget writes,
+  including the ones it had left out: the per-installation account key, the two
+  lock files, and the plasmoid settings file, which is the only one of them
+  nothing in the widget can rebuild. A short recovery section says what a
+  restore has to take with it: `account-salt` travels with the cache entries,
+  since an entry whose key stayed behind is a reading the fetcher will not
+  serve, and a lock file does not travel at all. Nothing in the fetcher changed.
+  `StateInventoryTest` in `tests/test_fetch_quota.py` fails when a path the
+  fetcher writes has no row in that table.
 - The countdown under the panel reading takes its unit from the catalog
   instead of welding an English letter to a Latin digit. `2d 3h` read as
   English in every locale and left a translator nothing to change; the count

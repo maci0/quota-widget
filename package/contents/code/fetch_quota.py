@@ -471,6 +471,7 @@ MERGE_WRITE_ATTEMPTS = 3
 ENTRY_LOCK_WAIT_S = 5.0
 ENTRY_LOCK_POLL_S = 0.02
 ENTRY_LOCK_SUFFIX = ".lock"
+ENTRY_SUFFIX = ".json"
 # Meters kept from the structured `limits` array. The panel builds a gauge per
 # entry and keeps it until the next poll, so a list that grows with whatever
 # the API reports is memory the widget holds for the rest of the session.
@@ -1124,6 +1125,24 @@ def _install_salt(path: Path, salt: bytes) -> None:
     _fsync_dir(path.parent)
 
 
+def _orphan_entries(folder: Path) -> bool:
+    """Whether the cache holds an entry that no key on disk can scope.
+
+    A restore that brought the entries out of the directory and left the key
+    behind, or a key lost on its own, leaves readings whose digest was taken
+    under a key this run does not have. `_read_provider_cache` reports those
+    exactly as it reports another account's entry, so this is the only place
+    the difference is visible.
+    """
+    try:
+        names = [path.name for path in folder.iterdir()]
+    except OSError:
+        return False
+    return any(
+        name.endswith(ENTRY_SUFFIX) and not _is_lock_file(name) for name in names
+    )
+
+
 def _load_or_create_salt() -> bytes:
     folder = config().cache_dir
     path = folder / ACCOUNT_SALT_NAME
@@ -1140,6 +1159,12 @@ def _load_or_create_salt() -> bytes:
     fresh = os.urandom(ACCOUNT_SALT_BYTES)
     try:
         _private_dir(folder)
+        if _orphan_entries(folder):
+            warn(
+                f"{folder} holds cache entries but no {ACCOUNT_SALT_NAME}, so they "
+                "were taken under a key that is not here and this run cannot read "
+                "them; the panel falls back to a live poll with no other sign of it"
+            )
         _install_salt(path, fresh)
     except OSError as exc:
         # A cache directory that cannot be written holds no entries to scope
@@ -1241,7 +1266,7 @@ def _reading(payload: JsonDict) -> JsonDict:
 
 
 def _read_provider_cache(name: str, account: str | None) -> JsonDict | None:
-    path = config().cache_dir / f"{name}.json"
+    path = config().cache_dir / f"{name}{ENTRY_SUFFIX}"
     with _entry_lock(path):
         obj = _read_json_dict(path)
         if obj is None:
@@ -1305,7 +1330,7 @@ def _write_provider_cache(name: str, payload: JsonDict, account: str | None) -> 
     if not payload.get("ok") or account is None:
         return
     folder = config().cache_dir
-    path = folder / f"{name}.json"
+    path = folder / f"{name}{ENTRY_SUFFIX}"
     try:
         _private_dir(folder)
         # The stamp is the instant the reading was taken, not the one the write

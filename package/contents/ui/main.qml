@@ -540,7 +540,7 @@ PlasmoidItem {
             return errorMsg ? statusText() : qsTr("Loading")
         const failed = failedNames()
         if (failed.length)
-            lines.push(qsTr("No reading for: %1").arg(joinList(failed)))
+            lines.push(qsTr("No reading for: %1").arg(joinNames(failed)))
         return lines.join("\n")
     }
 
@@ -597,6 +597,13 @@ PlasmoidItem {
     function joinList(parts) {
         return parts.filter(s => s !== "").reduce(
             (a, b) => qsTr("%1, %2").arg(a).arg(b))
+    }
+
+    // The providers a poll has no reading for, as one list. The names are
+    // vendor marks, but the separator between them and their order in the
+    // sentence are the locale's, not a comma written here.
+    function joinNames(names) {
+        return names.reduce((a, b) => qsTr("%1, %2").arg(a).arg(b))
     }
 
     function topByUtil(rows) {

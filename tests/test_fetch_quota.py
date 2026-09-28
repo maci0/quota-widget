@@ -29,6 +29,7 @@ from typing import Any
 from unittest.mock import patch
 
 import fetch_quota
+from project_paths import project_root
 
 # Fixed clock for every test that cares about expiry or replay.
 PINNED_NOW_MS = 1_777_000_000_000
@@ -2187,6 +2188,40 @@ class AccountKeyTest(unittest.TestCase):
         with config_env(QUOTA_WIDGET_CACHE=str(cache)):
             installed = fetch_quota._load_or_create_salt()
         self.assertEqual(fetch_quota._salt_on_disk(key), installed)
+
+    def test_entries_without_their_key_are_reported(self) -> None:
+        # A cache directory restored without the key it scoped them under
+        # holds readings this run cannot serve, and a miss looks like any other
+        # miss, so the journal is the only place the cause can be named.
+        cache = Path(self.tmp.name) / "cache"
+        fetch_quota._private_dir(cache)
+        (cache / f"grok{fetch_quota.ENTRY_SUFFIX}").write_text("{}")
+        stderr = io.StringIO()
+        with config_env(QUOTA_WIDGET_CACHE=str(cache)):
+            with contextlib.redirect_stderr(stderr):
+                fetch_quota._load_or_create_salt()
+        self.assertIn(fetch_quota.ACCOUNT_SALT_NAME, stderr.getvalue())
+
+    def test_a_first_run_reports_nothing(self) -> None:
+        cache = Path(self.tmp.name) / "cache"
+        stderr = io.StringIO()
+        with config_env(QUOTA_WIDGET_CACHE=str(cache)):
+            with contextlib.redirect_stderr(stderr):
+                fetch_quota._load_or_create_salt()
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_a_lock_is_not_an_entry_without_a_key(self) -> None:
+        cache = Path(self.tmp.name) / "cache"
+        fetch_quota._private_dir(cache)
+        (
+            cache / f"grok{fetch_quota.ENTRY_SUFFIX}{fetch_quota.ENTRY_LOCK_SUFFIX}"
+        ).touch()
+        (cache / fetch_quota.REFRESH_LOCK_NAME).touch()
+        stderr = io.StringIO()
+        with config_env(QUOTA_WIDGET_CACHE=str(cache)):
+            with contextlib.redirect_stderr(stderr):
+                fetch_quota._load_or_create_salt()
+        self.assertEqual(stderr.getvalue(), "")
 
 
 class RedactionTest(unittest.TestCase):
@@ -4449,6 +4484,86 @@ class GrokTokenEndpointTest(unittest.TestCase):
                 f"https://{fetch_quota.GROK_OIDC_HOST}/oauth/token"
             )
         )
+
+
+class StateInventoryTest(unittest.TestCase):
+    """Every file the fetcher writes is named in the README's state inventory.
+
+    The widget takes no backup of anything, so the README table is the only
+    statement of what exists on disk and what losing it costs. A path added to
+    the code with no row there is state nobody knows to copy, so the rows are
+    checked against the resolved configuration instead of trusted.
+    """
+
+    # The table documents the defaults, so the config is resolved with the
+    # sandbox overrides and the ambient XDG values out of the way; otherwise
+    # the paths compared are the session's, not the documented ones.
+    DOCUMENTED_DEFAULTS = (
+        "QUOTA_WIDGET_HOME",
+        "QUOTA_WIDGET_CACHE",
+        "QUOTA_WIDGET_CLAUDE_CREDENTIALS",
+        "QUOTA_WIDGET_CODEX_AUTH",
+        "QUOTA_WIDGET_GROK_AUTH",
+        "QUOTA_WIDGET_CURSOR_AUTH",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+    )
+
+    def setUp(self) -> None:
+        readme = (project_root() / "README.md").read_text(encoding="utf-8")
+        start = readme.index("## Local state")
+        end = readme.index("\n## ", start + 1)
+        self.section = readme[start:end]
+
+    @contextlib.contextmanager
+    def documented_config(self) -> Iterator[fetch_quota.Config]:
+        saved = {name: os.environ.pop(name, None) for name in self.DOCUMENTED_DEFAULTS}
+        fetch_quota.load_config()
+        try:
+            yield fetch_quota.config()
+        finally:
+            for name, value in saved.items():
+                if value is not None:
+                    os.environ[name] = value
+            fetch_quota.load_config()
+
+    def test_readme_names_every_written_path(self) -> None:
+        with self.documented_config() as config:
+            home = config.home
+            cache = "~/" + config.cache_dir.relative_to(home).as_posix()
+            paths = [
+                "~/" + config.claude_cred.relative_to(home).as_posix(),
+                "~/" + config.codex_auth.relative_to(home).as_posix(),
+                "~/" + config.grok_auth.relative_to(home).as_posix(),
+                "~/" + config.cursor_auth.relative_to(home).as_posix(),
+                f"{cache}/{fetch_quota.ACCOUNT_SALT_NAME}",
+                f"{cache}/{fetch_quota.REFRESH_LOCK_NAME}",
+            ]
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertIn(path, self.section)
+
+    def test_the_entry_and_lock_patterns_are_named(self) -> None:
+        # The per-provider entries and the entry locks are written under a
+        # name the code composes, so the table names them as a pattern.
+        self.assertIn("~/.cache/quota-widget/*.json", self.section)
+        self.assertIn(fetch_quota.ENTRY_LOCK_SUFFIX, self.section)
+
+    def test_the_panel_settings_file_is_in_the_inventory(self) -> None:
+        # The one file here the widget cannot rebuild, and the only one whose
+        # loss costs the user something to set up again.
+        self.assertIn("com.maci.quota-widget.json", self.section)
+
+    def test_the_inventory_says_a_restored_entry_needs_its_key(self) -> None:
+        # A cache directory restored without the key it was scoped under holds
+        # readings the fetcher will not serve, and nothing reports that, so the
+        # section has to say the two travel together.
+        self.assertIn("account-salt", self.section)
+        self.assertIn("restore", self.section)
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 if __name__ == "__main__":

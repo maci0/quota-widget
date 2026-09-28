@@ -216,14 +216,21 @@ when the CLI stores it somewhere else.
 
 ## Local state
 
-The widget keeps two kinds of file on disk, both under your home directory:
+Everything the widget writes to disk, and what it costs to lose each:
 
 | Path | Contents | If lost |
 | --- | --- | --- |
 | `~/.cache/quota-widget/*.json` | Last successful usage payload per provider, used when an API call 429s, 5xxs, or does not reach the vendor | Nothing. Refills on the next successful poll. |
-| `~/.claude/.credentials.json`, `~/.grok/auth.json`, `~/.codex/auth.json` | Rotated OAuth tokens, written by the fetcher during a refresh | Re-run that CLI's login. The widget never creates these. |
+| `~/.cache/quota-widget/account-salt` | The per-installation key every entry's account digest is taken under | Nothing on its own. The next poll mints a new one, and every entry written under the old key stops matching, so the entries it scoped read as another account's and are ignored. |
+| `~/.cache/quota-widget/refresh.lock`, `~/.cache/quota-widget/*.json.lock` | Empty lock files, held open with `flock` while a poll is in its critical section | Nothing. Created again on the next poll. Never copy a lock: a copy of one is a file two polls can hold at once. |
+| `~/.config/plasmoids/org.kde.plasma.plasmoid/com.maci.quota-widget.json` | The widget settings above, written by plasmashell | Re-set them in Configure, or copy the file back. The widget cannot regenerate this one. |
+| `~/.claude/.credentials.json`, `~/.grok/auth.json`, `~/.codex/auth.json`, `~/.config/cursor/auth.json` | Rotated OAuth tokens, written by the fetcher during a refresh | Re-run that CLI's login. The widget never creates these, and it cannot restore them. |
 
 Token writes go through a temp file that is flushed and renamed, then the directory is flushed, so a crash leaves either the old tokens or the new ones. The token files are shared with the vendor CLIs: the fetcher re-reads and re-applies its refresh if a CLI writes the same file in between, so the two do not clobber each other's rotation. The cache files are disposable; deleting `~/.cache/quota-widget` costs one poll of 429 fallback.
+
+The widget backs nothing up itself, and there is no restore procedure to run: nothing here is authoritative except the token files, and those belong to the CLIs. A restore, if you make one, is two rules. Take the settings file, since nothing in the widget rebuilds it. If you take the cache directory, take `account-salt` out of it in the same copy, because an entry whose key stayed behind is a reading the fetcher will not serve, and the panel falls back to a live poll with no way to tell you why. Leave the lock files behind. Do not put the token files in a backup: to undo a leak there, revoke the session from the vendor's account page instead. The panel holds its copy of a reading in memory only, so a plasmashell restart drops it and the next poll refills it.
+
+`--clear-cache` is the one path that deletes in bulk, and it names what it removed on stdout. It takes the entries and `account-salt` together and leaves the locks; see the erasure section under [Data and privacy](#data-and-privacy).
 
 ## Data and privacy
 

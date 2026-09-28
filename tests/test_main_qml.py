@@ -213,6 +213,10 @@ class MainQmlLocalizationTest(unittest.TestCase):
         self.assertNotIn('join(", ")', QML_SOURCE)
         self.assertIn('qsTr("%1 · %2").arg(value).arg(when)', QML_SOURCE)
         self.assertIn('qsTr("%1, %2").arg(a).arg(b)', QML_SOURCE)
+        # The failed-provider line lists vendor marks, and the separator around
+        # them is as much the locale's as the sentence around the line is.
+        self.assertIn('qsTr("No reading for: %1").arg(joinNames(failed))', QML_SOURCE)
+        self.assertIn("function joinNames(names)", QML_SOURCE)
 
     def test_currency_codes_go_through_the_locale_formatter(self) -> None:
         # "67.63 SGD" is a Latin number with a code pasted after it. The

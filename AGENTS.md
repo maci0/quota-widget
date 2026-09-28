@@ -172,6 +172,24 @@ Two layers hold a last good reading: the fetcher writes `~/.cache/quota-widget/<
 - Claude is the one provider that refreshes before its usage call, so a 401 there is the vendor rejecting a token minted seconds earlier. It is a sign-out and is reported as one, cache or no cache: the entry is scoped by the same `sub`, so serving it would keep a revoked session looking healthy for the whole retention window. Only a 429 on the refresh itself makes the reading stand in (`rate_limited`), since that 401 is the expired access token and not the session.
 - Every entry carries `PAYLOAD_SCHEMA`. The panel reads a replayed payload field by field, so one written under another value is deleted unread; raise it when a provider payload changes shape, or an upgrade serves the previous one.
 
+## Recovery
+
+The widget backs up nothing and there is no restore procedure to run. Every
+file it writes is named in the README "Local state" table, and
+`StateInventoryTest` in `tests/test_fetch_quota.py` fails when a path the
+fetcher writes has no row there, so a new one cannot be added quietly.
+
+What that costs, per file, is what the table says: the entries and both locks
+rebuild on the next poll, the panel's copy of a reading is in memory and dies
+with plasmashell, and the plasmoid settings file is the one file the widget
+cannot regenerate. The vendor token files are the CLIs' own; the fetcher writes
+rotated tokens into them and a lost update there costs a CLI login, which no
+part of this repository can perform. A restore of the cache directory has to
+bring `account-salt` out of it in the same copy: an entry whose key stayed
+behind is a reading `_read_provider_cache` will not serve, and it reports the
+same as a miss, so the 429 fallback quietly stops working with nothing in the
+journal to say why. Never copy a `.lock` file into a restore.
+
 Nothing personal reaches a log, a cache, or the emitted JSON: no email or session token leaves the function that reads it, and a failed HTTP body is discarded rather than kept. Every line `warn()` prints, the traceback `warn_traceback()` writes, and the `config_error` the panel renders pass through `_redact`, which spells the home directory as `~` so the account name a path carries does not outlive the poll in the journal. A crash frame names a file under the checkout, so `traceback.print_exc()` is never the printer: it writes to stderr past the redaction. A failure the panel cannot tell apart, a refresh that ended in a rejected token and a refresh the vendor throttled, is named in `warn()` rather than left to the card, which shows the same "no-token" for both. `--print-config` is exempt: its whole output is the resolved paths, and the operator asked for it. The provider cache holds only what the UI renders, plus the hashed account id used to scope it. README's "Data and privacy" section is the user-facing statement of this; change it with the code.
 
 ## Gate
