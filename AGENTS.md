@@ -19,6 +19,7 @@ Dev and CI use `uv` (`uv run pytest`, `uv run black`, `uv run ruff`, `uv run myp
 ## Layout
 
 - `package/`: plasmoid (metadata, QML, fetcher, `contents/icons/com.maci.quota-widget.svg`)
+- `docs/THREAT_MODEL.md`: entry points, trust boundaries, assets, and the threats per boundary
 - `tests/`: pytest
 - `scripts/print_smoke.py`: prints a fetched JSON dump (`install.sh` writes `.scratch/smoke.json`)
 - `install.sh`: root symlink installer

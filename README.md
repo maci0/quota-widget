@@ -51,9 +51,9 @@ systemctl --user restart plasma-plasmashell.service
 | Codex | `GET https://chatgpt.com/backend-api/wham/usage` | Codex ChatGPT OAuth |
 | Grok | `GET https://cli-chat-proxy.grok.com/v1/billing` | Grok OIDC |
 
-Tokens leave the machine only for those HTTPS calls. Grok, Codex, and Claude OAuth tokens are refreshed in place when near expiry. Every provider rotates the refresh token it hands out, so refreshes run under an advisory lock in `~/.cache/quota-widget` and re-read the credential file once they hold it: a second poll (a second widget instance, a manual run, the install smoke test) reuses the token the first run already wrote instead of rotating it a second time and invalidating it.
+Tokens leave the machine only for those HTTPS calls, and for the OAuth token endpoints used to refresh them: `https://platform.claude.com/v1/oauth/token` (with `https://console.anthropic.com/v1/oauth/token` as fallback), `https://auth.openai.com/oauth/token`, and the token endpoint Grok's `https://auth.x.ai/.well-known/openid-configuration` document names. Grok, Codex, and Claude OAuth tokens are refreshed in place when near expiry. Every provider rotates the refresh token it hands out, so refreshes run under an advisory lock in `~/.cache/quota-widget` and re-read the credential file once they hold it: a second poll (a second widget instance, a manual run, the install smoke test) reuses the token the first run already wrote instead of rotating it a second time and invalidating it.
 
-Claude's usage API 429s unknown User-Agents. The fetcher sends Claude Code's User-Agent on that request, waits only for a short `Retry-After`, and reuses `~/.cache/quota-widget` when a usage call still 429s or 5xxs. Grok, Codex, and Cursor use that cache too. Each entry is stamped with the account that produced it and is read only by that account, for at most 24 hours; a credential that yields no account id caches nothing. An expired Claude token whose refresh is also 429 is shown as rate-limited, not signed-out.
+Claude's usage API 429s unknown User-Agents. The fetcher sends Claude Code's User-Agent on that request, waits only for a short `Retry-After`, and reuses `~/.cache/quota-widget` when a usage call still 429s or 5xxs. Grok, Codex, and Cursor use that cache too. Each entry is stamped with a digest of the account that produced it and is read only by that account, for at most 24 hours; a credential that yields no account id caches nothing. An expired Claude token whose refresh is also 429 is shown as rate-limited, not signed-out.
 
 Smoke-test without Plasma:
 
@@ -165,18 +165,20 @@ Token writes go through a temp file that is flushed and renamed, then the direct
 
 ## Data and privacy
 
-The widget is local-only. It has no telemetry, no analytics, no crash reporting, and no network calls other than the four usage endpoints above. It never sends a request to a server it does not already name in the fetching table.
+The widget is local-only. It has no telemetry, no analytics, no crash reporting, and no network calls other than the four usage endpoints and the OAuth token refreshes named in the fetching section above. It never sends a request to a server it does not already name there.
 
-What the fetcher reads from your account is what a usage bar needs: plan name, period percentages, reset times, and credit balances. Account identifiers (the WorkOS user id in the Cursor session, the ChatGPT account id header) are used to authorize a request and are not written to the cache, the emitted JSON, or any log. Nothing is written to a log at all; errors surface as a status code such as `http-429` on the card, and the body of a failed HTTP response is discarded rather than captured.
+What the fetcher reads from your account is what a usage bar needs: plan name, period percentages, reset times, and credit balances. Account identifiers (the WorkOS user id in the Cursor session, the ChatGPT account id header) are used to authorize a request. The raw value is never written to the cache, the emitted JSON, or any log; the cache stores a 16-character SHA-256 digest of it, which is what scopes an entry to one account. Nothing is written to a log at all; errors surface as a status code such as `http-429` on the card, and the body of a failed HTTP response is discarded rather than captured. `install.sh` writes one run's output to `.scratch/smoke.json` and the failure detail to `.scratch/smoke.err` in the checkout, both gitignored.
 
 Retention:
 
 | Data | Where | How long |
 | --- | --- | --- |
-| Usage payload cache | `~/.cache/quota-widget/*.json` | At most 24 hours (`CACHE_MAX_AGE_S`); an expired file is deleted when it is next read |
+| Usage payload cache | `~/.cache/quota-widget/*.json` | At most 24 hours (`DEFAULT_CACHE_MAX_AGE_S`, overridable with `QUOTA_WIDGET_CACHE_MAX_AGE_S`); an expired file is deleted when it is next read |
 | OAuth tokens | vendor token files above | Rotated by the vendor's own expiry, written back only on refresh |
 
-Both are written `0600` under your home directory. To erase everything the widget keeps, remove the cache directory and revoke the sessions from each vendor's account page; the token files belong to the CLIs, which rewrite them on the next login.
+Both are written `0600` under your home directory, and the cache directory is `0700`. To erase everything the widget keeps, remove the cache directory and revoke the sessions from each vendor's account page; the token files belong to the CLIs, which rewrite them on the next login.
+
+The full boundary, asset, and threat map is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Layout
 

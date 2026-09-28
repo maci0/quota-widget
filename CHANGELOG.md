@@ -17,6 +17,8 @@ prints, so a fetcher and UI shipped together never break each other.
 - `QUOTA_WIDGET_NOW_MS` pins the fetcher clock, so the same HTTP responses print
   byte-identical output on every run. Documented in the README, for tests and
   smoke runs.
+- `docs/THREAT_MODEL.md`: entry points, trust boundaries, assets, and the
+  threats that apply to each, with file references.
 
 ### Fixed
 
@@ -42,8 +44,15 @@ prints, so a fetcher and UI shipped together never break each other.
   Left silent, the next poll refreshed again and could sign the user out of the
   vendor CLI.
 - `QUOTA_WIDGET_NOW_MS` is validated at startup: a malformed value aborts with
-  `error: "config"` instead of raising mid-poll, and the Codex expiry check
-  reads the pinned clock.
+  `error: "config"` instead of raising mid-poll, and the Codex refresh and
+  expiry checks read the pinned clock, so a replayed poll makes the same
+  refresh decision on every run.
+- The refresh-race, replay, and error-body tests point the fetcher's
+  configuration at their temp files instead of module constants that no longer
+  exist.
+- The README no longer claims four network calls (there are also the OAuth token
+  refreshes), a two-hour cache (the window is 24 hours), or that the account id
+  is absent from the cache (it is stored as a digest).
 
 ### Changed
 

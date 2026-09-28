@@ -269,6 +269,19 @@ class ClockTest(unittest.TestCase):
         tokens = {"access_token": _jwt_with_exp(exp_s)}
         self.assertFalse(fetch_quota._codex_token_expired(tokens))
 
+    def test_codex_token_expiry_follows_the_pinned_clock(self) -> None:
+        # Every wall-clock read goes through now_ms(), so a replayed poll makes
+        # the same refresh decision on every run.
+        exp_s = (PINNED_NOW_MS // 1000) + 3600
+        self.assertFalse(
+            fetch_quota._codex_token_expired({"access_token": _jwt_with_exp(exp_s)})
+        )
+        self.assertTrue(
+            fetch_quota._codex_token_expired(
+                {"access_token": _jwt_with_exp((PINNED_NOW_MS // 1000) - 1)}
+            )
+        )
+
     def test_cache_expires_exactly_at_the_max_age(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -1016,15 +1029,16 @@ class ErrorBodyTest(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
         cred = Path(tmp.name) / "cred.json"
         cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+        os.environ["QUOTA_WIDGET_CLAUDE_CREDENTIALS"] = str(cred)
+        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CLAUDE_CREDENTIALS", None))
         body = b"account user_01ABC@example.com not found"
         out = io.StringIO()
         with (
-            patch.object(fetch_quota, "CLAUDE_CRED", cred),
             patch.object(urllib.request, "urlopen", side_effect=self._error(body)),
             contextlib.redirect_stdout(out),
             self.assertRaises(SystemExit),
         ):
-            fetch_quota.main()
+            fetch_quota.main([])
 
         self.assertNotIn("user_01ABC", out.getvalue())
         self.assertEqual(json.loads(out.getvalue())["claude"]["error"], "http-429")
