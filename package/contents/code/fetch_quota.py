@@ -596,9 +596,7 @@ def _reading(payload: JsonDict) -> JsonDict:
     return payload
 
 
-def _read_provider_cache(
-    name: str, account: str | None, max_age_s: int | None = None
-) -> JsonDict | None:
+def _read_provider_cache(name: str, account: str | None) -> JsonDict | None:
     path = config().cache_dir / f"{name}.json"
     try:
         obj = json.loads(_read_text(path))

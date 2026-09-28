@@ -8,6 +8,7 @@ import email.message
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -182,6 +183,95 @@ class CodexResetCreditsTest(unittest.TestCase):
         )
 
 
+class CodexCodeReviewWindowTest(unittest.TestCase):
+    """The code review meter arrives in two shapes; both render a bar."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.auth = Path(self.tmp.name) / "codex.json"
+        self.auth.write_text(
+            json.dumps({"tokens": {"access_token": _jwt_with_exp(4102444800)}})
+        )
+        env = config_env(
+            QUOTA_WIDGET_CACHE=self.tmp.name, QUOTA_WIDGET_CODEX_AUTH=str(self.auth)
+        )
+        env.__enter__()
+        self.addCleanup(env.__exit__, None, None, None)
+
+    def _fetch(self, body: JsonDict) -> JsonDict:
+        with patch.object(fetch_quota, "fetch_json", _http_returning_pair(200, body)):
+            return fetch_quota.fetch_codex()
+
+    def test_nested_windows_are_prefixed(self) -> None:
+        out = self._fetch(
+            {
+                "plan_type": "pro",
+                "code_review_rate_limit": {
+                    "primary_window": {
+                        "used_percent": 20,
+                        "limit_window_seconds": 604800,
+                    },
+                    "secondary_window": {
+                        "used_percent": 5,
+                        "limit_window_seconds": 18000,
+                    },
+                },
+            }
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(
+            [w["label"] for w in out["windows"]],
+            ["Code review · Weekly", "Code review · Current session"],
+        )
+        self.assertEqual([w["util"] for w in out["windows"]], [20.0, 5.0])
+
+    def test_flat_window_gets_its_own_label(self) -> None:
+        out = self._fetch(
+            {
+                "plan_type": "pro",
+                "code_review_rate_limit": {
+                    "used_percent": 42,
+                    "limit_window_seconds": 604800,
+                },
+            }
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(out["windows"]), 1)
+        self.assertEqual(out["windows"][0]["label"], "Code review")
+        self.assertEqual(out["windows"][0]["util"], 42.0)
+
+    def test_rate_windows_come_first_and_both_meters_survive(self) -> None:
+        out = self._fetch(
+            {
+                "plan_type": "pro",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10,
+                        "limit_window_seconds": 259200,
+                    }
+                },
+                "code_review_rate_limit": {"used_percent": 42},
+            }
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(
+            [w["label"] for w in out["windows"]],
+            ["3-day", "Code review"],
+        )
+
+    def test_a_malformed_review_meter_is_dropped_not_shown_as_zero(self) -> None:
+        # NaN is not 0% and not 100%; dropping the bar leaves the card honest.
+        out = self._fetch(
+            {
+                "plan_type": "pro",
+                "code_review_rate_limit": {"used_percent": float("nan")},
+            }
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["windows"], [])
+
+
 class RetryAfterTest(unittest.TestCase):
     def test_parses_delta_seconds(self) -> None:
         self.assertEqual(fetch_quota.parse_retry_after("2"), 2.0)
@@ -250,20 +340,27 @@ class ClockTest(unittest.TestCase):
     def test_cache_expires_exactly_at_the_max_age(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        os.environ["QUOTA_WIDGET_CACHE"] = tmp.name
-        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
+        # config_env reloads the config; setting the variable alone leaves
+        # config().cache_dir pointing at the module sandbox, and the entry this
+        # test writes then never lands where the deletion check looks for it.
+        env = config_env(QUOTA_WIDGET_CACHE=tmp.name)
+        env.__enter__()
+        self.addCleanup(env.__exit__, None, None, None)
+        entry = Path(tmp.name) / "grok.json"
         account = fetch_quota._account_id(_fake_jwt("user_01GROK"))
         fetch_quota._write_provider_cache("grok", {"ok": True, "plan": "Grok"}, account)
+        self.assertTrue(entry.exists())
 
         os.environ[fetch_quota.NOW_MS_ENV] = str(
             PINNED_NOW_MS + fetch_quota.DEFAULT_CACHE_MAX_AGE_S * 1000
         )
         self.assertIsNotNone(fetch_quota._read_provider_cache("grok", account))
+        self.assertTrue(entry.exists())
         os.environ[fetch_quota.NOW_MS_ENV] = str(
             PINNED_NOW_MS + (fetch_quota.DEFAULT_CACHE_MAX_AGE_S + 1) * 1000
         )
         self.assertIsNone(fetch_quota._read_provider_cache("grok", account))
-        self.assertFalse((Path(tmp.name) / "grok.json").exists())
+        self.assertFalse(entry.exists())
 
 
 def _fake_jwt(sub: str) -> str:
@@ -288,6 +385,20 @@ def _http_returning(status: int, body: object, hdrs: object = None) -> HttpFake:
         return status, body, hdrs
 
     return fake_http
+
+
+def _http_returning_pair(status: int, body: object) -> object:
+    def fake_json(
+        url: str,
+        headers: dict[str, str],
+        *,
+        timeout: float = 12.0,
+        data: bytes | None = None,
+        method: str | None = None,
+    ) -> tuple[int, object]:
+        return status, body
+
+    return fake_json
 
 
 class ClaudeRateLimitTest(unittest.TestCase):
@@ -670,6 +781,261 @@ class CursorParseTest(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["plan"], "Pro+")
         self.assertEqual(out["periods"][0]["util"], 10)
+
+
+class ClaudeLimitsArrayTest(unittest.TestCase):
+    """The structured `limits` list is what the API returns today. Session
+    entries must not become weekly bars, and a scoped entry is labelled by its
+    scope rather than by its kind."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cred = Path(self.tmp.name) / "cred.json"
+        cred.write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": _fake_jwt("user_01LIM")}})
+        )
+        env = config_env(
+            QUOTA_WIDGET_CACHE=self.tmp.name,
+            QUOTA_WIDGET_CLAUDE_CREDENTIALS=str(cred),
+        )
+        env.__enter__()
+        self.addCleanup(env.__exit__, None, None, None)
+
+    def _fetch(self, body: JsonDict) -> JsonDict:
+        with patch.object(fetch_quota, "fetch_http", _http_returning(200, body)):
+            return fetch_quota.fetch_claude()
+
+    def test_weekly_and_session_meters_come_from_one_list(self) -> None:
+        out = self._fetch(
+            {
+                "limits": [
+                    {
+                        "kind": "weekly_all",
+                        "percent": 12,
+                        "resets_at": "2026-05-02T14:11:55Z",
+                    },
+                    {
+                        "kind": "weekly_opus",
+                        "percent": 34,
+                        "scope": {"model": {"display_name": "Opus"}},
+                    },
+                    {
+                        "kind": "weekly_cowork",
+                        "percent": 56,
+                        "scope": {"surface": "Cowork"},
+                    },
+                    {
+                        "kind": "session",
+                        "percent": 78,
+                        "resets_at": "2026-05-02T15:00:00Z",
+                    },
+                ],
+                "five_hour": {"utilization": 11, "resets_at": "2026-05-02T12:00:00Z"},
+            }
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(
+            [w["label"] for w in out["weekly"]], ["All models", "Opus", "Cowork"]
+        )
+        self.assertEqual([w["util"] for w in out["weekly"]], [12.0, 34.0, 56.0])
+        self.assertEqual(out["session"]["util"], 78.0)
+        self.assertEqual(
+            out["session"]["resets_ms"],
+            fetch_quota.iso_to_ms("2026-05-02T15:00:00Z"),
+        )
+
+    def test_group_marks_an_entry_as_a_session(self) -> None:
+        # The key is "group" here, not "kind"; treating it as weekly would add a
+        # bar that resets in five hours.
+        out = self._fetch(
+            {"limits": [{"group": "session", "percent": 5}]},
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["weekly"], [])
+        self.assertEqual(out["session"]["util"], 5.0)
+
+    def test_an_entry_that_is_not_an_object_is_skipped(self) -> None:
+        out = self._fetch(
+            {
+                "limits": [
+                    "not an object",
+                    {"kind": "weekly_all", "percent": 7},
+                ]
+            }
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual([w["util"] for w in out["weekly"]], [7.0])
+
+    def test_an_unreadable_percent_leaves_no_reading_not_a_zero(self) -> None:
+        # The bar is real, the number is not: util stays absent so the panel
+        # shows nothing rather than a healthy 0%.
+        out = self._fetch({"limits": [{"kind": "weekly_all", "percent": "n/a"}]})
+        self.assertTrue(out["ok"])
+        self.assertEqual([w["util"] for w in out["weekly"]], [None])
+
+    def test_legacy_keys_are_used_when_there_is_no_list(self) -> None:
+        out = self._fetch(
+            {
+                "five_hour": {"utilization": 3},
+                "seven_day": {"utilization": 40, "resets_at": None},
+                "seven_day_opus": {"utilization": 60, "resets_at": None},
+            }
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual([w["label"] for w in out["weekly"]], ["All models", "Opus"])
+        self.assertEqual([w["util"] for w in out["weekly"]], [40.0, 60.0])
+        self.assertEqual(out["session"]["util"], 3.0)
+
+    def test_the_list_wins_over_the_legacy_keys(self) -> None:
+        # The two shapes never describe the same window, so mixing them would
+        # show a bar the provider is no longer reporting.
+        out = self._fetch(
+            {
+                "limits": [{"kind": "weekly_all", "percent": 12}],
+                "seven_day": {"utilization": 40},
+                "seven_day_opus": {"utilization": 60},
+            }
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual([w["util"] for w in out["weekly"]], [12.0])
+
+
+class CursorStateDbTest(unittest.TestCase):
+    """The IDE credential path. A user without cursor-agent's auth.json has a
+    session in state.vscdb and nothing else, so this is the only source they
+    have."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = Path(self.tmp.name) / "state.vscdb"
+
+    def _write_db(self, rows: dict[str, object], table: str = "ItemTable") -> None:
+        con = sqlite3.connect(self.db)
+        with con:
+            # A throwaway fixture: the durability the real vscdb needs would
+            # cost an fsync per test and buys this suite nothing.
+            con.execute("PRAGMA journal_mode = MEMORY")
+            con.execute("PRAGMA synchronous = OFF")
+            con.execute(f"CREATE TABLE {table} (key TEXT, value BLOB)")
+            con.executemany(
+                f"INSERT INTO {table} (key, value) VALUES (?, ?)",
+                [(k, v) for k, v in rows.items()],
+            )
+        con.close()
+
+    def test_reads_token_and_membership_from_the_db(self) -> None:
+        self._write_db(
+            {
+                "cursorAuth/accessToken": _fake_jwt("auth0|user_01IDB"),
+                "cursorAuth/stripeMembershipType": "ultra",
+            }
+        )
+        self.assertEqual(
+            fetch_quota._read_cursor_state_db(self.db),
+            (_fake_jwt("auth0|user_01IDB"), "ultra"),
+        )
+
+    def test_missing_membership_reads_as_empty(self) -> None:
+        self._write_db({"cursorAuth/accessToken": _fake_jwt("auth0|user_01IDB")})
+        token, plan = fetch_quota._read_cursor_state_db(self.db) or (None, None)
+        self.assertEqual(plan, "")
+        self.assertIsNotNone(token)
+
+    def test_quoted_and_bytes_cells_decode(self) -> None:
+        # VS Code stores a JSON-quoted string, and older builds a blob.
+        self._write_db({"cursorAuth/accessToken": '"auth0|user_01Q"'})
+        self.assertEqual(
+            fetch_quota._read_cursor_state_db(self.db), ("auth0|user_01Q", "")
+        )
+
+    def test_db_without_a_token_reads_as_nothing(self) -> None:
+        self._write_db({"cursorAuth/stripeMembershipType": "pro"})
+        self.assertIsNone(fetch_quota._read_cursor_state_db(self.db))
+
+    def test_a_locked_db_falls_back_to_opening_it_immutable(self) -> None:
+        # The IDE holds a write lock while it saves; the read must still work.
+        self._write_db({"cursorAuth/accessToken": _fake_jwt("auth0|user_01LOCK")})
+        real_connect = sqlite3.connect
+        seen: list[str] = []
+
+        def refusing_connect(
+            database: str,
+            timeout: float = 5.0,
+            check_same_thread: bool = True,
+            uri: bool = False,
+        ) -> sqlite3.Connection:
+            seen.append(database)
+            if "immutable=1" not in database:
+                raise sqlite3.OperationalError("database is locked")
+            return real_connect(
+                database, timeout=timeout, check_same_thread=check_same_thread, uri=uri
+            )
+
+        with patch.object(sqlite3, "connect", refusing_connect):
+            got = fetch_quota._read_cursor_state_db(self.db)
+
+        self.assertEqual(len(seen), 2)
+        self.assertNotIn("immutable=1", seen[0])
+        self.assertIn("immutable=1", seen[1])
+        self.assertEqual(got, (_fake_jwt("auth0|user_01LOCK"), ""))
+
+    def test_a_corrupt_db_reads_as_nothing_instead_of_raising(self) -> None:
+        self.db.write_bytes(b"not a sqlite database")
+        self.assertIsNone(fetch_quota._read_cursor_state_db(self.db))
+
+    def test_a_db_without_the_item_table_reads_as_nothing(self) -> None:
+        self._write_db({"k": "v"}, table="Other")
+        self.assertIsNone(fetch_quota._read_cursor_state_db(self.db))
+
+    def test_load_falls_through_to_the_db_when_auth_json_is_absent(self) -> None:
+        self._write_db(
+            {
+                "cursorAuth/accessToken": _fake_jwt("auth0|user_01IDB"),
+                "cursorAuth/stripeMembershipType": "pro",
+            }
+        )
+        env = config_env(
+            QUOTA_WIDGET_CACHE=self.tmp.name,
+            QUOTA_WIDGET_CURSOR_AUTH=str(Path(self.tmp.name) / "nope.json"),
+            QUOTA_WIDGET_CURSOR_STATE_DB=str(self.db),
+        )
+        env.__enter__()
+        self.addCleanup(env.__exit__, None, None, None)
+
+        loaded = fetch_quota._load_cursor_auth()
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded["sub"], "user_01IDB")
+        self.assertEqual(loaded["plan"], "pro")
+
+    def test_auth_json_wins_over_the_db(self) -> None:
+        # cursor-agent is refreshed on its own schedule; the IDE's copy can be
+        # a stale session, so the newer source is read first.
+        auth_json = Path(self.tmp.name) / "auth.json"
+        auth_json.write_text(
+            json.dumps({"accessToken": _fake_jwt("auth0|user_01AGENT")})
+        )
+        self._write_db(
+            {
+                "cursorAuth/accessToken": _fake_jwt("auth0|user_01IDB"),
+                "cursorAuth/stripeMembershipType": "ultra",
+            }
+        )
+        env = config_env(
+            QUOTA_WIDGET_CACHE=self.tmp.name,
+            QUOTA_WIDGET_CURSOR_AUTH=str(auth_json),
+            QUOTA_WIDGET_CURSOR_STATE_DB=str(self.db),
+        )
+        env.__enter__()
+        self.addCleanup(env.__exit__, None, None, None)
+
+        loaded = fetch_quota._load_cursor_auth()
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded["sub"], "user_01AGENT")
+        self.assertEqual(loaded["plan"], "")
 
 
 class IsoToMsTest(unittest.TestCase):
