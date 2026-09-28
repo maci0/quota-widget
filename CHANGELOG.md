@@ -12,8 +12,44 @@ prints, so a fetcher and UI shipped together never break each other.
 
 ## [Unreleased]
 
+Next release: 2.0.0. `CONTRIBUTING.md` classes a change to the fetcher JSON or
+to a `main.xml` key that an older installed widget cannot read as a major, and
+this window holds two of those, under Breaking below. `tests/test_release.py`
+fails if a Breaking entry lands in this section without a matching next version.
+
+### Breaking
+
+- A `QUOTA_WIDGET_*` variable the fetcher does not read is now a configuration
+  error instead of an ignored name. Before, a typo such as
+  `QUOTA_WIDGET_CASH` left the poll succeeding with the intended setting
+  quietly doing nothing; now the run aborts with `error: "config"` before any
+  provider is called, naming the variable, and the panel shows the
+  configuration failure. Every name this version reads is listed by
+  `fetch_quota.py --help` and in the README table, and the two lists share one
+  table in the source. To upgrade: remove or rename any `QUOTA_WIDGET_*`
+  variable that is not in that list. A variable left over from a build older
+  than the one that dropped it is the usual cause; the fetcher names it.
+- A Cursor `403` is reported as `http-403`. Before, a rejected request was
+  reported as `http-401`, which `errText()` renders as "Sign in to Cursor"; now
+  it renders as "Unavailable", and a signed-out Cursor is still `http-401`. A
+  consumer matching Cursor on `http-401` to mean a rejection matches
+  `http-403` now.
+
 ### Added
 
+- `QUOTA_WIDGET_HOME` relocates the home the other paths resolve against, and
+  `QUOTA_WIDGET_CLAUDE_CREDENTIALS`, `QUOTA_WIDGET_CURSOR_AUTH`,
+  `QUOTA_WIDGET_CURSOR_STATE_DB`, `QUOTA_WIDGET_CODEX_AUTH`, and
+  `QUOTA_WIDGET_GROK_AUTH` name a credential file each. Every one is read
+  through the same validated config as the rest and defaults to the path the
+  vendor CLI writes, so an unset variable changes nothing. Documented in the
+  README.
+- `QUOTA_WIDGET_HTTP_TIMEOUT` sets the per-request timeout, 0 < s <= 300,
+  default 12.
+- Three `main.xml` config keys, all with a default, so a config file written by
+  an older package reads them without a migration: `pollSeconds` (default 120,
+  clamped to 30 to 3600), `utilWarnAt` (default 70, 1 to 99), and
+  `utilCritAt` (default 90, 1 to 100). Documented in the README.
 - Seeded randomized fuzzing for the parsers that read untrusted input: the
   Cursor usage-summary body, the Cursor `ItemTable` cells, and vendor JWTs
   (`tests/test_fuzz_parsers.py`). A failure prints the seed that reproduces it.
@@ -74,11 +110,6 @@ prints, so a fetcher and UI shipped together never break each other.
   panel's, which kept a reading on screen for 24 h regardless. Each poll now
   reports the effective window as `cache_max_age_s` and the widget ages a kept
   reading against it.
-- A misspelled `QUOTA_WIDGET_*` variable was ignored exactly like an unset one,
-  so the poll succeeded and the setting did nothing. An unknown name in that
-  namespace is now a configuration error naming the offender. The knob list in
-  `--help` and the check share one table, so help cannot drift from what
-  `load_config` accepts.
 - `QUOTA_WIDGET_NOW_MS` accepted a negative value, dating every reading before
   the epoch.
 - A Grok `used`/`limit` pair whose percent overflows (`100 * 1.7e308`) printed
@@ -194,13 +225,12 @@ prints, so a fetcher and UI shipped together never break each other.
   version message on the first command.
 - The `error: "config"` payload no longer carries `fetched_ms`, since the clock
   override can be the value that failed. The panel falls back to its own clock.
+  No release carried the field on that payload, so this narrows a shape added
+  in this same window rather than removing one a user depends on.
 - CI pins `actions/checkout` and `astral-sh/setup-uv` to the commit behind
   their version tag, and Dependabot (`.github/dependabot.yml`) opens the bump,
   so a moved tag can no longer change what the gate runs. The uv cache is keyed
   on `uv.lock` explicitly rather than by the action's default glob.
-- A Cursor `403` is reported as `http-403` instead of `http-401`. A 401 renders
-  as "Sign in to Cursor", which a rejected request is not; a 403 renders as
-  "Unavailable".
 - The dev tools are floored at the release the tree was verified against
   (`black>=26.5,<27`, `mypy>=2.3,<3`, `pytest>=9.1,<10`, `ruff>=0.16,<1`). The
   old ranges admitted black 24 and 25, mypy 1.x, and pytest 8, so a re-lock

@@ -41,6 +41,66 @@ class VersionTest(unittest.TestCase):
         self.assertIn(self.plugin_version, released)
 
 
+def _semver(version: str) -> tuple[int, int, int]:
+    major, minor, patch = version.split(".")
+    return int(major), int(minor), int(patch)
+
+
+class UnreleasedTest(unittest.TestCase):
+    """CONTRIBUTING.md: a change to the fetcher JSON or to a `main.xml` key that
+    an older installed widget cannot read is a major. Nothing about the bump is
+    mechanical, so the changelog names the next version above its breaking
+    entries and this checks the two against each other."""
+
+    def setUp(self) -> None:
+        self.root = project_root()
+        changelog = (self.root / "CHANGELOG.md").read_text(encoding="utf-8")
+        start = changelog.index("## [Unreleased]")
+        end = changelog.index("\n## [", start + 1)
+        self.unreleased: str = changelog[start:end]
+        metadata = json.loads(
+            (self.root / "package" / "metadata.json").read_text(encoding="utf-8")
+        )
+        self.shipped: tuple[int, int, int] = _semver(metadata["KPlugin"]["Version"])
+
+    def _breaking_bullets(self) -> list[str] | None:
+        if "### Breaking" not in self.unreleased:
+            return None
+        section = self.unreleased.split("### Breaking", 1)[1]
+        section = re.split(r"^### ", section, maxsplit=1, flags=re.MULTILINE)[0]
+        return re.findall(r"^- (.+?)(?=\n- |\Z)", section, re.MULTILINE | re.DOTALL)
+
+    def test_breaking_entries_declare_a_next_major(self) -> None:
+        if self._breaking_bullets() is None:
+            self.skipTest("no breaking change pending")
+        match = re.search(
+            r"^Next release: (\d+\.\d+\.\d+)\.", self.unreleased, re.MULTILINE
+        )
+        assert match is not None, (
+            "the Unreleased section holds breaking changes but names no next "
+            "version; add a 'Next release: X.Y.Z.' line above them"
+        )
+        nxt = _semver(match.group(1))
+        self.assertGreater(
+            nxt, self.shipped, f"next release {match.group(1)} is not ahead"
+        )
+        self.assertGreater(
+            nxt[0], self.shipped[0], "a breaking change needs a major bump"
+        )
+
+    def test_breaking_entries_say_what_they_replace(self) -> None:
+        bullets = self._breaking_bullets()
+        if bullets is None:
+            self.skipTest("no breaking change pending")
+        self.assertTrue(bullets, "a Breaking heading with no entry under it")
+        for bullet in bullets or []:
+            with self.subTest(bullet=bullet[:40]):
+                self.assertIn(
+                    "Before", bullet, "a breaking entry must state the old way"
+                )
+                self.assertIn("now", bullet, "a breaking entry must state the new one")
+
+
 class DevDependencyRangeTest(unittest.TestCase):
     """Every gate tool is floored at a reviewed release and capped below its
     next major. `uv add` writes an uncapped range, and a re-lock that widens

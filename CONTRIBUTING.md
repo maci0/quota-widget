@@ -52,6 +52,12 @@ JSON and the `main.xml` keys are the contract: a change to either that an older
 plasmoid or an older `main.xml` cannot read is a major, a new provider, gauge, or
 config key with a default is a minor, anything else is a patch.
 
+A breaking change goes in the `Unreleased` section under `### Breaking`, states
+what it was before and what it is now, and names the next version in a
+`Next release: X.Y.Z.` line above it. `tests/test_release.py` fails when a
+`Breaking` entry ships without one, or when the version it names is not a major
+above the version in `package/metadata.json`.
+
 ## Adding a test
 
 `tests/test_fetch_quota.py` holds the fetcher tests, grouped in
