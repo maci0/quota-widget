@@ -643,6 +643,43 @@ class ClaudeRateLimitTest(unittest.TestCase):
             out = fetch_quota.fetch_claude()
         self.assertEqual(out, {"ok": False, "error": "http-429"})
 
+    def test_rejected_refresh_after_401_reports_signed_out(self) -> None:
+        # The refresh token itself is what was revoked: 401 from the token
+        # endpoint, so the card must ask the user to log in again rather than
+        # claim a rate limit that will never clear.
+        cred_path = fetch_quota.config().claude_cred
+        payload = json.loads(cred_path.read_text())
+        payload["claudeAiOauth"]["refreshToken"] = "old-refresh"
+        payload["claudeAiOauth"]["expiresAt"] = 1
+        cred_path.write_text(json.dumps(payload))
+
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            return 400, {"error": "invalid_grant"}
+
+        def fake_http(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object, object]:
+            return 401, {"error": {"type": "authentication_error"}}, None
+
+        with (
+            patch.object(fetch_quota, "fetch_json", fake_json),
+            patch.object(fetch_quota, "fetch_http", fake_http),
+        ):
+            out = fetch_quota.fetch_claude()
+        self.assertEqual(out, {"ok": False, "error": "http-401"})
+
     def test_spend_used_as_number_does_not_crash(self) -> None:
         body = {"five_hour": {"utilization": 4}, "spend": {"used": 12}}
         with patch.object(fetch_quota, "fetch_http", _http_returning(200, body)):
@@ -1826,6 +1863,22 @@ class ConfigTest(unittest.TestCase):
 
     def test_pinned_clock_must_be_epoch_ms(self) -> None:
         for bad in ("yesterday", "", "  ", "1.5", "-1"):
+            with (
+                self.subTest(bad=bad),
+                self.assertRaises(fetch_quota.ConfigError) as ctx,
+            ):
+                fetch_quota.load_config({"QUOTA_WIDGET_NOW_MS": bad})
+            self.assertIn("QUOTA_WIDGET_NOW_MS", str(ctx.exception))
+
+    def test_pinned_clock_must_be_a_real_date(self) -> None:
+        # now_utc() adds the pin as a timedelta, so a value past datetime's
+        # range raised mid-poll, after a refresh had already retired the old
+        # token. The pin is a knob like any other: it is rejected up front.
+        for bad in (
+            str(fetch_quota.MAX_PINNED_MS + 1),
+            "99999999999999999999",
+            "-1" + "0" * 20,
+        ):
             with (
                 self.subTest(bad=bad),
                 self.assertRaises(fetch_quota.ConfigError) as ctx,

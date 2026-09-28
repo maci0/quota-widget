@@ -123,6 +123,11 @@ JSON_ENCODING = "utf-8"
 # this and hash to the same account scope; left raw they are two accounts.
 NORMALIZATION_FORM: Literal["NFC"] = "NFC"
 
+# Bounds of the datetime range now_utc() can represent, in epoch-ms. A pinned
+# clock outside them is a config error, not a poll-time crash.
+MIN_PINNED_MS = -62_135_596_800_000  # 0001-01-01T00:00:00Z
+MAX_PINNED_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z
+
 # update(obj) mutates obj and returns the (key, value) pair that must survive.
 MergeUpdate: TypeAlias = Callable[[JsonDict], "tuple[str, Any]"]
 
@@ -174,6 +179,15 @@ def _pinned_ms(raw: str) -> int:
         ) from None
     if pinned < 0:
         raise ConfigError(f"{NOW_MS_ENV}={raw!r} is before the epoch")
+    # now_utc() adds the pin to the epoch as a timedelta, and so does every
+    # "now + expiry" calculation in a refresh. A pin past datetime's range
+    # raises there, mid-poll, after the token POST has already retired the old
+    # refresh token: the credential is rotated away and never written back.
+    if not MIN_PINNED_MS <= pinned <= MAX_PINNED_MS:
+        raise ConfigError(
+            f"{NOW_MS_ENV}={raw!r} is outside the representable date range "
+            f"[{MIN_PINNED_MS}, {MAX_PINNED_MS}] epoch-ms"
+        )
     return pinned
 
 
@@ -226,6 +240,14 @@ def _emittable(value: object) -> Any:
     string balances the QML documents, are passed through untouched.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return value
+    return _finite_number(value)
+
+
+def _amount(value: object) -> float | str | None:
+    """A wire amount the UI formats: a finite number, or the vendor's own
+    numeric string, which carries precision a float would round away."""
+    if isinstance(value, str):
         return value
     return _finite_number(value)
 
@@ -916,20 +938,26 @@ def _claude_expired(oauth: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool:
     return ts_ms <= now_ms() + skew_ms
 
 
-def _refresh_claude(cred: JsonDict) -> JsonDict | None:
-    """Refresh Claude Code OAuth and write the rotated tokens back."""
+def _refresh_claude(cred: JsonDict) -> tuple[JsonDict | None, bool]:
+    """Refresh Claude Code OAuth and write the rotated tokens back.
+
+    Returns the store to poll with, and whether the provider rate-limited the
+    refresh. The caller needs both: a usage call that comes back 401 after a
+    refresh the provider throttled is not a sign-out, while one that follows a
+    refresh the provider rejected is.
+    """
     with _refresh_lock():
         latest = _read_json_dict(config().claude_cred)
         if latest is not None:
             cred = latest
         oauth = cred.get("claudeAiOauth")
         if not isinstance(oauth, dict):
-            return None
+            return None, False
         refresh = oauth.get("refreshToken")
         if not isinstance(refresh, str) or not refresh:
-            return None
+            return None, False
         if not _claude_expired(oauth):
-            return cred  # a concurrent run rotated the token while we waited
+            return cred, False  # a concurrent run rotated it while we waited
 
         body = json.dumps(
             {
@@ -944,15 +972,17 @@ def _refresh_claude(cred: JsonDict) -> JsonDict | None:
             "User-Agent": USER_AGENT,
         }
         tok: Any = None  # OAuth token JSON; fields vary by host
+        rate_limited = False
         for url in CLAUDE_TOKEN_URLS:
             status, tok = fetch_json(url, headers, data=body, method="POST")
             if status == 200 and isinstance(tok, dict) and tok.get("access_token"):
                 break
             if status in (400, 401):
-                return None
+                return None, False
+            rate_limited = rate_limited or status == 429
             tok = None
         if not isinstance(tok, dict) or not tok.get("access_token"):
-            return None
+            return None, rate_limited
 
         new_oauth = dict(oauth)
         new_oauth["accessToken"] = tok["access_token"]
@@ -976,7 +1006,7 @@ def _refresh_claude(cred: JsonDict) -> JsonDict | None:
             # refreshes again and the CLI signs the user out.
             path = config().claude_cred
             warn(f"claude token rotated but {path} was not written: {exc}")
-        return new_cred
+        return new_cred, rate_limited
 
 
 def _claude_is_session(item: JsonDict) -> bool:
@@ -1063,8 +1093,9 @@ def fetch_claude() -> JsonDict:
         return {"ok": False, "error": "no-token"}
 
     refreshed_already = False
+    rate_limited = False
     if _claude_expired(oauth):
-        refreshed = _refresh_claude(cred)
+        refreshed, rate_limited = _refresh_claude(cred)
         refreshed_already = True
         if refreshed:
             cred = refreshed
@@ -1082,7 +1113,7 @@ def fetch_claude() -> JsonDict:
     }
     status, data, hdrs = fetch_http(CLAUDE_URL, headers)
     if status == 401 and not refreshed_already:
-        refreshed = _refresh_claude(cred)
+        refreshed, rate_limited = _refresh_claude(cred)
         if refreshed:
             oauth = _as_dict(refreshed.get("claudeAiOauth"))
             token = oauth.get("accessToken")
@@ -1100,8 +1131,10 @@ def fetch_claude() -> JsonDict:
         cached = _stale_cache("claude", account)
         if cached:
             return cached
-        # Refresh 429 with a still-valid refresh token is not a sign-out.
-        if oauth.get("refreshToken"):
+        # A refresh the provider throttled is not a sign-out, and one it
+        # rejected is: only the card subtitle tells those apart, and a user
+        # whose session was revoked has to be told to log in again.
+        if rate_limited:
             return {"ok": False, "error": "http-429"}
         return {"ok": False, "error": "http-401"}
     if status != 200 or not isinstance(data, dict):
@@ -1118,6 +1151,10 @@ def fetch_claude() -> JsonDict:
     extra = _as_dict(data.get("extra_usage"))
     spend = _as_dict(data.get("spend"))
     spend_used = _as_dict(spend.get("used"))
+    # The QML scales spend.used_minor by 10^exponent, so a wire value that is
+    # not a number cannot be passed on as-is: an Infinity there scales every
+    # extra-usage amount to Infinity in the card.
+    exponent = _finite_number(spend_used.get("exponent"))
 
     result = _reading(
         {
@@ -1141,7 +1178,7 @@ def fetch_claude() -> JsonDict:
                 "currency": _as_text(
                     spend_used.get("currency") or extra.get("currency")
                 ),
-                "exponent": _emittable(spend_used.get("exponent", 2)),
+                "exponent": 2.0 if exponent is None else exponent,
             },
         }
     )
@@ -1676,12 +1713,12 @@ def fetch_codex() -> JsonDict:
         {
             "ok": True,
             "plan": plan,
-            "allowed": rate.get("allowed"),
+            "allowed": bool(rate.get("allowed")),
             "limit_reached": bool(rate.get("limit_reached")),
             "windows": windows,
             "credits": {
                 "has_credits": bool(credits.get("has_credits")),
-                "balance": _emittable(credits.get("balance")),
+                "balance": _amount(credits.get("balance")),
                 "unlimited": bool(credits.get("unlimited")),
                 "overage_limit_reached": bool(credits.get("overage_limit_reached")),
             },

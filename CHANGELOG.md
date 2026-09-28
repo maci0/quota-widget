@@ -30,6 +30,21 @@ prints, so a fetcher and UI shipped together never break each other.
 
 ### Fixed
 
+- A `QUOTA_WIDGET_NOW_MS` past the year 9999 passed the config check and then
+  raised `OverflowError` inside every provider, after the Codex refresh POST had
+  already retired the stored refresh token. The pin is now bounded to the range
+  `now_utc()` can represent, so an impossible clock is a config error like every
+  other knob.
+- A Claude session whose refresh token the provider rejected was reported as
+  `http-429`, and the card read "Rate-limited" until the user cleared the sign-in
+  line that never came. The 429 label now depends on the refresh being
+  throttled, not on a refresh token merely being present, so a revoked session
+  asks for a fresh sign-in.
+- `spend.exponent`, `spend.currency`, `extra_usage.currency`, Codex
+  `rate_limit.allowed`, and the Codex credit balance reached the widget JSON with
+  whatever type and value the wire held. A `NaN`, an `Infinity`, or a non-string
+  currency there printed JSON plasmashell's parser rejects, blanking the view.
+  Each is checked like every other number the fetcher passes on.
 - The gate was red on a clean tree: `ruff` reported an unparameterized table
   name and a needless comprehension in the Cursor `state.vscdb` fixture. The
   table name is now checked against the names the fixture builds, so `CI` is
