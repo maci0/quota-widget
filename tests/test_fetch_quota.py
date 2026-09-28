@@ -564,7 +564,7 @@ class ClaudeRateLimitTest(unittest.TestCase):
     def test_offline_without_a_cache_entry_still_reports_net(self) -> None:
         with patch.object(fetch_quota, "fetch_http", _http_returning(0, None)):
             out = fetch_quota.fetch_claude()
-        self.assertEqual(_scoped(out), {"ok": False, "error": "net"})
+        self.assertEqual(_scoped(out), {"ok": False, "error": "net", "transient": True})
 
     def test_a_failure_names_the_account_it_was_made_for(self) -> None:
         # The panel keeps a reading through a blip, so it has to know whose
@@ -597,7 +597,9 @@ class ClaudeRateLimitTest(unittest.TestCase):
         with patch.object(fetch_quota, "fetch_http", fake):
             out = fetch_quota.fetch_claude()
         fake.hit(self, fetch_quota.CLAUDE_URL)
-        self.assertEqual(_scoped(out), {"ok": False, "error": "http-429"})
+        self.assertEqual(
+            _scoped(out), {"ok": False, "error": "http-429", "transient": True}
+        )
 
     def test_credential_without_account_id_writes_no_cache(self) -> None:
         cred_path = fetch_quota.config().claude_cred
@@ -617,7 +619,9 @@ class ClaudeRateLimitTest(unittest.TestCase):
         with patch.object(fetch_quota, "fetch_http", fake):
             out = fetch_quota.fetch_claude()
         fake.hit(self, fetch_quota.CLAUDE_URL)
-        self.assertEqual(_scoped(out), {"ok": False, "error": "http-429"})
+        self.assertEqual(
+            _scoped(out), {"ok": False, "error": "http-429", "transient": True}
+        )
 
     def test_short_retry_after_retries_once(self) -> None:
         sleeps: list[float] = []
@@ -707,7 +711,9 @@ class ClaudeRateLimitTest(unittest.TestCase):
         ):
             out = fetch_quota.fetch_claude()
         usage.hit(self, fetch_quota.CLAUDE_URL)
-        self.assertEqual(_scoped(out), {"ok": False, "error": "http-429"})
+        self.assertEqual(
+            _scoped(out), {"ok": False, "error": "http-429", "transient": True}
+        )
 
     def test_rejected_refresh_after_401_reports_signed_out(self) -> None:
         # The refresh token itself is what was revoked: 401 from the token
@@ -744,7 +750,9 @@ class ClaudeRateLimitTest(unittest.TestCase):
             patch.object(fetch_quota, "fetch_http", fake_http),
         ):
             out = fetch_quota.fetch_claude()
-        self.assertEqual(_scoped(out), {"ok": False, "error": "http-401"})
+        self.assertEqual(
+            _scoped(out), {"ok": False, "error": "http-401", "transient": False}
+        )
 
     def test_spend_used_as_number_does_not_crash(self) -> None:
         body = {"five_hour": {"utilization": 4}, "spend": {"used": 12}}
@@ -1471,15 +1479,19 @@ class GrokNoPeriodTest(unittest.TestCase):
 
     def test_ok_call_with_no_period_reports_the_failing_status(self) -> None:
         out = self._fetch(200, {"config": {"used": 5}}, 503)
-        self.assertEqual(_scoped(out), {"ok": False, "error": "http-503"})
+        self.assertEqual(
+            _scoped(out), {"ok": False, "error": "http-503", "transient": True}
+        )
 
     def test_signed_out_reports_401(self) -> None:
         out = self._fetch(401, None, 200)
-        self.assertEqual(_scoped(out), {"ok": False, "error": "http-401"})
+        self.assertEqual(
+            _scoped(out), {"ok": False, "error": "http-401", "transient": False}
+        )
 
     def test_offline_reports_net(self) -> None:
         out = self._fetch(0, None, 0)
-        self.assertEqual(_scoped(out), {"ok": False, "error": "net"})
+        self.assertEqual(_scoped(out), {"ok": False, "error": "net", "transient": True})
 
 
 class GrokAuthStoreTest(unittest.TestCase):
@@ -2326,6 +2338,70 @@ class TransientFailureTest(unittest.TestCase):
         self.assertTrue(fetch_quota._transient_failure(0))
 
 
+class FailurePayloadTest(unittest.TestCase):
+    """A failure carries the classification the panel acts on.
+
+    The panel keeps the card it holds through a transient failure and replaces
+    it on a final one, so that decision travels in the payload: the fetcher is
+    the only place that knows the rule, and the panel reading it back out of the
+    error code is how a code added later comes out final.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.auth = Path(self.tmp.name) / "codex.json"
+        self.auth.write_text(
+            json.dumps(
+                {
+                    "tokens": {
+                        "access_token": _jwt_with_exp(4102444800),
+                        "account_id": "acct_test",
+                    }
+                }
+            )
+        )
+        env = config_env(
+            QUOTA_WIDGET_CACHE=self.tmp.name, QUOTA_WIDGET_CODEX_AUTH=str(self.auth)
+        )
+        env.__enter__()
+        self.addCleanup(env.__exit__, None, None, None)
+
+    def _fetch(self, status: int) -> JsonDict:
+        fake = _http_returning_pair(status, None)
+        with patch.object(fetch_quota, "fetch_json", fake):
+            out = fetch_quota.fetch_codex()
+        fake.hit(self, fetch_quota.CODEX_USAGE_URL)
+        return out
+
+    def test_a_sign_out_is_final_and_names_its_account(self) -> None:
+        # The other three providers name the account a failure was made for, so
+        # the panel can tell this account's sign-in from another account's blip.
+        out = self._fetch(401)
+        self.assertEqual(
+            _scoped(out), {"ok": False, "error": "http-401", "transient": False}
+        )
+        self.assertIsInstance(out.get("account"), str)
+
+    def test_a_server_error_holds_the_card(self) -> None:
+        self.assertIs(self._fetch(503)["transient"], True)
+
+    def test_a_config_error_is_final(self) -> None:
+        # Nothing ran, so every provider is final: the panel replaces each card
+        # rather than ageing a reading against a window it never polled with.
+        out = io.StringIO()
+        with (
+            patch.dict(os.environ, {"QUOTA_WIDGET_CACHE_MAX_AGE_S": "0"}),
+            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(out),
+            self.assertRaises(SystemExit),
+        ):
+            fetch_quota.main([])
+        payload = json.loads(out.getvalue())
+        for provider in ("claude", "cursor", "grok", "codex"):
+            self.assertIs(payload[provider]["transient"], False, provider)
+
+
 class Utf8StreamTest(unittest.TestCase):
     """The journal and the payload are written as UTF-8 whatever the locale is.
 
@@ -2465,7 +2541,7 @@ class ProviderCrashTest(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             out = fetch_quota._safe_fetch("claude", boom)
-        self.assertEqual(_scoped(out), {"ok": False, "error": "net"})
+        self.assertEqual(_scoped(out), {"ok": False, "error": "net", "transient": True})
         logged = err.getvalue()
         self.assertIn("claude", logged)
         self.assertIn("meters exploded", logged)
@@ -3129,14 +3205,16 @@ class CursorFailureReportingTest(unittest.TestCase):
 
     def test_signed_out_still_reports_401(self) -> None:
         self.assertEqual(
-            _scoped(self._fetch_with_status(401)), {"ok": False, "error": "http-401"}
+            _scoped(self._fetch_with_status(401)),
+            {"ok": False, "error": "http-401", "transient": False},
         )
 
     def test_forbidden_reports_its_own_status(self) -> None:
         # 401 renders as "Sign in to Cursor"; a 403 is an edge rejection, so
         # reporting it as 401 sends the user to re-authenticate for nothing.
         self.assertEqual(
-            _scoped(self._fetch_with_status(403)), {"ok": False, "error": "http-403"}
+            _scoped(self._fetch_with_status(403)),
+            {"ok": False, "error": "http-403", "transient": False},
         )
 
     def test_an_unreadable_state_db_is_reported(self) -> None:

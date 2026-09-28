@@ -241,9 +241,12 @@ PlasmoidItem {
                 return oldv
             return newv
         }
-        const e = newv.error || ""
-        const transient = e === "net" || e === "exec"
-            || e.indexOf("429") >= 0 || e.indexOf("http-5") === 0
+        // The fetcher classifies the failure and says so in the payload, so the
+        // rule lives in one place. Reading it back out of the error code here
+        // is how a code added later comes out final and blanks a card on a rate
+        // limit. "exec" is the panel's own condition: the run produced no
+        // payload at all, so the fetcher never got to classify it.
+        const transient = newv.transient === true || newv.error === "exec"
         if (transient && oldv && oldv.ok && oldv.fetched_ms
                 && oldv.account && oldv.account === newv.account
                 && root.nowMs - oldv.fetched_ms <= root.staleKeepMs) {

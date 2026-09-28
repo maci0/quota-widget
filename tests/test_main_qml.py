@@ -345,6 +345,16 @@ class MainQmlPollingTest(unittest.TestCase):
         merge = QML_SOURCE.split("function mergeProv(", 1)[1].split("\n    }", 1)[0]
         self.assertIn("oldv.account && oldv.account === newv.account", merge)
 
+    def test_the_transient_call_is_the_fetchers(self) -> None:
+        # The panel re-derived "may this failure keep the card" from the error
+        # code, so a code added later read as final and blanked a card on a rate
+        # limit. The fetcher classifies the failure and says so in the payload;
+        # "exec" is the panel's own condition, where no payload arrived at all.
+        merge = QML_SOURCE.split("function mergeProv(", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("newv.transient === true", merge)
+        self.assertIn('newv.error === "exec"', merge)
+        self.assertNotIn("http-5", merge)
+
 
 class MainQmlDuplicateRunTest(unittest.TestCase):
     """A run the poll dropped for running long can still answer, and the

@@ -37,6 +37,12 @@ fails if a Breaking entry lands in this section without a matching next version.
 
 ### Added
 
+- Every failed provider payload carries `transient`, the fetcher's own
+  classification of whether a cached reading beats reporting the failure. The
+  panel re-derived that rule from the error code, so a code added later read as
+  final and blanked a card on a rate limit; it reads the flag now. `errText()`
+  and the card subtitles are unchanged, so a consumer reading `error` alone
+  sees the same codes as before.
 - `QUOTA_WIDGET_HOME` relocates the home the other paths resolve against, and
   `QUOTA_WIDGET_CLAUDE_CREDENTIALS`, `QUOTA_WIDGET_CURSOR_AUTH`,
   `QUOTA_WIDGET_CURSOR_STATE_DB`, `QUOTA_WIDGET_CODEX_AUTH`, and
@@ -72,6 +78,11 @@ fails if a Breaking entry lands in this section without a matching next version.
   a script reading stdout never learned its argument was wrong. The argument is
   checked before the environment, exits 2, and names the offending name, so
   `--print-config extra` no longer reports `--print-config` as unknown.
+- A Codex sign-out reported `http-401` with no account digest, the only failure
+  of the four that did not name the account it was made for, so the panel could
+  not tell this account's session ending from another account's blip. The digest
+  is taken from the token in hand before the call and travels on every Codex
+  failure, like the other three providers.
 - A poll the panel dropped for running long can still answer after the poll
   that replaced it, and its numbers are the older ones. The provider cache and
   the panel now keep the newer reading instead of rewinding to the late one, so

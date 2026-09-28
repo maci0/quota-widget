@@ -168,16 +168,33 @@ def _transient_failure(status: int) -> bool:
     return status == 0 or status in (429, 503) or status >= 500
 
 
+def _failure(
+    error: str, account: str | None = None, *, transient: bool = False
+) -> JsonDict:
+    """A provider failure payload, in the one shape every provider emits.
+
+    `transient` is the classification, not a hint: the panel decides whether a
+    failed poll keeps the card it holds by reading this flag. The fetcher is the
+    only place that knows the rule (see _transient_failure), and the panel
+    re-deriving it from the code text is how the two drift apart: a code added
+    later would silently read as final and blank a card on a rate limit.
+    """
+    out: JsonDict = {"ok": False, "error": error, "transient": transient}
+    if account is not None:
+        out["account"] = account
+    return out
+
+
 def _http_error(status: int, account: str | None) -> JsonDict:
     """Failure payload for a provider call. Status 0 is the fetcher's own code
     for a request that never got a response, and reads as "net" to the panel.
     A failure names the account it was made for like a success does, so the
     panel keeps the card scoped to the account that is still signed in."""
-    return {
-        "ok": False,
-        "error": f"http-{status}" if status else "net",
-        "account": account,
-    }
+    return _failure(
+        f"http-{status}" if status else "net",
+        account,
+        transient=_transient_failure(status),
+    )
 
 
 class ConfigError(ValueError):
@@ -1299,14 +1316,14 @@ def fetch_claude() -> JsonDict:
     cached reading instead, marked "stale".
     """
     if not config().claude_cred.is_file():
-        return {"ok": False, "error": "no-token"}
+        return _failure("no-token")
 
     try:
         cred = json.loads(_read_text(config().claude_cred))
         oauth = cred["claudeAiOauth"]
         token = oauth["accessToken"]
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
-        return {"ok": False, "error": "no-token"}
+        return _failure("no-token")
 
     refreshed_already = False
     rate_limited = False
@@ -1318,7 +1335,7 @@ def fetch_claude() -> JsonDict:
             oauth = _as_dict(cred.get("claudeAiOauth"))
             token = oauth.get("accessToken")
             if not isinstance(token, str) or not token:
-                return {"ok": False, "error": "no-token"}
+                return _failure("no-token")
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -1334,7 +1351,7 @@ def fetch_claude() -> JsonDict:
             oauth = _as_dict(refreshed.get("claudeAiOauth"))
             token = oauth.get("accessToken")
             if not isinstance(token, str) or not token:
-                return {"ok": False, "error": "no-token"}
+                return _failure("no-token")
             headers["Authorization"] = f"Bearer {token}"
             status, data, hdrs = fetch_http(CLAUDE_URL, headers)
     if status in (429, 503):
@@ -1351,8 +1368,8 @@ def fetch_claude() -> JsonDict:
         # rejected is: only the card subtitle tells those apart, and a user
         # whose session was revoked has to be told to log in again.
         if rate_limited:
-            return {"ok": False, "error": "http-429", "account": account}
-        return {"ok": False, "error": "http-401", "account": account}
+            return _failure("http-429", account, transient=True)
+        return _failure("http-401", account)
     if status != 200 or not isinstance(data, dict):
         return _fail_or_cached("claude", account, status)
 
@@ -1630,7 +1647,7 @@ def fetch_grok() -> JsonDict:
     """
     loaded = _load_grok_auth()
     if not loaded:
-        return {"ok": False, "error": "no-token"}
+        return _failure("no-token")
     auth_key, entry = loaded
 
     if _token_expired(entry):
@@ -1691,7 +1708,7 @@ def fetch_grok() -> JsonDict:
         # happened to answer 200 with a payload that had no period in it.
         status = next((s for s in (st_week, st_month) if s != 200), 0)
         if status == 401:
-            return {"ok": False, "error": "http-401", "account": account}
+            return _failure("http-401", account)
         return _fail_or_cached("grok", account, status)
 
     result = _reading(
@@ -1849,19 +1866,19 @@ def fetch_codex() -> JsonDict:
     by. A transient status serves the cached reading instead, marked "stale".
     """
     if not config().codex_auth.is_file():
-        return {"ok": False, "error": "no-token"}
+        return _failure("no-token")
 
     try:
         auth = json.loads(_read_text(config().codex_auth))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return {"ok": False, "error": "no-token"}
+        return _failure("no-token")
     if not isinstance(auth, dict):
-        return {"ok": False, "error": "no-token"}
+        return _failure("no-token")
 
     tokens = _as_dict(auth.get("tokens"))
     access = tokens.get("access_token")
     if not isinstance(access, str) or not access:
-        return {"ok": False, "error": "no-token"}
+        return _failure("no-token")
 
     account_id = tokens.get("account_id") or _jwt_claim(
         access, "https://api.openai.com/auth", "chatgpt_account_id"
@@ -1876,7 +1893,12 @@ def fetch_codex() -> JsonDict:
             access = tokens.get("access_token")
             account_id = tokens.get("account_id") or account_id
             if not isinstance(access, str) or not access:
-                return {"ok": False, "error": "no-token"}
+                return _failure("no-token")
+
+    # The digest is taken from the token in hand, before the call, so a
+    # failure names its account the way every other provider's does. The `sub`
+    # claim survives rotation, so a refresh yields the same scope.
+    account = _account_id(access, str(account_id) if account_id else None)
 
     def call(token: str) -> tuple[int, object]:
         headers = {
@@ -1892,15 +1914,16 @@ def fetch_codex() -> JsonDict:
     account = _account_id(access, str(account_id) if account_id else None)
     if status == 401:
         refreshed = _refresh_codex(auth)
-        if refreshed:
-            tokens = _as_dict(refreshed.get("tokens"))
-            access = tokens.get("access_token")
-            account_id = tokens.get("account_id") or account_id
-            if isinstance(access, str) and access:
-                account = _account_id(access, str(account_id) if account_id else None)
-                status, data = call(access)
-    if status == 401:
-        return {"ok": False, "error": "http-401", "account": account}
+        if not refreshed:
+            return _failure("http-401", account)
+        tokens = _as_dict(refreshed.get("tokens"))
+        access = tokens.get("access_token")
+        if not isinstance(access, str) or not access:
+            return _failure("http-401", account)
+        account_id = tokens.get("account_id") or account_id
+        account = _account_id(access, str(account_id) if account_id else None)
+        status, data = call(access)
+
     if status != 200 or not isinstance(data, dict):
         return _fail_or_cached("codex", account, status)
 
@@ -2245,7 +2268,7 @@ def fetch_cursor() -> JsonDict:
     """
     auth = _load_cursor_auth()
     if not auth:
-        return {"ok": False, "error": "no-token"}
+        return _failure("no-token")
 
     cookie = "WorkosCursorSessionToken=" + urllib.parse.quote(
         auth["sub"] + "::" + auth["token"], safe=""
@@ -2263,7 +2286,7 @@ def fetch_cursor() -> JsonDict:
         # Report the status the vendor sent. A 403 is an edge rejection of the
         # request, not a signed-out session, and labelling it 401 sends the
         # user to re-authenticate for nothing.
-        return {"ok": False, "error": f"http-{status}", "account": account}
+        return _failure(f"http-{status}", account)
     if status != 200 or not isinstance(data, dict):
         return _fail_or_cached("cursor", account, status)
 
@@ -2308,12 +2331,13 @@ def _safe_fetch(name: str, fetch: Callable[[], JsonDict]) -> JsonDict:
         return fetch()
     except Exception as exc:  # noqa: BLE001 (catch-all by design)
         # Plasmashell needs JSON every poll; one provider must not abort the rest.
-        # The panel reads "net" as transient and keeps its last good card, but
-        # the cause belongs in the journal: a bug here otherwise looks exactly
-        # like a dropped connection on the display.
+        # A provider that crashed is a transport failure as far as the panel is
+        # concerned, so the card it holds is kept, but the cause belongs in the
+        # journal: a bug here otherwise looks exactly like a dropped connection
+        # on the display.
         warn(f"provider {name} raised {type(exc).__name__}: {exc}")
         traceback.print_exc()
-        return {"ok": False, "error": "net"}
+        return _failure("net", transient=True)
 
 
 def _poll_stamp() -> int:
@@ -2360,13 +2384,12 @@ def main(argv: list[str] | None = None) -> None:
         warn(str(exc))
         emit(
             {
-                "ok": False,
-                "error": "config",
+                **_failure("config"),
                 "config_error": str(exc),
-                "claude": {"ok": False, "error": "config"},
-                "cursor": {"ok": False, "error": "config"},
-                "grok": {"ok": False, "error": "config"},
-                "codex": {"ok": False, "error": "config"},
+                "claude": _failure("config"),
+                "cursor": _failure("config"),
+                "grok": _failure("config"),
+                "codex": _failure("config"),
                 "fetched_ms": _poll_stamp(),
             }
         )
