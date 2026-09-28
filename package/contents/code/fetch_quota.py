@@ -203,8 +203,13 @@ def _transient_failure(status: int) -> bool:
     one, so a machine that is offline at the first poll of a session would
     otherwise show a blank card where the same reading is sitting on disk.
     A 401 or 403 is a decision by the vendor and is reported as one.
+
+    A body the fetcher refused to read is transient for the same reason a 5xx
+    is: the vendor answered, nothing about the answer can be measured, and the
+    next poll reads a real one. A kept reading beats a blank card, and the
+    journal says which body was refused.
     """
-    return status in {0, 429} or status >= 500
+    return status in {0, 429, UNREADABLE_BODY_STATUS} or status >= 500
 
 
 def _failure(
@@ -227,10 +232,16 @@ def _failure(
 def _http_error(status: int, account: str | None) -> JsonDict:
     """Failure payload for a provider call. Status 0 is the fetcher's own code
     for a request that never got a response, and reads as "net" to the panel.
-    A failure names the account it was made for like a success does, so the
-    panel keeps the card scoped to the account that is still signed in."""
+    UNREADABLE_BODY_STATUS is the other: the vendor answered, and the answer
+    was not one this module can measure. A failure names the account it was
+    made for like a success does, so the panel keeps the card scoped to the
+    account that is still signed in."""
+    if status == UNREADABLE_BODY_STATUS:
+        label = BAD_BODY_ERROR
+    else:
+        label = f"http-{status}" if status else "net"
     return _failure(
-        f"http-{status}" if status else "net",
+        label,
         account,
         transient=_transient_failure(status),
     )
@@ -511,6 +522,15 @@ MAX_SPEND_EXPONENT = 6
 # endless body, and plasmashell reads that into its own heap once a poll, every
 # poll, until the desktop session is killed by the OOM killer.
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+# The status the fetcher raises for itself when the vendor answered and the
+# body is not one this module can read: over the cap above, empty, or not JSON.
+# Passing the vendor's own 200 on would report a reading that was never
+# measured as a success, and the panel then names a status no HTTP client
+# sends. 599 is out of every range a vendor answers in; _transient_failure and
+# _http_error name it, and the panel has a wording of its own for it.
+UNREADABLE_BODY_STATUS = 599
+BAD_BODY_ERROR = "bad-body"
 
 # Host that serves the Grok OIDC discovery document. The document names the
 # token endpoint, and a refresh token is POSTed there, so an endpoint on any
@@ -1012,7 +1032,14 @@ def _merge_write_json(
     value survives keeps that refresh instead of dropping it on the floor, which
     would sign the user out of the CLI as well as the widget. base is the store the
     caller already holds, used when the file itself cannot be read.
+
+    An attempt that cannot read the store back and one whose value was replaced
+    are different failures with different fixes, so the last reason is kept and
+    named: "another writer" sends the operator looking at a race that is not
+    there, and a store that cannot be read at all is the reason the value did
+    not survive.
     """
+    reason = "another writer replaced the value each time"
     for _ in range(MERGE_WRITE_ATTEMPTS):
         try:
             current = json.loads(_read_text(path))
@@ -1024,18 +1051,16 @@ def _merge_write_json(
         _atomic_write_json(path, current)
         try:
             after = json.loads(_read_text(path))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            reason = f"the store could not be read back: {exc}"
             continue
         if isinstance(after, dict) and after.get(key) == value:
             return
     # A writer kept winning the race; it holds the rotated token itself, so the
     # tokens in memory stay usable for this poll. The write is lost either way,
-    # so name the file: the next poll otherwise repeats the refresh with no
-    # hint that the store is being contested.
-    warn(
-        f"gave up writing {path} after {MERGE_WRITE_ATTEMPTS} attempts; "
-        "another writer replaced the value each time"
-    )
+    # so name the file and the reason: the next poll otherwise repeats the
+    # refresh with no hint at what is going wrong.
+    warn(f"gave up writing {path} after {MERGE_WRITE_ATTEMPTS} attempts: {reason}")
 
 
 def _write_rotated_tokens(
@@ -1116,12 +1141,19 @@ def _load_or_create_salt() -> bytes:
     try:
         _private_dir(folder)
         _install_salt(path, fresh)
-    except OSError:
+    except OSError as exc:
         # A cache directory that cannot be written holds no entries to scope
         # either, so a key that lives only in this process costs no cache hit
         # and no scoping. It is still a key: the digest never leaves the run
         # that took it, and the next poll with a writable cache reads the
-        # file's instead.
+        # file's instead. The consequence is a cache no later poll can read
+        # back, so it is named rather than passed over: the same condition on
+        # the entry write is reported, and a poll that silently never keeps a
+        # reading looks exactly like four providers failing every time.
+        warn(
+            f"could not write the account key at {path}: {exc}; the digest is "
+            "drawn again on every poll, so cached readings are never read back"
+        )
         return fresh
     # Two polls can reach this together. Whatever is on disk when we look is
     # what the entries already written were taken under, so the file decides
@@ -1483,9 +1515,12 @@ def fetch_http(
 ) -> tuple[int, object, Message | None]:
     """Return (status, decoded JSON or None, response headers).
 
-    A transport failure is status 0. The cause reaches the journal, so an
-    offline panel is diagnosable without rerunning the fetcher by hand; it
-    never reaches stdout, which the panel parses as the only payload.
+    A transport failure is status 0. A body that arrived but is not a readable
+    reading is UNREADABLE_BODY_STATUS, never the vendor's own 200: a 200 with
+    no payload in it is not a success, and reporting it as one leaves the
+    panel reading a status no HTTP client sends. The cause reaches the journal,
+    so an offline panel is diagnosable without rerunning the fetcher by hand;
+    it never reaches stdout, which the panel parses as the only payload.
     """
     # Every caller passes either an https vendor constant or a token endpoint
     # _is_grok_token_url has already checked, so the scheme is settled before
@@ -1509,14 +1544,14 @@ def fetch_http(
                         f"{url} returned over {MAX_RESPONSE_BYTES} bytes; "
                         "the body was not read past the cap"
                     )
-                    return resp.status, None, hdrs
+                    return UNREADABLE_BODY_STATUS, None, hdrs
                 if not body:
-                    return resp.status, None, hdrs
+                    return UNREADABLE_BODY_STATUS, None, hdrs
                 try:
                     return resp.status, json.loads(body.decode("utf-8")), hdrs
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     warn(f"{url} returned {resp.status} with a non-JSON body")
-                    return resp.status, None, hdrs
+                    return UNREADABLE_BODY_STATUS, None, hdrs
         except urllib.error.HTTPError as e:
             # The error body can carry account identifiers (email, user id)
             # echoed back by the vendor. No caller reads it, so the body is
@@ -1599,15 +1634,22 @@ def _refresh_claude(cred: JsonDict) -> tuple[JsonDict | None, bool]:
         }
         tok: Any = None  # OAuth token JSON; fields vary by host
         rate_limited = False
+        last_status = 0
         for url in CLAUDE_TOKEN_URLS:
             status, tok = fetch_json(url, headers, data=body, method="POST")
+            last_status = status
             if status == 200 and isinstance(tok, dict) and tok.get("access_token"):
                 break
             if status in (400, 401):
+                warn(f"claude rejected the refresh at {url} with {status}")
                 return None, False
             rate_limited = rate_limited or status == 429
             tok = None
         if not isinstance(tok, dict) or not tok.get("access_token"):
+            warn(
+                "claude answered the refresh with "
+                f"{last_status or 'no response'} and no access token"
+            )
             return None, rate_limited
 
         new_oauth = dict(oauth)
@@ -1863,7 +1905,15 @@ def _token_expired(entry: JsonDict) -> bool:
 
 
 def _post_refresh(url: str, refresh: str, client_id: str) -> JsonDict | None:
-    """Exchange a refresh token at a token endpoint, or None on any failure."""
+    """Exchange a refresh token at a token endpoint, or None on any failure.
+
+    Every failure here reads the same to the caller, and the caller turns it
+    into a "no-token" or a 401 on the card, so the status that ended the
+    exchange is named here, once, or a throttled refresh and a revoked
+    credential are the same line in the journal. The endpoint is a vendor
+    constant or one _is_grok_token_url has constrained to https on the vendor
+    host, so it names no credential; the response body is never read.
+    """
     body = urllib.parse.urlencode(
         {
             "grant_type": "refresh_token",
@@ -1882,6 +1932,7 @@ def _post_refresh(url: str, refresh: str, client_id: str) -> JsonDict | None:
         method="POST",
     )
     if status != 200 or not isinstance(tok, dict) or not tok.get("access_token"):
+        warn(f"the token exchange at {url} answered {status or 'no response'}")
         return None
     return tok
 
@@ -1921,6 +1972,7 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
             {"Accept": "application/json", "User-Agent": USER_AGENT},
         )
         if not isinstance(discovery, dict):
+            warn(f"{GROK_OIDC_DISCOVERY} answered with no discovery document")
             return None
         token_url = discovery.get("token_endpoint")
         if not isinstance(token_url, str) or not _is_grok_token_url(token_url):
@@ -2811,11 +2863,21 @@ def _clear_cache() -> JsonDict:
 
     The locks stay: they carry nothing, and unlinking a file another poll has
     flocked would leave that poll holding a lock no later one can see.
+
+    A directory that cannot be listed is reported rather than raised out of
+    main(): the run's whole output is the list of what went, and an exception
+    here would leave plasmashell with no payload at all over a run the
+    operator started by hand and can retry.
     """
     folder = config().cache_dir
     removed: list[str] = []
     if folder.is_dir():
-        for path in sorted(folder.iterdir()):
+        try:
+            entries = sorted(folder.iterdir())
+        except OSError as exc:
+            warn(f"could not list {folder}: {exc}")
+            return {"cache_dir": str(folder), "removed": removed, "error": str(exc)}
+        for path in entries:
             if not path.is_file() or _is_lock_file(path.name):
                 continue
             try:
@@ -2878,7 +2940,10 @@ def main(argv: list[str] | None = None) -> None:
     if args == ["--print-config"]:
         emit({"ok": True, "config": cfg.describe()})
     if args == ["--clear-cache"]:
-        emit({"ok": True, **_clear_cache()})
+        cleared = _clear_cache()
+        # An unlistable directory is a failed erasure, not an empty one, and
+        # "ok" is what a script reading stdout keys its exit on.
+        emit({"ok": "error" not in cleared, **cleared})
 
     # A poll waits on network, not CPU: each provider is one or more HTTPS round
     # trips, so running them in turn made the panel wait the sum of every

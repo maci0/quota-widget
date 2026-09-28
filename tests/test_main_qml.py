@@ -697,6 +697,13 @@ class MainQmlStatusWordingTest(unittest.TestCase):
         self.assertIn('code.indexOf("http-5") === 0', self._err_text())
         self.assertIn('qsTr("Provider unavailable, retrying")', self._err_text())
 
+    def test_an_unreadable_body_is_not_a_vendor_status(self) -> None:
+        # The fetcher answers 599 when the provider replied and the body was
+        # not one it can read. It has to clear the http-5 branch, which would
+        # otherwise blame the provider's server for a body the fetcher refused.
+        self.assertIn('code === "bad-body"', self._err_text())
+        self.assertIn('qsTr("Unreadable response, retrying")', self._err_text())
+
     def test_the_panel_names_the_providers_it_has_no_reading_for(self) -> None:
         # The tooltip listed only the providers that answered, so a failed one
         # disappeared from the panel summary without a trace while the popup

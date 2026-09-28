@@ -2466,6 +2466,85 @@ class DurableWriteTest(unittest.TestCase):
             json.loads(self.path.read_text()), {"tokens": "new", "other": 2}
         )
 
+    def test_giving_up_names_the_read_failure_not_a_race(self) -> None:
+        # The store that cannot be read back and the writer that keeps winning
+        # have different fixes, and the second is the one the line used to
+        # name for both.
+        def put_tokens(store: dict[str, object]) -> tuple[str, object]:
+            store["tokens"] = "new"
+            return "tokens", "new"
+
+        def unreadable(self: Path, **kwargs: object) -> str:
+            raise PermissionError("denied")
+
+        with (
+            patch.object(Path, "read_text", unreadable),
+            contextlib.redirect_stderr(io.StringIO()) as journal,
+        ):
+            fetch_quota._merge_write_json(self.path, put_tokens)
+
+        line = journal.getvalue()
+        self.assertIn("could not be read back", line)
+        self.assertNotIn("another writer", line)
+
+
+class RefreshFailureIsNamedTest(unittest.TestCase):
+    """A refresh that ends in None is one line in the journal, not silence.
+
+    Every failure collapsed into the same return, and the card then reads
+    "no-token" or a 401, which is what a revoked credential looks like. A
+    throttled exchange and a rejected one are different problems and the
+    operator cannot tell them apart from the panel.
+    """
+
+    def test_a_throttled_exchange_names_the_status_it_got(self) -> None:
+        with (
+            patch.object(fetch_quota, "fetch_json", lambda *a, **k: (429, None)),
+            contextlib.redirect_stderr(io.StringIO()) as journal,
+        ):
+            self.assertIsNone(
+                fetch_quota._post_refresh(
+                    "https://auth.x.ai/oauth/token", "refresh", "client"
+                )
+            )
+
+        line = journal.getvalue()
+        self.assertIn("the token exchange at", line)
+        self.assertIn("429", line)
+
+    def test_a_claude_refresh_that_gets_no_token_names_the_status(self) -> None:
+        with (
+            patch.object(fetch_quota, "fetch_json", lambda *a, **k: (503, None)),
+            contextlib.redirect_stderr(io.StringIO()) as journal,
+        ):
+            store, rate_limited = fetch_quota._refresh_claude(
+                {"claudeAiOauth": {"refreshToken": "r", "expiresAt": 1}}
+            )
+
+        self.assertIsNone(store)
+        self.assertIs(rate_limited, False)
+        self.assertIn("503", journal.getvalue())
+
+
+class SaltInstallFailureTest(unittest.TestCase):
+    """A cache directory that cannot hold the key is named, not passed over."""
+
+    def test_the_reason_the_cache_is_never_reused_reaches_the_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+
+            def refused(folder: Path) -> None:
+                raise PermissionError("read-only file system")
+
+            with (
+                config_env(QUOTA_WIDGET_CACHE=str(Path(tmp) / "cache")),
+                patch.object(fetch_quota, "_private_dir", refused),
+                contextlib.redirect_stderr(io.StringIO()) as journal,
+            ):
+                salt = fetch_quota._load_or_create_salt()
+
+        self.assertEqual(len(salt), fetch_quota.ACCOUNT_SALT_BYTES)
+        self.assertIn("could not write the account key", journal.getvalue())
+
 
 class ConfigTest(unittest.TestCase):
     """Configuration is read once, validated, and never silently repaired."""
@@ -2837,6 +2916,32 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         self.assertEqual(json.loads(stdout.getvalue())["removed"], [])
         self.assertFalse(cache_dir.exists())
+
+    def test_clear_cache_reports_a_directory_it_cannot_list(self) -> None:
+        # Raising out of main() here left plasmashell with no payload at all
+        # over a run the operator started by hand, and the erasure did not
+        # happen. The payload says so instead, and ok is false.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cache_dir = Path(tmp.name) / "cache"
+        cache_dir.mkdir()
+        with config_env(QUOTA_WIDGET_CACHE=str(cache_dir)):
+
+            def refused(self: Path) -> Any:
+                raise PermissionError("denied")
+
+            with (
+                patch.object(Path, "iterdir", refused),
+                contextlib.redirect_stderr(io.StringIO()) as journal,
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    fetch_quota.main(["--clear-cache"])
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIs(payload["ok"], False)
+        self.assertIn("denied", payload["error"])
+        self.assertIn("could not list", journal.getvalue())
 
     def test_unknown_argument_exits_nonzero(self) -> None:
         stderr = io.StringIO()
@@ -4147,7 +4252,9 @@ class ResponseSizeCapTest(unittest.TestCase):
         ):
             status, body, _hdrs = fetch_quota.fetch_http("https://api.test/usage", {})
 
-        self.assertEqual(status, 200)
+        # The vendor's own 200 would report a reading that was never measured,
+        # and the panel would then name a status no HTTP client sends.
+        self.assertEqual(status, fetch_quota.UNREADABLE_BODY_STATUS)
         self.assertIsNone(body)
         self.assertEqual(
             resp.requested, [fetch_quota.MAX_RESPONSE_BYTES + 1], "read past the cap"
@@ -4189,6 +4296,57 @@ class ResponseSizeCapTest(unittest.TestCase):
         self.assertEqual(status, 429)
         self.assertIsNone(data)
         self.assertEqual(body.requested, [fetch_quota.MAX_RESPONSE_BYTES + 1])
+
+
+class UnreadableBodyTest(unittest.TestCase):
+    """A body the fetcher cannot read is its own failure, not a vendor 200.
+
+    A 200 with no reading behind it would be reported to the panel as a success
+    status, which no HTTP client sends, and a 5xx-range code would read as a
+    vendor outage when the vendor answered. The card is worth keeping instead:
+    the next poll reads a real body.
+    """
+
+    def _resp(self, payload: bytes) -> object:
+        class _Resp:
+            status = 200
+            headers: object = None
+
+            def read(self, size: int = -1) -> bytes:
+                return payload[:size] if size >= 0 else payload
+
+            def __enter__(self) -> object:
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+        return _Resp()
+
+    def _status(self, payload: bytes) -> int:
+        with (
+            patch.object(
+                urllib.request, "urlopen", lambda *a, **k: self._resp(payload)
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status, _body, _hdrs = fetch_quota.fetch_http("https://api.test/usage", {})
+        return status
+
+    def test_a_non_json_body_is_not_a_vendor_status(self) -> None:
+        self.assertEqual(
+            self._status(b"<html>nope</html>"), fetch_quota.UNREADABLE_BODY_STATUS
+        )
+
+    def test_an_empty_body_is_not_a_vendor_status(self) -> None:
+        self.assertEqual(self._status(b""), fetch_quota.UNREADABLE_BODY_STATUS)
+
+    def test_the_payload_names_the_condition_and_keeps_the_card(self) -> None:
+        payload = fetch_quota._http_error(fetch_quota.UNREADABLE_BODY_STATUS, "acc")
+
+        self.assertEqual(payload["error"], "bad-body")
+        self.assertIs(payload["transient"], True)
+        self.assertEqual(payload["account"], "acc")
 
 
 class CacheDirModeTest(unittest.TestCase):

@@ -557,6 +557,12 @@ PlasmoidItem {
         // failed, so the panel must not say it did.
         if (code === "exec") return qsTr("Quota poll did not run")
         if (code === "http-429") return qsTr("Rate-limited")
+        // The provider answered and the fetcher could not read the body (over
+        // its size cap, empty, or not JSON). Nothing about the account is
+        // wrong and nothing is known about the reading, so it is neither the
+        // vendor's fault to report nor "no data" to show: the next poll is the
+        // fix, the same as a dropped connection.
+        if (code === "bad-body") return qsTr("Unreadable response, retrying")
         // The fetcher passes every status through as "http-<code>", so the two
         // families left get their own wording rather than one "Unavailable"
         // that reads the same whichever vendor answered and leaves the user

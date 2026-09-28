@@ -48,6 +48,14 @@ fails if a Breaking entry lands in this section without a matching next version.
   sign-in. The card read "Rate-limited" on a revoked session until the user
   cleared a sign-in line that never came. A consumer matching Claude on
   `http-429` to mean "a refresh token was present" matches `http-401` now.
+- A provider that answers with a body the fetcher cannot read (over the 4 MiB
+  cap, empty, or not JSON) is reported as `bad-body`, not as the status the
+  vendor sent. Before, a `200` carrying no reading behind it reached the panel
+  as `http-200`, a code no HTTP client sends, and it read as final, so a card
+  was blanked on a response the next poll would have read. It is `bad-body` now,
+  it carries `transient` like a `5xx` or a dropped connection, and `errText()`
+  renders it as "Unreadable response, retrying". A consumer matching the other
+  codes (`no-token`, `net`, `http-<code>`) is unaffected.
 
 ### Added
 
@@ -180,6 +188,25 @@ fails if a Breaking entry lands in this section without a matching next version.
   reports the budget its timeout adds up to as `poll_timeout_s`, and the panel
   waits for the longer of that and its own default. The default watchdog is
   unchanged for every timeout that fitted inside it.
+- A token refresh that failed for any reason left the journal with no line at
+  all, so a throttled exchange and a revoked credential reached the operator as
+  the same card ("no-token" or a `401`) and neither could be diagnosed without
+  rerunning the fetcher by hand. The exchange now names the status it got, at
+  the vendor token endpoint and for the Claude refresh that walks two of them.
+- A cache directory the account key could not be written to was passed over in
+  silence. The poll still worked, but a key redrawn on every run scopes every
+  entry differently, so no cached reading was ever read back, and a widget that
+  never kept a reading looked exactly like four providers failing every poll.
+  The reason is now in the journal, as it already was for the entry write.
+- `fetch_quota.py --clear-cache` raised out of `main()` on a cache directory it
+  could not list, which left plasmashell with no payload at all and printed a
+  traceback instead of the erasure the operator asked for. It reports the
+  directory in the payload with `ok: false`, and names the reason in the
+  journal.
+- Giving up on a token store after three merge attempts reported "another
+  writer replaced the value each time" whatever the reason was, sending the
+  operator after a race that was not there when the store simply could not be
+  read back. The line names the reason it stopped for.
 - A Grok token refresh raised `OverflowError` when the new expiry fell past the
   last instant the calendar holds, which is what a `QUOTA_WIDGET_NOW_MS` at the
   ceiling the fetcher accepts, or a lifetime far longer than the calendar, both
