@@ -277,6 +277,22 @@ fails if a Breaking entry lands in this section without a matching next version.
 
 ### Changed
 
+- The panel widget can be opened by an assistive technology, not only by a
+  click or a key: the compact reading carries an accessible press action, so a
+  screen reader that lands on it has something to activate. The two readings it
+  draws are left out of the accessible tree, since the button's description
+  already carries them and they were read a second time.
+- A poll that fails, and the poll that clears the failure, are announced
+  (`Accessible.announce`, Qt 6.8). The banner and the cards change in place
+  where a screen reader is not looking, so in the panel a rate limit or an
+  expired sign-in used to arrive in silence. The same wording twice in a row
+  is not repeated.
+- The gauge/list switch says which view it is in (`Accessible.checked`) and
+  takes focus with the popup, so the widget is reachable by keyboard once it
+  opens. The two icon-only toolbar buttons meet a 24 px target.
+- A card marked "cached" explains itself in its accessible description as well
+  as in its hover tooltip, and the meter fill is left out of the accessible
+  tree like the track beside it.
 - The three text sizes the widget draws (the panel reading, a card title, the
   number inside a gauge) are named steps in the `main.qml` token block instead
   of three unrelated factors typed at their call sites, and the panel reading is

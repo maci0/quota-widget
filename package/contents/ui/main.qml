@@ -59,6 +59,10 @@ PlasmoidItem {
     readonly property int markThickness: 3
     readonly property int barThickness: 8
 
+    // The smallest edge a pointer or a finger has to land on. An icon-only
+    // toolbar button is sized by its icon, which is under this (WCAG 2.5.8).
+    readonly property int minTargetPx: 24
+
     // Type scale, as multiples of the theme body size. The panel reading is
     // the largest text the widget draws (it is the only text a panel shows),
     // a card title sits one step below it, and the number inside a gauge
@@ -507,6 +511,11 @@ PlasmoidItem {
         Accessible.role: Accessible.Button
         Accessible.name: qsTr("AI Quota")
         Accessible.description: root.tooltipBody()
+        // The key handlers below open the widget for a sighted keyboard user.
+        // An assistive technology activates the item through its accessible
+        // action instead, and without one the panel button is announced and
+        // then does nothing.
+        Accessible.onPressAction: root.expanded = !root.expanded
         Keys.onSpacePressed: root.expanded = !root.expanded
         Keys.onReturnPressed: root.expanded = !root.expanded
         Keys.onEscapePressed: root.expanded = false
@@ -519,6 +528,9 @@ PlasmoidItem {
             border.width: 2
             border.color: Kirigami.Theme.focusColor
             visible: compact.activeFocus
+            // The focus ring is the visual echo of a state the item above
+            // already carries; it has nothing to say of its own.
+            Accessible.ignored: true
         }
 
         ColumnLayout {
@@ -559,6 +571,10 @@ PlasmoidItem {
                 font.pointSize: Kirigami.Theme.defaultFont.pointSize * root.panelValueScale
                 font.features: { "tnum": 1 }
                 horizontalAlignment: Text.AlignHCenter
+                // The button's description is tooltipBody(), which already
+                // carries these numbers, so a reader that also walked the
+                // labels would hear every provider twice.
+                Accessible.ignored: true
             }
             PlasmaComponents3.Label {
                 Layout.alignment: Qt.AlignHCenter
@@ -584,12 +600,14 @@ PlasmoidItem {
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
                 font.features: { "tnum": 1 }
                 horizontalAlignment: Text.AlignHCenter
+                Accessible.ignored: true
             }
             Rectangle {
                 Layout.fillWidth: true
                 Layout.topMargin: root.tightSpacing
                 Layout.preferredHeight: root.ruleThickness
                 color: root.primaryMarkColor()
+                Accessible.ignored: true
             }
         }
     }
@@ -624,6 +642,18 @@ PlasmoidItem {
                         text: root.gaugeView ? qsTr("List view") : qsTr("Gauge view")
                         display: PlasmaComponents3.AbstractButton.IconOnly
                         onClicked: Plasmoid.configuration.gaugeView = !root.gaugeView
+                        // The popup opens on a click, which leaves focus on
+                        // the panel, so nothing inside it would be reachable
+                        // by Tab. This is the first control in reading order
+                        // and takes focus with the popup.
+                        focus: true
+                        Layout.minimumWidth: root.minTargetPx
+                        Layout.minimumHeight: root.minTargetPx
+                        // The two views look identical from the button, so the
+                        // state it is in is the only thing a screen reader can
+                        // read (WCAG 4.1.2).
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.checked: root.gaugeView
                         PlasmaComponents3.ToolTip.text: root.gaugeView
                             ? qsTr("List view") : qsTr("Gauge view")
                         PlasmaComponents3.ToolTip.visible: hovered || visualFocus
@@ -633,6 +663,9 @@ PlasmoidItem {
                         visible: root.userRefreshing
                         implicitWidth: Kirigami.Units.gridUnit
                         implicitHeight: Kirigami.Units.gridUnit
+                        // A spinner on its own says nothing over speech.
+                        Accessible.role: Accessible.ProgressBar
+                        Accessible.name: qsTr("Refreshing")
                     }
                     PlasmaComponents3.ToolButton {
                         icon.name: "view-refresh"
@@ -648,6 +681,8 @@ PlasmoidItem {
                             root.userRefreshing = true
                             exec.poll()
                         }
+                        Layout.minimumWidth: root.minTargetPx
+                        Layout.minimumHeight: root.minTargetPx
                         PlasmaComponents3.ToolTip.text: root.fetching
                             ? qsTr("Refreshing…") : qsTr("Refresh now")
                         PlasmaComponents3.ToolTip.visible: hovered || visualFocus
@@ -1031,6 +1066,28 @@ PlasmoidItem {
         return (p && p.ok && p.stale) ? " · " + qsTr("cached") : ""
     }
 
+    // What the "cached" mark means. "cached" on its own is a word about the
+    // fetch, not about the number, and the subtitle is the only place it lands.
+    function staleNote() {
+        return qsTr("Last known reading; the latest poll failed")
+    }
+
+    // A poll ends where a screen reader is not looking: the banner and the
+    // cards change in place, so a failure arrives silently (WCAG 4.1.3).
+    // The same wording twice in a row is not repeated, since a poll runs
+    // every pollSeconds and a rate limit outlasts several of them.
+    property string announced: ""
+    onErrorMsgChanged: root.announceStatus()
+    function announceStatus() {
+        const msg = root.errorMsg === "" ? qsTr("Quota updated") : statusText()
+        if (msg === root.announced)
+            return
+        root.announced = msg
+        // Accessible.announce landed in Qt 6.8.
+        if (Accessible.announce)
+            Accessible.announce(msg)
+    }
+
     // ── reusable bits ─────────────────────────────────────────────────────
     component ProviderCard: ColumnLayout {
         id: card
@@ -1049,6 +1106,9 @@ PlasmoidItem {
             height: root.markThickness
             color: card.accent
             opacity: card.ok ? 1 : root.inactiveMarkOpacity
+            // A provider's colour, drawn rather than read: the title below
+            // names the provider and the meters carry the numbers.
+            Accessible.ignored: true
         }
 
         RowLayout {
@@ -1065,11 +1125,12 @@ PlasmoidItem {
                 text: card.subtitle
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                // "cached" is opaque on its own: say what it means on hover.
+                // "cached" is opaque on its own: say what it means on hover,
+                // and again in the description, since a screen reader never
+                // hovers and the label is not focusable.
                 HoverHandler { id: subtitleHover }
-                PlasmaComponents3.ToolTip.text: card.stale
-                    ? qsTr("Last known reading; the latest poll failed")
-                    : ""
+                Accessible.description: card.stale ? root.staleNote() : ""
+                PlasmaComponents3.ToolTip.text: card.stale ? root.staleNote() : ""
                 PlasmaComponents3.ToolTip.visible: card.stale
                     && subtitleHover.hovered
                 PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
@@ -1159,6 +1220,7 @@ PlasmoidItem {
                 // anchors.left is a logical edge: Qt mirrors the left, right
                 // and horizontalCenter anchor lines in a right-to-left
                 // layout, so the meter fills from the leading edge there too.
+                Accessible.ignored: true
                 anchors.left: parent.left
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom

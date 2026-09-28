@@ -75,6 +75,14 @@ as a build or test step.
 
 Provider marks: Claude and Codex use their published brand color. Cursor and Grok are monochrome brands, so they use `Kirigami.Theme` neutrals. Do not invent a hue for a vendor without one.
 
+## Accessibility
+
+The panel reading is a `MouseArea` with an accessible role, name, description, and press action: a `MouseArea` alone is invisible to a screen reader and cannot be activated by one. Anything a hover tooltip carries has to reach the accessible tree too, since a reader never hovers and a `Label` is not focusable. The popup takes focus when it opens, and a control smaller than `minTargetPx` is a target a finger cannot land on.
+
+A poll answers where a screen reader is not looking, so a change in `errorMsg` is announced with `Accessible.announce` (Qt 6.8; the call is guarded, as Kirigami guards it). Repeat the same wording only when it changes, since a poll runs every `pollSeconds`. Severity is a text channel (`utilSeverity`), never the meter color alone.
+
+`tests/test_main_qml.py` holds the contract these rules name; a new control, meter, or status belongs in that class.
+
 ## Locale
 
 Every user-facing string in `main.qml` goes through `qsTr()` with `%1`-style

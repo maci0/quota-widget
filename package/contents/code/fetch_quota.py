@@ -59,7 +59,6 @@ if TYPE_CHECKING:
 
 # flock is POSIX-only; on Windows the refresh lock degrades to no lock, which
 # costs a possible double refresh, not a broken poll.
-
 fcntl: ModuleType | None
 try:
     import fcntl

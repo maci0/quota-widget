@@ -225,6 +225,63 @@ class MainQmlAccessibilityTest(unittest.TestCase):
         )
         self.assertIn("border.color: Kirigami.Theme.focusColor", QML_SOURCE)
 
+    def test_panel_widget_can_be_activated_by_assistive_tech(self) -> None:
+        # The key handlers above are for a sighted keyboard user. A screen
+        # reader drives the item through its accessible action, so without one
+        # the panel button is announced and then does nothing (WCAG 2.1.1).
+        self.assertIn(
+            "Accessible.onPressAction: root.expanded = !root.expanded", QML_SOURCE
+        )
+
+    def test_the_panel_reading_is_not_announced_twice(self) -> None:
+        # The button's description is tooltipBody(), which already names every
+        # provider and its percentage, so leaving the two labels in the tree
+        # makes a reader say the same number once per line and once in the
+        # description.
+        compact = QML_SOURCE.split("compactRepresentation:", 1)[1]
+        compact = compact.split("fullRepresentation:", 1)[0]
+        self.assertEqual(compact.count("Accessible.ignored: true"), 4)
+
+    def test_the_view_switch_exposes_the_state_it_is_in(self) -> None:
+        # Gauge view and list view draw the same icon-only button, so the
+        # state is the only thing a screen reader can read (WCAG 4.1.2).
+        self.assertIn("Accessible.role: Accessible.CheckBox", QML_SOURCE)
+        self.assertIn("Accessible.checked: root.gaugeView", QML_SOURCE)
+
+    def test_the_popup_takes_focus_when_it_opens(self) -> None:
+        # The popup opens on a click, which leaves focus on the panel, so Tab
+        # would walk out of the widget and none of it would be reachable.
+        toggle = QML_SOURCE.split("icon.name: root.gaugeView", 1)[1]
+        block = toggle.split("PlasmaComponents3.BusyIndicator", 1)[0]
+        self.assertIn("focus: true", block)
+
+    def test_icon_only_buttons_meet_the_minimum_target_size(self) -> None:
+        # A ToolButton is sized by its icon, and Plasma's small icon is under
+        # 24 px, so the target a finger or a stylus has to hit is too small
+        # (WCAG 2.5.8).
+        self.assertIn("readonly property int minTargetPx: 24", QML_SOURCE)
+        self.assertEqual(QML_SOURCE.count("Layout.minimumHeight: root.minTargetPx"), 2)
+
+    def test_a_failure_is_announced_when_it_arrives(self) -> None:
+        # A poll answers into a widget the reader is not looking at, so the
+        # banner and the cards change in silence (WCAG 4.1.3). A repeated
+        # message is dropped: a poll runs every pollSeconds, and a rate limit
+        # outlasts several of them.
+        self.assertIn("onErrorMsgChanged: root.announceStatus()", QML_SOURCE)
+        self.assertIn("function announceStatus()", QML_SOURCE)
+        self.assertIn("if (msg === root.announced)", QML_SOURCE)
+        self.assertIn("Accessible.announce(msg)", QML_SOURCE)
+
+    def test_a_cached_reading_explains_itself_without_a_hover(self) -> None:
+        # "cached" is a word about the fetch, not about the number. The hover
+        # tooltip is the only place it was explained, and a screen reader
+        # never hovers and the subtitle is not focusable.
+        self.assertIn("function staleNote()", QML_SOURCE)
+        self.assertIn(
+            "Accessible.description: card.stale ? root.staleNote()", QML_SOURCE
+        )
+        self.assertEqual(QML_SOURCE.count('qsTr("Last known reading'), 1)
+
     def test_provider_titles_are_headings(self) -> None:
         self.assertIn("Accessible.role: Accessible.Heading", QML_SOURCE)
 
