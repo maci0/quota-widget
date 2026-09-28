@@ -26,7 +26,10 @@ The QML owns the fetcher process. One run at a time: `exec.poll()` returns early
 
 - `package/`: plasmoid (metadata, QML, fetcher, `contents/config/main.xml` defaults, `contents/icons/com.maci.quota-widget.svg`)
 - `docs/THREAT_MODEL.md`: entry points, trust boundaries, assets, and the threats per boundary
-- `tests/`: pytest
+- `tests/`: pytest. One file per module under test (`test_fetch_quota.py`,
+  `test_main_qml.py`, `test_package_metadata.py`, `test_print_smoke.py`,
+  `test_release.py`); `project_paths.py` is the only shared helper and holds
+  `project_root()`.
 - `tests/test_fuzz_parsers.py`: seeded randomized fuzzing of the parsers fed
   untrusted input (the Cursor usage-summary body, `ItemTable` cells, JWTs).
   Generators are seeded so a failure reproduces; raise `ITERATIONS` or move

@@ -6,17 +6,9 @@ import json
 import re
 import tomllib
 import unittest
-from pathlib import Path
 
 import fetch_quota
-
-
-def project_root() -> Path:
-    start = Path(__file__).resolve().parent
-    for path in [start, *start.parents]:
-        if (path / "package" / "metadata.json").is_file():
-            return path
-    raise AssertionError("package/metadata.json not found")
+from project_paths import project_root
 
 
 class VersionTest(unittest.TestCase):

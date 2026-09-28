@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import re
 import unittest
-from pathlib import Path
 from typing import Final
 
-QML_PATH: Final = (
-    Path(__file__).resolve().parent.parent / "package" / "contents" / "ui" / "main.qml"
-)
+from project_paths import project_root
+
+QML_PATH: Final = project_root() / "package" / "contents" / "ui" / "main.qml"
 QML_SOURCE: Final = QML_PATH.read_text()
 DIMMED_LABEL: Final = re.compile(
     r"PlasmaComponents3\.Label \{[^}]*?opacity: 0\.[0-7]\d*"

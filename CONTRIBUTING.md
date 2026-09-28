@@ -61,7 +61,13 @@ tests point `QUOTA_WIDGET_CACHE` at a `tempfile.TemporaryDirectory()` and patch
 `fetch_quota.fetch_json` instead of touching the network. A test that reaches the
 network or the real home directory does not belong here.
 `tests/test_release.py` covers the version metadata, which is not fetcher
-behavior.
+behavior, and `tests/test_print_smoke.py` covers `scripts/print_smoke.py`. One
+test file per module under test; a module's tests do not live in another
+module's file.
+
+A test that has to read the tree takes its paths from
+`tests/project_paths.py`, which finds the root by walking up to
+`package/metadata.json`. Do not walk up from `__file__` in a test.
 
 ## QML changes
 

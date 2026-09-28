@@ -9,10 +9,11 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from pathlib import Path
 from typing import Any, cast
 
-ROOT = Path(__file__).resolve().parent.parent
+from project_paths import project_root
+
+ROOT = project_root()
 PKG = ROOT / "package"
 
 Manifest = dict[str, Any]

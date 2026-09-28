@@ -66,7 +66,7 @@ files = ["package/contents/code/fetch_quota.py", "tests", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["package/contents/code", "scripts"]
+pythonpath = ["package/contents/code", "scripts", "tests"]
 
 # CI pins setup-uv to this release, and uv.lock is revision 3. An older uv
 # cannot read that revision, so the mismatch would otherwise surface as a lock
