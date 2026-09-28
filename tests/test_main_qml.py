@@ -293,6 +293,28 @@ class MainQmlPollingTest(unittest.TestCase):
         self.assertIn("oldv.account && oldv.account === newv.account", merge)
 
 
+class MainQmlDuplicateRunTest(unittest.TestCase):
+    """A run the poll dropped for running long can still answer, and the
+    numbers it brings are the ones from before."""
+
+    def test_a_late_payload_is_not_merged(self) -> None:
+        # Merging it rewinds every card and the age with it, so the payload is
+        # dropped whole rather than reconciled field by field.
+        self.assertIn(
+            'if (typeof p.fetched_ms === "number" && p.fetched_ms < root.fetchedMs)\n'
+            "                    return",
+            QML_SOURCE,
+        )
+
+    def test_an_older_reading_keeps_the_card_it_loses_to(self) -> None:
+        # mergeProv runs per provider, so one provider can answer from a later
+        # poll than another and the guard has to hold there too.
+        self.assertIn("newv.fetched_ms < oldv.fetched_ms", QML_SOURCE)
+
+    def test_the_poll_clock_never_rewinds(self) -> None:
+        self.assertIn("root.fetchedMs = Math.max(root.fetchedMs,", QML_SOURCE)
+
+
 class MainQmlStaleWindowTest(unittest.TestCase):
     """The keep-while-failing window is the fetcher's setting, not a second
     copy of it: QUOTA_WIDGET_CACHE_MAX_AGE_S has to reach the panel."""

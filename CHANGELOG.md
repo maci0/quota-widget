@@ -66,6 +66,10 @@ fails if a Breaking entry lands in this section without a matching next version.
 
 ### Fixed
 
+- A poll the panel dropped for running long can still answer after the poll
+  that replaced it, and its numbers are the older ones. The provider cache and
+  the panel now keep the newer reading instead of rewinding to the late one, so
+  the cards and their age never go backwards.
 - A `QUOTA_WIDGET_NOW_MS` past the year 9999 passed the config check and then
   raised `OverflowError` inside every provider, after the Codex refresh POST had
   already retired the stored refresh token. The pin is now bounded to the range

@@ -1596,6 +1596,62 @@ class ProviderCacheTest(unittest.TestCase):
         assert replayed is not None
         self.assertEqual(replayed["fetched_ms"], written_ms)
 
+    def test_a_late_run_does_not_rewind_the_entry(self) -> None:
+        # Two runs overlap: the panel drops the slow one for outliving
+        # pollTimeoutMs, and it lands its write after the poll that replaced
+        # it. Its reading is the older one, so the entry keeps the newer.
+        with config_env(QUOTA_WIDGET_NOW_MS=str(PINNED_NOW_MS)):
+            fetch_quota._write_provider_cache(
+                "grok",
+                {"ok": True, "plan": "Grok", "fetched_ms": PINNED_NOW_MS},
+                self.account,
+            )
+            fetch_quota._write_provider_cache(
+                "grok",
+                {
+                    "ok": True,
+                    "plan": "Grok from the run before",
+                    "fetched_ms": PINNED_NOW_MS - 60_000,
+                },
+                self.account,
+            )
+            got = fetch_quota._read_provider_cache("grok", self.account)
+        assert got is not None
+        self.assertEqual(got["plan"], "Grok")
+
+    def test_replaying_the_same_reading_leaves_the_entry_alone(self) -> None:
+        payload = {"ok": True, "plan": "Grok", "fetched_ms": PINNED_NOW_MS}
+        path = Path(self.tmp.name) / "grok.json"
+        with config_env(QUOTA_WIDGET_NOW_MS=str(PINNED_NOW_MS)):
+            fetch_quota._write_provider_cache("grok", payload, self.account)
+            first = path.read_bytes()
+            fetch_quota._write_provider_cache("grok", payload, self.account)
+            second = path.read_bytes()
+        self.assertEqual(first, second)
+
+    def test_a_second_account_replaces_the_entry(self) -> None:
+        # The guard is scoped to one account: a different identity owns the
+        # file, and the older reading it brings is its only one.
+        with config_env(QUOTA_WIDGET_NOW_MS=str(PINNED_NOW_MS)):
+            fetch_quota._write_provider_cache(
+                "grok",
+                {"ok": True, "plan": "Grok", "fetched_ms": PINNED_NOW_MS},
+                self.account,
+            )
+            fetch_quota._write_provider_cache(
+                "grok",
+                {
+                    "ok": True,
+                    "plan": "Grok",
+                    "fetched_ms": PINNED_NOW_MS - 60_000,
+                },
+                "acct-2",
+            )
+            first = fetch_quota._read_provider_cache("grok", self.account)
+            second = fetch_quota._read_provider_cache("grok", "acct-2")
+        self.assertIsNone(first)
+        self.assertIsNotNone(second)
+
 
 class ReadingAgeTest(unittest.TestCase):
     """Every payload carries the instant the reading was taken, so a consumer

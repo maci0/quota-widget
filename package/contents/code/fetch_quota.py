@@ -808,14 +808,38 @@ def _read_provider_cache(name: str, account: str | None) -> JsonDict | None:
     return {**payload, "fetched_ms": int(ts)}
 
 
+def _cache_holds_newer(path: Path, taken_ms: int, account: str) -> bool:
+    """True when the entry on disk was written no earlier than taken_ms.
+
+    A run the panel dropped for outliving pollTimeoutMs can still land its
+    write after the poll that replaced it, and its reading is the older one.
+    An entry is stamped when it was written, which is never before the reading
+    it holds, so a stamp at or past taken_ms means the file already carries a
+    reading no older than the incoming one and writing again only rewinds it.
+    """
+    try:
+        obj = json.loads(_read_text(path))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    ts = _finite_number(obj.get("cached_ms"))
+    if ts is None or obj.get("account") != account:
+        return False
+    return int(ts) >= taken_ms
+
+
 def _write_provider_cache(name: str, payload: JsonDict, account: str | None) -> None:
     if not payload.get("ok") or account is None:
         return
     folder = config().cache_dir
+    path = folder / f"{name}.json"
     try:
         folder.mkdir(parents=True, mode=CACHE_DIR_MODE, exist_ok=True)
+        taken = _finite_number(payload.get("fetched_ms"))
+        stamp = int(taken) if taken is not None else now_ms()
+        if _cache_holds_newer(path, stamp, account):
+            return
         _atomic_write_json(
-            folder / f"{name}.json",
+            path,
             {
                 "cached_ms": now_ms(),
                 "account": account,

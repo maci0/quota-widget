@@ -83,6 +83,11 @@ Two layers hold a last good reading: the fetcher writes `~/.cache/quota-widget/<
 - Age a value by `fetched_ms`, the instant the reading was taken, never by when the payload arrived. Replaying a cached payload must not buy a second window.
 - Both layers expire at 24 h. `DEFAULT_CACHE_MAX_AGE_S` in `fetch_quota.py` (overridable through `QUOTA_WIDGET_CACHE_MAX_AGE_S`) is the one to change: the fetcher emits the effective window as `cache_max_age_s` and `main.qml` takes `staleKeepMs` from it, so an override reaches the panel. `defaultStaleKeepMs` in `main.qml` is the fallback for a payload that carries no value.
 - An expired fetcher entry is deleted when it is read.
+- Both layers only move forward. A reading taken earlier never replaces a newer
+  one, in the fetcher (`_cache_holds_newer`) or in the panel (`mergeProv` and
+  the `fetched_ms` guard in `onNewData`), so the run the poll dropped for
+  outliving `pollTimeoutMs` cannot rewind the last good value when it answers
+  late.
 - Entries are scoped to one account id (`_account_id`, hashed), so a second account signing in on the same machine never reads the first one's numbers. That id is text off the wire, so `_digest` normalizes it to `NORMALIZATION_FORM` (NFC) before hashing: an NFD spelling of the same account and its NFC twin are one scope, not two. The panel is scoped the same way: every provider payload carries that digest as `account`, success and failure alike, and `mergeProv` keeps a card only while the failing poll names the same digest. Without it the panel outlives the fetcher's rule and shows the previous account's plan to the next one signed in.
 - The fetcher serves an entry on a rate limit, a 5xx, and a transport failure alike (`_transient_failure`); the panel treats the same three as transient. A 401 or 403 is a vendor decision and is reported as one.
 

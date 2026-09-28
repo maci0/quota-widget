@@ -126,11 +126,17 @@ PlasmoidItem {
             }
             try {
                 const p = JSON.parse(data["stdout"])
+                // A run dropped for outliving pollTimeoutMs can still answer
+                // after the poll that replaced it. Its numbers are the older
+                // ones, so merging them would rewind the cards and the age.
+                if (typeof p.fetched_ms === "number" && p.fetched_ms < root.fetchedMs)
+                    return
                 root.claude = mergeProv(root.claude, p.claude)
                 root.cursor = mergeProv(root.cursor, p.cursor)
                 root.grok = mergeProv(root.grok, p.grok)
                 root.codex = mergeProv(root.codex, p.codex)
-                root.fetchedMs = p.fetched_ms || Date.now()
+                root.fetchedMs = Math.max(root.fetchedMs,
+                    p.fetched_ms || Date.now())
                 const keepS = p.cache_max_age_s
                 root.staleKeepMs = (typeof keepS === "number" && keepS > 0)
                     ? keepS * 1000 : root.defaultStaleKeepMs
@@ -213,7 +219,9 @@ PlasmoidItem {
         return !root.claude && !root.cursor && !root.grok && !root.codex
     }
     // Keep the last good reading on transient failures (429/5xx/net/exec) so a
-    // blip doesn't blank a card. Replace on success or on auth/no-token errors.
+    // blip doesn't blank a card. Replace on success or on auth/no-token errors,
+    // but never with an older one: a run the poll dropped for running long can
+    // still answer, and merging it would rewind a card to a past reading.
     // A kept reading is aged by its own fetched_ms, the instant the fetcher took
     // it, so replaying a cached payload cannot keep it alive past
     // DEFAULT_CACHE_MAX_AGE_S the way an arrival clock would.
@@ -224,7 +232,15 @@ PlasmoidItem {
     // usage to the next one signed in on the same machine.
     function mergeProv(oldv, newv) {
         if (!newv) return oldv
-        if (newv.ok) return newv
+        if (newv.ok) {
+            // A late or replayed run carries a reading older than the one held,
+            // so it keeps the card instead of rewinding it to a past poll.
+            if (oldv && oldv.ok && typeof oldv.fetched_ms === "number"
+                    && typeof newv.fetched_ms === "number"
+                    && newv.fetched_ms < oldv.fetched_ms)
+                return oldv
+            return newv
+        }
         const e = newv.error || ""
         const transient = e === "net" || e === "exec"
             || e.indexOf("429") >= 0 || e.indexOf("http-5") === 0
