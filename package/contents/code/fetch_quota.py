@@ -430,6 +430,14 @@ def _account_id(access_token: str | None, fallback: str | None = None) -> str | 
     return _digest(sub if isinstance(sub, str) and sub else fallback)
 
 
+def _discard_provider_cache(path: Path) -> None:
+    """Delete one cache file. Best-effort: a leftover file is unreadable anyway."""
+    try:
+        path.unlink()
+    except OSError:
+        pass  # already gone, or not ours to remove
+
+
 def _read_provider_cache(
     name: str, account: str | None, max_age_s: int | None = None
 ) -> JsonDict | None:
@@ -452,6 +460,8 @@ def _read_provider_cache(
         return None
     now = now_ms()
     if now - int(ts) > limit_s * 1000:
+        # Past the retention window, so drop it rather than leave it on disk.
+        _discard_provider_cache(path)
         return None
     return payload
 
@@ -552,15 +562,14 @@ def fetch_http(
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return resp.status, None, hdrs
     except urllib.error.HTTPError as e:
+        # The error body can carry account identifiers (email, user id) echoed
+        # back by the vendor. No caller reads it, so the body is not retained.
         hdrs = e.headers if e.headers is not None else Message()
         try:
-            payload = e.read().decode("utf-8", "replace")
-            try:
-                return e.code, json.loads(payload), hdrs
-            except json.JSONDecodeError:
-                return e.code, {"raw": payload[:ERROR_BODY_PREVIEW]}, hdrs
+            e.read()
         except OSError:
-            return e.code, None, hdrs
+            pass  # body unreadable; the status is all the callers use
+        return e.code, None, hdrs
     except (urllib.error.URLError, TimeoutError, OSError):
         return 0, None, None
 

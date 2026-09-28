@@ -159,6 +159,21 @@ The widget keeps two kinds of file on disk, both under your home directory:
 
 Token writes go through a temp file that is flushed and renamed, then the directory is flushed, so a crash leaves either the old tokens or the new ones. The token files are shared with the vendor CLIs: the fetcher re-reads and re-applies its refresh if a CLI writes the same file in between, so the two do not clobber each other's rotation. The cache files are disposable; deleting `~/.cache/quota-widget` costs one poll of 429 fallback.
 
+## Data and privacy
+
+The widget is local-only. It has no telemetry, no analytics, no crash reporting, and no network calls other than the four usage endpoints above. It never sends a request to a server it does not already name in the fetching table.
+
+What the fetcher reads from your account is what a usage bar needs: plan name, period percentages, reset times, and credit balances. Account identifiers (the WorkOS user id in the Cursor session, the ChatGPT account id header) are used to authorize a request and are not written to the cache, the emitted JSON, or any log. Nothing is written to a log at all; errors surface as a status code such as `http-429` on the card, and the body of a failed HTTP response is discarded rather than captured.
+
+Retention:
+
+| Data | Where | How long |
+| --- | --- | --- |
+| Usage payload cache | `~/.cache/quota-widget/*.json` | At most 24 hours (`CACHE_MAX_AGE_S`); an expired file is deleted when it is next read |
+| OAuth tokens | vendor token files above | Rotated by the vendor's own expiry, written back only on refresh |
+
+Both are written `0600` under your home directory. To erase everything the widget keeps, remove the cache directory and revoke the sessions from each vendor's account page; the token files belong to the CLIs, which rewrite them on the next login.
+
 ## Layout
 
 ```

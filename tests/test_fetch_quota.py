@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import datetime as dt
+import email.message
 import io
 import json
 import os
@@ -10,7 +11,9 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.parse
+import urllib.request
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -189,6 +192,7 @@ class ClockTest(unittest.TestCase):
             PINNED_NOW_MS + (fetch_quota.DEFAULT_CACHE_MAX_AGE_S + 1) * 1000
         )
         self.assertIsNone(fetch_quota._read_provider_cache("grok", account))
+        self.assertFalse((Path(tmp.name) / "grok.json").exists())
 
 
 def _fake_jwt(sub: str) -> str:
@@ -725,6 +729,48 @@ class AccountIdTest(unittest.TestCase):
     def test_nothing_identifiable_is_none(self) -> None:
         self.assertIsNone(fetch_quota._account_id("opaque"))
         self.assertIsNone(fetch_quota._account_id(None))
+
+
+class ErrorBodyTest(unittest.TestCase):
+    """An HTTP error body can echo the account id or email; keep it out of the
+    result, since no caller reads it."""
+
+    def _error(self, body: bytes) -> urllib.error.HTTPError:
+        return urllib.error.HTTPError(
+            "https://api.anthropic.com/api/oauth/usage",
+            429,
+            "Too Many Requests",
+            email.message.Message(),
+            io.BytesIO(body),
+        )
+
+    def test_error_body_is_not_returned(self) -> None:
+        body = b'{"error":{"message":"user_01ABC@example.com has too many requests"}}'
+        with patch.object(urllib.request, "urlopen", side_effect=self._error(body)):
+            status, data, _hdrs = fetch_quota.fetch_http("https://example.test", {})
+
+        self.assertEqual(status, 429)
+        self.assertIsNone(data)
+
+    def test_error_body_is_not_emitted(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        os.environ["QUOTA_WIDGET_CACHE"] = tmp.name
+        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
+        cred = Path(tmp.name) / "cred.json"
+        cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+        body = b"account user_01ABC@example.com not found"
+        out = io.StringIO()
+        with (
+            patch.object(fetch_quota, "CLAUDE_CRED", cred),
+            patch.object(urllib.request, "urlopen", side_effect=self._error(body)),
+            contextlib.redirect_stdout(out),
+            self.assertRaises(SystemExit),
+        ):
+            fetch_quota.main()
+
+        self.assertNotIn("user_01ABC", out.getvalue())
+        self.assertEqual(json.loads(out.getvalue())["claude"]["error"], "http-429")
 
 
 class DurableWriteTest(unittest.TestCase):

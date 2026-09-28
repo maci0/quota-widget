@@ -41,7 +41,9 @@ Fetcher talks to each vendor's own usage endpoint with credentials already on di
 
 ## Caches
 
-Two layers hold a last good reading. `~/.cache/quota-widget/<provider>.json` is written by the fetcher and read only by `_stale_cache`; the plasmoid keeps its own copy in `mergeProv` for the same window. Both expire at `STALE_MAX_AGE_S` (2 h), and the fetcher's entries are scoped to one account id (`_account_id`, hashed) so a second account signing in on the same machine never reads the first one's numbers. Change the window in one place: `STALE_MAX_AGE_S` in `fetch_quota.py` and `staleKeepMs` in `main.qml`.
+Two layers hold a last good reading. `~/.cache/quota-widget/<provider>.json` is written by the fetcher and read only by `_read_provider_cache`; the plasmoid keeps its own copy in `mergeProv` for the same window. Both expire at `DEFAULT_CACHE_MAX_AGE_S` (24 h, overridable through `QUOTA_WIDGET_CACHE_MAX_AGE_S`), an expired fetcher entry is deleted when it is read, and the entries are scoped to one account id (`_account_id`, hashed) so a second account signing in on the same machine never reads the first one's numbers. Change the window in one place: `DEFAULT_CACHE_MAX_AGE_S` in `fetch_quota.py` and `staleKeepMs` in `main.qml`.
+
+Nothing personal reaches a log, a cache, or the emitted JSON: no email or session token leaves the function that reads it, and a failed HTTP body is discarded rather than kept. The provider cache holds only what the UI renders, plus the hashed account id used to scope it. README's "Data and privacy" section is the user-facing statement of this; change it with the code.
 
 ## Gate
 
