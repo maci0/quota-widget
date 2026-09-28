@@ -26,7 +26,7 @@ PlasmoidItem {
     // before use; a bad config file must not blank the widget.
     function intSetting(value, fallback, min, max) {
         var n = parseInt(value)
-        if (isNaN(n))
+        if (!isFinite(n))
             return fallback
         return Math.max(min, Math.min(max, n))
     }
@@ -189,7 +189,7 @@ PlasmoidItem {
     function utilSeverity(u) {
         if (u === undefined || u === null) return "unknown"
         const n = Number(u)
-        if (isNaN(n)) return "unknown"
+        if (!isFinite(n)) return "unknown"
         if (n >= root.utilCritAt) return "critical"
         if (n >= root.utilWarnAt) return "high"
         return "normal"
@@ -198,7 +198,7 @@ PlasmoidItem {
     function pct(u) {
         if (u === undefined || u === null) return "n/a"
         const n = Number(u)
-        if (isNaN(n)) return "n/a"
+        if (!isFinite(n)) return "n/a"
         return (Math.round(n * 10) / 10) + "%"
     }
 
@@ -217,8 +217,11 @@ PlasmoidItem {
 
     function moneyFromCents(cents) {
         if (cents === undefined || cents === null) return "n/a"
-        const n = Number(cents) / 100
-        if (isNaN(n)) return "n/a"
+        const c = Number(cents)
+        if (!isFinite(c)) return "n/a"
+        // Round to whole cents before scaling: a fraction of a cent would
+        // otherwise reach toLocaleString as a float artifact.
+        const n = Math.round(c) / 100
         return "$" + n.toLocaleString(undefined, {
             minimumFractionDigits: n % 1 === 0 ? 0 : 2,
             maximumFractionDigits: 2
@@ -258,7 +261,7 @@ PlasmoidItem {
     function compactPct(u) {
         if (u === undefined || u === null) return ""
         const n = Number(u)
-        if (isNaN(n)) return ""
+        if (!isFinite(n)) return ""
         return Math.round(n) + "%"
     }
 
@@ -293,25 +296,25 @@ PlasmoidItem {
         if (claude && claude.ok && claude.weekly) {
             for (let i = 0; i < claude.weekly.length; i++) {
                 const u = Number(claude.weekly[i].util)
-                if (!isNaN(u)) m = Math.max(m, u)
+                if (isFinite(u)) m = Math.max(m, u)
             }
         }
         if (cursor && cursor.ok && cursor.periods) {
             for (let i = 0; i < cursor.periods.length; i++) {
                 const u = Number(cursor.periods[i].util)
-                if (!isNaN(u)) m = Math.max(m, u)
+                if (isFinite(u)) m = Math.max(m, u)
             }
         }
         if (codex && codex.ok && codex.windows) {
             for (let i = 0; i < codex.windows.length; i++) {
                 const u = Number(codex.windows[i].util)
-                if (!isNaN(u)) m = Math.max(m, u)
+                if (isFinite(u)) m = Math.max(m, u)
             }
         }
         if (grok && grok.ok && grok.periods) {
             for (let i = 0; i < grok.periods.length; i++) {
                 const u = Number(grok.periods[i].util)
-                if (!isNaN(u)) m = Math.max(m, u)
+                if (isFinite(u)) m = Math.max(m, u)
             }
         }
         return m
@@ -561,7 +564,9 @@ PlasmoidItem {
                                 // (e.g. 67.63 SGD would be 6763 minor via spend)
                                 const spend = root.claude.spend
                                 if (spend && spend.used_minor != null) {
-                                    const exp = spend.exponent || 2
+                                    // exponent 0 means whole units, so only a
+                                    // missing one falls back to cents.
+                                    const exp = spend.exponent == null ? 2 : spend.exponent
                                     const major = spend.used_minor / Math.pow(10, exp)
                                     return "Extra usage: "
                                         + major.toLocaleString(undefined, {
@@ -879,7 +884,7 @@ PlasmoidItem {
             if (row.util === undefined || row.util === null)
                 return 0
             const n = Number(row.util)
-            if (isNaN(n))
+            if (!isFinite(n))
                 return 0
             return Math.min(1, Math.max(0, n / 100))
         }
@@ -1005,7 +1010,7 @@ PlasmoidItem {
             Shape {
                 anchors.fill: parent
                 visible: row.util !== undefined && row.util !== null
-                    && !isNaN(Number(row.util))
+                    && isFinite(Number(row.util))
                 ShapePath {
                     strokeWidth: row.ring
                     strokeColor: utilColor(row.util)

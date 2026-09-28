@@ -20,6 +20,17 @@ prints, so a fetcher and UI shipped together never break each other.
 
 ### Fixed
 
+- Non-finite readings (`NaN`, `1e400`) from a provider no longer reach the JSON
+  the plasmoid parses, and no longer read as a clamped 0% or a full 100%.
+- Seconds-to-milliseconds conversion rounds instead of truncating, so a reset
+  timestamp in whole milliseconds is not reported one millisecond early.
+- Claude and Grok token expiry is read through the pinnable clock, so a replay
+  run sees the same expiry decision.
+- Money arriving as a floating-point cent amount rounds to the nearest cent
+  rather than losing one to truncation, and a zero or negative spend limit no
+  longer feeds the percent division.
+- A minor-unit amount with `exponent` 0 displays in whole units instead of
+  cents.
 - The documented dev gate and smoke path run as written: `uv run pytest` finds
   `scripts/` on the path, and `print_smoke.py` reports a missing or malformed
   dump instead of a traceback.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import datetime as dt
 import email.message
 import io
@@ -243,6 +244,25 @@ def _fake_jwt(sub: str) -> str:
         .decode()
     )
     return f"{header}.{payload}.sig"
+
+
+# Test-side names for the credential files the config now owns.
+Credential = Literal["CLAUDE_CRED", "CODEX_AUTH", "GROK_AUTH", "CURSOR_AUTH_JSON"]
+
+
+def point_credential(case: unittest.TestCase, name: Credential, path: Path) -> None:
+    """Point one provider at a scratch credential file for the whole test."""
+    original = fetch_quota.config()
+    if name == "CLAUDE_CRED":
+        patched = dataclasses.replace(original, claude_cred=path)
+    elif name == "CODEX_AUTH":
+        patched = dataclasses.replace(original, codex_auth=path)
+    elif name == "GROK_AUTH":
+        patched = dataclasses.replace(original, grok_auth=path)
+    else:
+        patched = dataclasses.replace(original, cursor_auth=path)
+    fetch_quota._CONFIG = patched
+    case.addCleanup(setattr, fetch_quota, "_CONFIG", original)
 
 
 def _http_returning(status: int, body: object, hdrs: object = None) -> HttpFake:
@@ -651,6 +671,108 @@ class IsoToMsTest(unittest.TestCase):
     def test_rejects_missing_or_garbage(self) -> None:
         self.assertIsNone(fetch_quota.iso_to_ms(None))
         self.assertIsNone(fetch_quota.iso_to_ms("nope"))
+
+
+class SecondsToMsTest(unittest.TestCase):
+    def test_keeps_the_millisecond_a_truncating_cast_drops(self) -> None:
+        # 1777000000.001 is representable but lands a hair under when divided
+        # back out; int() truncation would report the previous millisecond.
+        seconds = 1777000000.001
+        self.assertEqual(fetch_quota.ms_from_seconds(seconds), 1_777_000_000_001)
+
+    def test_iso_timestamp_keeps_its_exact_millisecond(self) -> None:
+        when = dt.datetime(2026, 5, 2, 14, 11, 55, tzinfo=dt.UTC)
+        iso = when.isoformat().replace("+00:00", "Z")
+        self.assertEqual(
+            fetch_quota.iso_to_ms(iso),
+            int(when.timestamp() * 1000),
+        )
+        self.assertEqual(
+            fetch_quota.ms_from_seconds(when.timestamp()),
+            fetch_quota.iso_to_ms(iso),
+        )
+
+    def test_codex_reset_keeps_its_millisecond(self) -> None:
+        window = fetch_quota._codex_window(
+            {
+                "used_percent": 1,
+                "limit_window_seconds": 3600,
+                "reset_at": 1777000000.001,
+            },
+            "primary_window",
+        )
+        assert window is not None
+        self.assertEqual(window["resets_ms"], 1_777_000_000_001)
+
+
+class NonFiniteReadingTest(unittest.TestCase):
+    """json.loads accepts NaN and 1e400, and json.dumps writes them back as
+    bare NaN/Infinity, which plasmashell cannot parse. A missing reading must
+    read as absent, never as a clamped 0% or a full 100%."""
+
+    def test_codex_util_percent_rejects_non_finite(self) -> None:
+        for raw in (float("nan"), float("inf"), -float("inf")):
+            self.assertIsNone(
+                fetch_quota._codex_window({"used_percent": raw}, "primary_window")
+            )
+
+    def test_codex_window_still_parses_whole_seconds(self) -> None:
+        window = fetch_quota._codex_window(
+            {"used_percent": 42, "limit_window_seconds": 604800}, "primary_window"
+        )
+        assert window is not None
+        self.assertEqual(window["util"], 42.0)
+        self.assertEqual(window["window_seconds"], 604800)
+
+    def test_cursor_meter_rejects_non_finite_amounts(self) -> None:
+        meter = fetch_quota._cursor_meter(
+            {"enabled": True, "used": float("nan"), "limit": 100},
+            "Included",
+            "cents",
+            1,
+        )
+        self.assertIsNotNone(meter)
+        assert meter is not None
+        self.assertIsNone(meter["util"])
+        self.assertIsNone(meter["used"])
+
+    def test_money_value_rounds_to_the_nearest_cent(self) -> None:
+        self.assertEqual(fetch_quota._money_val(249.9999999), 250)
+        self.assertEqual(fetch_quota._money_val({"val": 100.5}), 100)
+        self.assertIsNone(fetch_quota._money_val(float("nan")))
+        self.assertIsNone(fetch_quota._money_val(float("inf")))
+
+    def test_grok_period_never_divides_by_a_missing_limit(self) -> None:
+        self.assertIsNone(
+            fetch_quota._parse_grok_period({"used": 250, "monthlyLimit": 0})["util"]
+        )
+        self.assertIsNone(
+            fetch_quota._parse_grok_period({"used": 250, "monthlyLimit": -100})["util"]
+        )
+
+    def test_grok_period_reports_over_limit_spend(self) -> None:
+        period = fetch_quota._parse_grok_period({"used": 1250, "monthlyLimit": 1000})
+        self.assertEqual(period["util"], 125.0)
+
+    def test_grok_credit_percent_rejects_non_finite(self) -> None:
+        period = fetch_quota._parse_grok_period(
+            {"creditUsagePercent": float("nan"), "currentPeriod": "weekly"}
+        )
+        self.assertIsNone(period["util"])
+
+    def test_poll_output_stays_parseable_json(self) -> None:
+        parsed = fetch_quota.parse_cursor_summary(
+            {
+                "membershipType": "pro",
+                "individualUsage": {
+                    "plan": {"enabled": True, "used": float("inf"), "limit": 100}
+                },
+            }
+        )
+        encoded = json.dumps(parsed)
+        self.assertNotIn("Infinity", encoded)
+        self.assertNotIn("NaN", encoded)
+        self.assertEqual(json.loads(encoded), parsed)
 
 
 class PlanLabelTest(unittest.TestCase):

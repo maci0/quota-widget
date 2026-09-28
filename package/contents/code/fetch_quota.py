@@ -29,6 +29,7 @@ import datetime as dt
 import email.utils
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -88,7 +89,7 @@ def now_ms() -> int:
     so a whole poll replays byte-for-byte; unset in production, real clock."""
     override = os.environ.get(NOW_MS_ENV)
     if override is None:
-        return int(time.time() * 1000)
+        return ms_from_seconds(time.time())
     try:
         return int(override)
     except ValueError:
@@ -97,8 +98,35 @@ def now_ms() -> int:
         ) from None
 
 
+EPOCH_UTC = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
+
+
+def ms_from_seconds(seconds: float) -> int:
+    """Epoch-ms from a seconds value, rounded to the nearest millisecond.
+
+    Truncation drops a millisecond whenever the double lands a hair under the
+    real value, so a reset the API sent in whole milliseconds displays a
+    minute early after the seconds are divided back out.
+    """
+    return int(round(seconds * 1000))
+
+
 def now_utc() -> dt.datetime:
-    return dt.datetime.fromtimestamp(now_ms() / 1000, dt.UTC)
+    return EPOCH_UTC + dt.timedelta(milliseconds=now_ms())
+
+
+def _finite_number(value: object) -> float | None:
+    """A JSON number that survives serialization, or None.
+
+    json.loads accepts NaN and 1e400 (Infinity), and json.dumps writes them
+    back as bare NaN/Infinity, which is not JSON and which plasmashell's
+    parser rejects. A missing number must read as absent, never as a clamped
+    zero or a full 100%.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 def sleep(seconds: float) -> None:
@@ -346,7 +374,7 @@ def iso_to_ms(value: str | None) -> int | None:
         return None
     try:
         s = value.replace("Z", "+00:00")
-        return int(dt.datetime.fromisoformat(s).timestamp() * 1000)
+        return ms_from_seconds(dt.datetime.fromisoformat(s).timestamp())
     except (TypeError, ValueError, OSError):
         return None
 
@@ -494,9 +522,9 @@ def _read_provider_cache(
         obj = json.loads(_read_text(path))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
-    ts = obj.get("cached_ms")
+    ts = _finite_number(obj.get("cached_ms"))
     payload = obj.get("payload")
-    if not isinstance(ts, (int, float)) or not isinstance(payload, dict):
+    if ts is None or not isinstance(payload, dict):
         return None
     if not payload.get("ok"):
         return None
@@ -642,10 +670,10 @@ def fetch_json(
 
 
 def _claude_expired(oauth: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool:
-    exp = oauth.get("expiresAt")
-    if not isinstance(exp, (int, float)):
+    exp = _finite_number(oauth.get("expiresAt"))
+    if exp is None:
         return False
-    ts_ms = int(exp if exp > MS_EPOCH_CUTOFF else exp * 1000)
+    ts_ms = int(exp) if exp > MS_EPOCH_CUTOFF else ms_from_seconds(exp)
     return ts_ms <= now_ms() + skew_ms
 
 
@@ -691,9 +719,9 @@ def _refresh_claude(cred: JsonDict) -> JsonDict | None:
         new_oauth["accessToken"] = tok["access_token"]
         if tok.get("refresh_token"):
             new_oauth["refreshToken"] = tok["refresh_token"]
-        expires_in = tok.get("expires_in")
-        if isinstance(expires_in, (int, float)):
-            new_oauth["expiresAt"] = now_ms() + int(expires_in) * 1000
+        expires_in = _finite_number(tok.get("expires_in"))
+        if expires_in is not None:
+            new_oauth["expiresAt"] = now_ms() + ms_from_seconds(expires_in)
         new_cred = dict(cred)
         new_cred["claudeAiOauth"] = new_oauth
 
@@ -733,7 +761,7 @@ def _claude_weekly(data: JsonDict) -> list[JsonDict]:
             weekly.append(
                 {
                     "label": label,
-                    "util": item.get("percent"),
+                    "util": _finite_number(item.get("percent")),
                     "resets_ms": iso_to_ms(item.get("resets_at")),
                     "kind": kind,
                 }
@@ -751,7 +779,7 @@ def _claude_weekly(data: JsonDict) -> list[JsonDict]:
         weekly.append(
             {
                 "label": label,
-                "util": block.get("utilization"),
+                "util": _finite_number(block.get("utilization")),
                 "resets_ms": iso_to_ms(block.get("resets_at")),
                 "kind": key,
             }
@@ -762,7 +790,7 @@ def _claude_weekly(data: JsonDict) -> list[JsonDict]:
 def _claude_session(data: JsonDict) -> tuple[Any, int | None]:
     """(util percent, reset ms) for the 5-hour window; `limits` wins when present."""
     five = _as_dict(data.get("five_hour"))
-    util: Any = five.get("utilization")
+    util: Any = _finite_number(five.get("utilization"))
     resets_ms = iso_to_ms(five.get("resets_at"))
     limits = data.get("limits")
     if not isinstance(limits, list):
@@ -771,7 +799,7 @@ def _claude_session(data: JsonDict) -> tuple[Any, int | None]:
         if not isinstance(item, dict) or not _claude_is_session(item):
             continue
         if item.get("percent") is not None:
-            util = item.get("percent")
+            util = _finite_number(item.get("percent"))
         if item.get("resets_at"):
             resets_ms = iso_to_ms(item.get("resets_at"))
         break
@@ -856,14 +884,14 @@ def fetch_claude() -> JsonDict:
         "weekly": weekly,
         "extra_usage": {
             "enabled": bool(extra.get("is_enabled")),
-            "used_credits": extra.get("used_credits"),
+            "used_credits": _finite_number(extra.get("used_credits")),
             "currency": extra.get("currency"),
-            "monthly_limit": extra.get("monthly_limit"),
+            "monthly_limit": _finite_number(extra.get("monthly_limit")),
         },
         "spend": {
             "enabled": bool(spend.get("enabled")),
-            "percent": spend.get("percent"),
-            "used_minor": spend_used.get("amount_minor"),
+            "percent": _finite_number(spend.get("percent")),
+            "used_minor": _finite_number(spend_used.get("amount_minor")),
             "currency": spend_used.get("currency") or extra.get("currency"),
             "exponent": spend_used.get("exponent", 2),
         },
@@ -961,9 +989,9 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
         new_entry["key"] = tok["access_token"]
         if tok.get("refresh_token"):
             new_entry["refresh_token"] = tok["refresh_token"]
-        expires_in = tok.get("expires_in")
-        if isinstance(expires_in, (int, float)):
-            exp = now_utc() + dt.timedelta(seconds=int(expires_in))
+        expires_in = _finite_number(tok.get("expires_in"))
+        if expires_in is not None:
+            exp = now_utc() + dt.timedelta(milliseconds=ms_from_seconds(expires_in))
             new_entry["expires_at"] = exp.isoformat().replace("+00:00", "Z")
 
         # Persist so subsequent polls (and the Grok CLI) keep working.
@@ -980,16 +1008,16 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
 
 
 def _money_val(obj: Any) -> int | None:  # JSON number or {val: int}
+    """A cent amount, or None. Values crossing the wire are dollars-era
+    doubles, so a float lands a cent under int() truncation; rounding to the
+    nearest cent is what reconciles with the dollars the vendor bills."""
     if obj is None:
         return None
     if isinstance(obj, dict) and "val" in obj:
-        try:
-            return int(obj["val"])
-        except (TypeError, ValueError, OverflowError):
-            return None
-    if isinstance(obj, (int, float)):
-        return int(obj)
-    return None
+        number = _finite_number(obj["val"])
+        return None if number is None else round(number)
+    number = _finite_number(obj)
+    return None if number is None else round(number)
 
 
 def _parse_grok_period(cfg: JsonDict) -> JsonDict:
@@ -1009,12 +1037,17 @@ def _parse_grok_period(cfg: JsonDict) -> JsonDict:
         or bool(cfg.get("currentPeriod"))
         or bool(cfg.get("isUnifiedBillingUser"))
     )
+    util: float | None
     if is_credits:
-        credit_pct = cfg.get("creditUsagePercent")
-        try:
-            util = round(float(credit_pct), 1) if credit_pct is not None else 0.0
-        except (TypeError, ValueError):
-            util = None
+        credit_raw = cfg.get("creditUsagePercent")
+        if credit_raw is None:
+            util = 0.0
+        else:
+            credit_pct = _finite_number(credit_raw)
+            if credit_pct is None and isinstance(credit_raw, str):
+                with contextlib.suppress(TypeError, ValueError):
+                    credit_pct = _finite_number(float(credit_raw))
+            util = round(credit_pct, 1) if credit_pct is not None else None
         used = limit = None
         start_ms = iso_to_ms(period.get("start") or cfg.get("billingPeriodStart"))
         end_ms = iso_to_ms(period.get("end") or cfg.get("billingPeriodEnd"))
@@ -1022,7 +1055,13 @@ def _parse_grok_period(cfg: JsonDict) -> JsonDict:
         # Legacy monthly shape: $ used of $ limit (values in cents).
         used = _money_val(cfg.get("used"))
         limit = _money_val(cfg.get("monthlyLimit") or cfg.get("monthly_limit"))
-        util = round(100.0 * used / limit, 1) if used is not None and limit else None
+        # A limit of zero or less is no limit; dividing by it would blow up or
+        # flip the meter negative.
+        util = (
+            round(100.0 * used / limit, 1)
+            if used is not None and limit is not None and limit > 0
+            else None
+        )
         start_ms = iso_to_ms(
             cfg.get("billingPeriodStart") or cfg.get("billing_period_start")
         )
@@ -1145,8 +1184,8 @@ def _jwt_claim(token: str, *path: str) -> Any:
 
 
 def _jwt_exp_ms(token: str) -> int | None:
-    exp = _jwt_claim(token, "exp")
-    return int(exp) * 1000 if isinstance(exp, (int, float)) else None
+    exp = _finite_number(_jwt_claim(token, "exp"))
+    return ms_from_seconds(exp) if exp is not None else None
 
 
 def _codex_window_label(window_seconds: int | None, name: str) -> str:
@@ -1172,24 +1211,24 @@ def _codex_window(block: JsonDict | None, name: str) -> JsonDict | None:
     raw_used = block.get("used_percent")
     if raw_used is None:
         return None
-    try:
-        util = min(100.0, max(0.0, float(raw_used)))
-    except (TypeError, ValueError):
-        return None
+    if isinstance(raw_used, str):
+        with contextlib.suppress(TypeError, ValueError):
+            raw_used = float(raw_used)
+    number = _finite_number(raw_used)
+    if number is None:
+        return None  # NaN or Infinity is no reading; it is not 0% and not 100%
+    util = min(100.0, max(0.0, number))
     window_s = block.get("limit_window_seconds")
-    try:
-        window_s_i = int(window_s) if window_s is not None else None
-    except (TypeError, ValueError):
-        window_s_i = None
+    window_number = _finite_number(window_s)
+    window_s_i = int(window_number) if window_number is not None else None
 
     resets_ms = None
-    reset_at = block.get("reset_at")
-    if isinstance(reset_at, (int, float)):
-        resets_ms = int(reset_at * 1000)
-    else:
-        after = block.get("reset_after_seconds")
-        if isinstance(after, (int, float)):
-            resets_ms = now_ms() + int(float(after) * 1000)
+    reset_at = _finite_number(block.get("reset_at"))
+    after = _finite_number(block.get("reset_after_seconds"))
+    if reset_at is not None:
+        resets_ms = ms_from_seconds(reset_at)
+    elif after is not None:
+        resets_ms = now_ms() + ms_from_seconds(after)
 
     return {
         "label": _codex_window_label(window_s_i, name),
@@ -1526,16 +1565,11 @@ def _cursor_meter(
 ) -> JsonDict | None:
     if not isinstance(block, dict) or not block.get("enabled", True):
         return None
-    used = block.get("used")
-    limit = block.get("limit")
-    util = block.get("totalPercentUsed")
-    if (
-        util is None
-        and isinstance(used, (int, float))
-        and isinstance(limit, (int, float))
-        and limit
-    ):
-        util = round(100.0 * float(used) / float(limit), 1)
+    used = _finite_number(block.get("used"))
+    limit = _finite_number(block.get("limit"))
+    util = _finite_number(block.get("totalPercentUsed"))
+    if util is None and used is not None and limit:
+        util = round(100.0 * used / limit, 1)
     if util is None and used is None and limit is None:
         return None
     return {
@@ -1568,17 +1602,17 @@ def parse_cursor_summary(data: JsonDict, plan_hint: str | None = None) -> JsonDi
         if included:
             periods.append(included)
         if isinstance(plan_u, dict):
-            auto_pct = plan_u.get("autoPercentUsed")
-            api_pct = plan_u.get("apiPercentUsed")
+            auto_pct = _finite_number(plan_u.get("autoPercentUsed"))
+            api_pct = _finite_number(plan_u.get("apiPercentUsed"))
             util = included["util"] if included else None
             if (
-                isinstance(auto_pct, (int, float))
-                and isinstance(api_pct, (int, float))
+                auto_pct is not None
+                and api_pct is not None
                 and (auto_pct != api_pct)
                 and (
                     util is None
-                    or abs(float(auto_pct) - float(util)) > 0.5
-                    or abs(float(api_pct) - float(util)) > 0.5
+                    or abs(auto_pct - float(util)) > 0.5
+                    or abs(api_pct - float(util)) > 0.5
                 )
             ):
                 periods.append(
