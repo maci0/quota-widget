@@ -11,7 +11,7 @@ import threading
 import time
 import unittest
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -32,6 +32,43 @@ _NEW_TOKENS: dict[str, object] = {
 }
 
 JsonDict = dict[str, Any]
+
+_SANDBOX = tempfile.TemporaryDirectory()
+_SANDBOX_ENV = {
+    "QUOTA_WIDGET_HOME": _SANDBOX.name,
+    "QUOTA_WIDGET_CACHE": str(Path(_SANDBOX.name) / "cache"),
+}
+
+
+def setUpModule() -> None:
+    """Point every test at a sandbox home and cache, never the real ones."""
+    for key, value in _SANDBOX_ENV.items():
+        os.environ[key] = value
+    fetch_quota.load_config()
+
+
+def tearDownModule() -> None:
+    for key in _SANDBOX_ENV:
+        os.environ.pop(key, None)
+    fetch_quota.load_config()
+    _SANDBOX.cleanup()
+
+
+@contextlib.contextmanager
+def config_env(**env: str) -> Iterator[None]:
+    """Apply environment overrides for one test, then restore the config."""
+    saved = {key: os.environ.get(key) for key in env}
+    os.environ.update(env)
+    fetch_quota.load_config()
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        fetch_quota.load_config()
 
 
 class CodexWindowTest(unittest.TestCase):
@@ -144,11 +181,11 @@ class ClockTest(unittest.TestCase):
         fetch_quota._write_provider_cache("grok", {"ok": True, "plan": "Grok"})
 
         os.environ[fetch_quota.NOW_MS_ENV] = str(
-            PINNED_NOW_MS + fetch_quota.CACHE_MAX_AGE_S * 1000
+            PINNED_NOW_MS + fetch_quota.DEFAULT_CACHE_MAX_AGE_S * 1000
         )
         self.assertIsNotNone(fetch_quota._read_provider_cache("grok"))
         os.environ[fetch_quota.NOW_MS_ENV] = str(
-            PINNED_NOW_MS + (fetch_quota.CACHE_MAX_AGE_S + 1) * 1000
+            PINNED_NOW_MS + (fetch_quota.DEFAULT_CACHE_MAX_AGE_S + 1) * 1000
         )
         self.assertIsNone(fetch_quota._read_provider_cache("grok"))
 
@@ -181,8 +218,6 @@ class ClaudeRateLimitTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        os.environ["QUOTA_WIDGET_CACHE"] = self.tmp.name
-        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
         cred = Path(self.tmp.name) / "cred.json"
         cred.write_text(
             json.dumps(
@@ -195,12 +230,12 @@ class ClaudeRateLimitTest(unittest.TestCase):
                 }
             )
         )
-        self._orig_cred = fetch_quota.CLAUDE_CRED
-        fetch_quota.CLAUDE_CRED = cred
-        self.addCleanup(self._restore_cred)
-
-    def _restore_cred(self) -> None:
-        fetch_quota.CLAUDE_CRED = self._orig_cred
+        self.env = config_env(
+            QUOTA_WIDGET_CACHE=self.tmp.name,
+            QUOTA_WIDGET_CLAUDE_CREDENTIALS=str(cred),
+        )
+        self.env.__enter__()
+        self.addCleanup(self.env.__exit__, None, None, None)
 
     def test_uses_claude_code_user_agent(self) -> None:
         seen: list[str] = []
@@ -280,7 +315,7 @@ class ClaudeRateLimitTest(unittest.TestCase):
         self.assertFalse(out.get("stale"))
 
     def test_refreshes_expired_oauth_before_usage_call(self) -> None:
-        cred_path = fetch_quota.CLAUDE_CRED
+        cred_path = fetch_quota.config().claude_cred
         payload = json.loads(cred_path.read_text())
         payload["claudeAiOauth"]["refreshToken"] = "old-refresh"
         payload["claudeAiOauth"]["expiresAt"] = 1
@@ -325,7 +360,7 @@ class ClaudeRateLimitTest(unittest.TestCase):
     def test_expired_token_with_429_refresh_is_rate_limited_not_signed_out(
         self,
     ) -> None:
-        cred_path = fetch_quota.CLAUDE_CRED
+        cred_path = fetch_quota.config().claude_cred
         payload = json.loads(cred_path.read_text())
         payload["claudeAiOauth"]["refreshToken"] = "old-refresh"
         payload["claudeAiOauth"]["expiresAt"] = 1
@@ -471,13 +506,15 @@ class CursorParseTest(unittest.TestCase):
     def test_fetch_cursor_uses_local_auth_json(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        os.environ["QUOTA_WIDGET_CACHE"] = tmp.name
-        os.environ["CURSOR_AUTH_JSON"] = str(Path(tmp.name) / "auth.json")
-        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
-        self.addCleanup(lambda: os.environ.pop("CURSOR_AUTH_JSON", None))
-        Path(os.environ["CURSOR_AUTH_JSON"]).write_text(
+        auth_json = Path(tmp.name) / "auth.json"
+        auth_json.write_text(
             json.dumps({"accessToken": _fake_jwt("auth0|user_01TEST")})
         )
+        env = config_env(
+            QUOTA_WIDGET_CACHE=tmp.name, QUOTA_WIDGET_CURSOR_AUTH=str(auth_json)
+        )
+        env.__enter__()
+        self.addCleanup(env.__exit__, None, None, None)
 
         def fake_json(
             url: str,
@@ -561,8 +598,9 @@ class ProviderCacheTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        os.environ["QUOTA_WIDGET_CACHE"] = self.tmp.name
-        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
+        self.env = config_env(QUOTA_WIDGET_CACHE=self.tmp.name)
+        self.env.__enter__()
+        self.addCleanup(self.env.__exit__, None, None, None)
 
     def test_round_trip_and_stale_flag(self) -> None:
         fetch_quota._write_provider_cache("grok", {"ok": True, "plan": "Grok"})
@@ -663,6 +701,106 @@ class DurableWriteTest(unittest.TestCase):
         self.assertEqual(
             json.loads(self.path.read_text()), {"tokens": "new", "other": 2}
         )
+
+
+class ConfigTest(unittest.TestCase):
+    """Configuration is read once, validated, and never silently repaired."""
+
+    def setUp(self) -> None:
+        self.addCleanup(fetch_quota.load_config)
+
+    def test_defaults_derive_from_home(self) -> None:
+        cfg = fetch_quota.load_config({"QUOTA_WIDGET_HOME": "/home/widget"})
+        self.assertEqual(cfg.home, Path("/home/widget"))
+        self.assertEqual(
+            cfg.claude_cred, Path("/home/widget/.claude/.credentials.json")
+        )
+        self.assertEqual(cfg.codex_auth, Path("/home/widget/.codex/auth.json"))
+        self.assertEqual(cfg.grok_auth, Path("/home/widget/.grok/auth.json"))
+        self.assertEqual(cfg.cache_dir, Path("/home/widget/.cache/quota-widget"))
+        self.assertEqual(cfg.http_timeout_s, fetch_quota.DEFAULT_HTTP_TIMEOUT_S)
+        self.assertEqual(cfg.cache_max_age_s, fetch_quota.DEFAULT_CACHE_MAX_AGE_S)
+
+    def test_xdg_cache_home_is_honored(self) -> None:
+        cfg = fetch_quota.load_config(
+            {
+                "QUOTA_WIDGET_HOME": "/home/widget",
+                "XDG_CACHE_HOME": "/xdg/cache",
+            }
+        )
+        self.assertEqual(cfg.cache_dir, Path("/xdg/cache/quota-widget"))
+
+    def test_overrides_win_over_defaults(self) -> None:
+        cfg = fetch_quota.load_config(
+            {
+                "QUOTA_WIDGET_HOME": "/home/widget",
+                "QUOTA_WIDGET_CACHE": "/var/tmp/qw",
+                "QUOTA_WIDGET_CURSOR_AUTH": "/opt/cursor/auth.json",
+                "QUOTA_WIDGET_HTTP_TIMEOUT": "3.5",
+                "QUOTA_WIDGET_CACHE_MAX_AGE_S": "60",
+            }
+        )
+        self.assertEqual(cfg.cache_dir, Path("/var/tmp/qw"))
+        self.assertEqual(cfg.cursor_auth, Path("/opt/cursor/auth.json"))
+        self.assertEqual(cfg.http_timeout_s, 3.5)
+        self.assertEqual(cfg.cache_max_age_s, 60)
+
+    def test_empty_override_is_rejected(self) -> None:
+        with self.assertRaises(fetch_quota.ConfigError) as ctx:
+            fetch_quota.load_config({"QUOTA_WIDGET_CACHE": "  "})
+        self.assertIn("QUOTA_WIDGET_CACHE", str(ctx.exception))
+
+    def test_relative_path_is_rejected(self) -> None:
+        with self.assertRaises(fetch_quota.ConfigError) as ctx:
+            fetch_quota.load_config({"QUOTA_WIDGET_CLAUDE_CREDENTIALS": "creds.json"})
+        self.assertIn("absolute", str(ctx.exception))
+
+    def test_timeout_must_be_a_number_in_range(self) -> None:
+        for bad in ("twelve", "0", "-1", "600"):
+            with self.subTest(bad=bad), self.assertRaises(fetch_quota.ConfigError):
+                fetch_quota.load_config({"QUOTA_WIDGET_HTTP_TIMEOUT": bad})
+
+    def test_describe_exposes_paths_only(self) -> None:
+        described = fetch_quota.load_config(
+            {"QUOTA_WIDGET_HOME": "/home/widget"}
+        ).describe()
+        self.assertEqual(described["cache_dir"], "/home/widget/.cache/quota-widget")
+        self.assertNotIn("token", json.dumps(described).lower())
+
+    def test_bad_config_fails_before_any_provider_runs(self) -> None:
+        stderr = io.StringIO()
+        with (
+            patch.dict(os.environ, {"QUOTA_WIDGET_CACHE": "relative/path"}),
+            patch.object(fetch_quota, "fetch_claude") as claude,
+            patch.object(fetch_quota, "fetch_cursor") as cursor,
+            patch.object(fetch_quota, "fetch_grok") as grok,
+            patch.object(fetch_quota, "fetch_codex") as codex,
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                fetch_quota.main([])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("QUOTA_WIDGET_CACHE", stderr.getvalue())
+        for provider in (claude, cursor, grok, codex):
+            provider.assert_not_called()
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "config")
+        self.assertEqual(payload["claude"]["error"], "config")
+
+    def test_print_config_emits_describe(self) -> None:
+        with patch.dict(os.environ, {"QUOTA_WIDGET_HOME": "/home/widget"}):
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                with self.assertRaises(SystemExit):
+                    fetch_quota.main(["--print-config"])
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["config"]["home"], "/home/widget")
+
+    def test_unknown_argument_exits_nonzero(self) -> None:
+        with self.assertRaises(SystemExit) as ctx:
+            fetch_quota.main(["--nope"])
+        self.assertEqual(ctx.exception.code, 2)
 
 
 class HttpRetryableTest(unittest.TestCase):

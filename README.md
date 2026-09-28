@@ -42,7 +42,7 @@ systemctl --user restart plasma-plasmashell.service
 
 ## Fetching
 
-`package/contents/code/fetch_quota.py` is polled every 2 minutes.
+`package/contents/code/fetch_quota.py` is polled every 2 minutes (change it in the widget settings, see below).
 
 | Provider | Endpoint | Credentials |
 | --- | --- | --- |
@@ -92,6 +92,60 @@ uv run pytest tests/test_fetch_quota.py::IsoToMsTest
 Tests are hermetic: no network, no credentials, no home-directory state. `uv run pytest` alone is a sub-second loop.
 
 Conventions, branching, and how to add a test or a dependency: [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Configuration
+
+### Widget settings
+
+Right-click the widget, Configure, General. Stored by plasmashell in
+`~/.config/plasmoids/org.kde.plasma.plasmoid/com.maci.quota-widget.json`.
+
+| Setting | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `gaugeView` | `false` | | draw circular gauges instead of bars |
+| `pollSeconds` | `120` | 30 to 3600 | how often the fetcher runs |
+| `utilWarnAt` | `70` | 1 to 99 | percent used before a meter turns amber |
+| `utilCritAt` | `90` | 1 to 100 | percent used before a meter turns red |
+
+Out-of-range values in that file are clamped to the range above, not rejected.
+
+### Fetcher environment
+
+Every knob is a `QUOTA_WIDGET_*` variable, read once at startup and validated
+before the first request. A value that is empty, relative (for paths),
+unparsable, or out of range aborts the poll with `error: "config"` plus the
+reason on stderr; no provider runs with a half-applied config.
+
+| Variable | Default |
+| --- | --- |
+| `QUOTA_WIDGET_HOME` | `$HOME` |
+| `QUOTA_WIDGET_CLAUDE_CREDENTIALS` | `$HOME/.claude/.credentials.json` |
+| `QUOTA_WIDGET_CURSOR_AUTH` | `$XDG_CONFIG_HOME/cursor/auth.json` |
+| `QUOTA_WIDGET_CURSOR_STATE_DB` | `$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb` |
+| `QUOTA_WIDGET_CODEX_AUTH` | `$HOME/.codex/auth.json` |
+| `QUOTA_WIDGET_GROK_AUTH` | `$HOME/.grok/auth.json` |
+| `QUOTA_WIDGET_CACHE` | `$XDG_CACHE_HOME/quota-widget` |
+| `QUOTA_WIDGET_CACHE_MAX_AGE_S` | `86400` (0 < value, seconds) |
+| `QUOTA_WIDGET_HTTP_TIMEOUT` | `12.0` (0 < value <= 300, seconds) |
+
+Plasmashell does not read shell rc files, so a variable set in `.bashrc` never
+reaches the widget. Export it into the user session before starting Plasma:
+
+```bash
+systemctl --user import-environment QUOTA_WIDGET_HTTP_TIMEOUT
+```
+
+Verify what the fetcher actually sees:
+
+```bash
+python3 package/contents/code/fetch_quota.py --print-config
+```
+
+That prints paths and the two numeric knobs. No token is read or printed.
+
+No secret belongs in these variables: the fetcher takes every token from the
+files above, so a session export leaks nothing. Override a credential path only
+when the CLI stores it somewhere else.
 
 ## Local state
 

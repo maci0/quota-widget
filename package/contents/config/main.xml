@@ -9,5 +9,23 @@
       <label>Show meters as gauges instead of bars</label>
       <default>false</default>
     </entry>
+    <entry name="pollSeconds" type="Int">
+      <label>Refresh interval (seconds)</label>
+      <default>120</default>
+      <min>30</min>
+      <max>3600</max>
+    </entry>
+    <entry name="utilWarnAt" type="Int">
+      <label>Warning threshold (percent used)</label>
+      <default>70</default>
+      <min>1</min>
+      <max>99</max>
+    </entry>
+    <entry name="utilCritAt" type="Int">
+      <label>Critical threshold (percent used)</label>
+      <default>90</default>
+      <min>1</min>
+      <max>100</max>
+    </entry>
   </group>
 </kcfg>

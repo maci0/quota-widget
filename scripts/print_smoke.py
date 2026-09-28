@@ -66,6 +66,10 @@ def main() -> None:
         else project_root() / ".scratch" / "smoke.json"
     )
     data = _load(dump)
+    config_error = data.get("config_error")
+    if config_error:
+        print(f"  config error: {config_error}")
+        raise SystemExit(1)
     claude = _dict(data.get("claude"))
     cursor = _dict(data.get("cursor"))
     grok = _dict(data.get("grok"))

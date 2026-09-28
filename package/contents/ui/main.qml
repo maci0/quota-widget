@@ -21,10 +21,23 @@ PlasmoidItem {
     }
     readonly property string cmd: "python3 '"
         + scriptPath.replace(/'/g, "'\\''") + "'"
-    readonly property int pollSeconds: 120
+
+    // kcfg values are user-editable, so every one is clamped to its range
+    // before use; a bad config file must not blank the widget.
+    function intSetting(value, fallback, min, max) {
+        var n = parseInt(value)
+        if (isNaN(n))
+            return fallback
+        return Math.max(min, Math.min(max, n))
+    }
+
+    readonly property int pollSeconds: intSetting(
+        Plasmoid.configuration.pollSeconds, 120, 30, 3600)
     readonly property int pollMs: pollSeconds * 1000
-    readonly property int utilWarnAt: 70
-    readonly property int utilCritAt: 90
+    readonly property int utilWarnAt: intSetting(
+        Plasmoid.configuration.utilWarnAt, 70, 1, 99)
+    readonly property int utilCritAt: Math.max(utilWarnAt, intSetting(
+        Plasmoid.configuration.utilCritAt, 90, 1, 100))
 
     property var claude: null
     property var cursor: null

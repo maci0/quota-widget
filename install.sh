@@ -29,7 +29,8 @@ if ! python3 "$ROOT/package/contents/code/fetch_quota.py" \
   echo "warning: fetch_quota.py exited non-zero (see $SCRATCH/smoke.err)" >&2
 else
   echo "data source ok:"
-  python3 "$ROOT/scripts/print_smoke.py" "$SCRATCH/smoke.json"
+  python3 "$ROOT/scripts/print_smoke.py" "$SCRATCH/smoke.json" \
+    || echo "warning: invalid configuration (detail in $SCRATCH/smoke.err)" >&2
 fi
 
 mkdir -p "$(dirname "$DEST")"

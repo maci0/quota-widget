@@ -15,6 +15,10 @@ Grok:   GET https://cli-chat-proxy.grok.com/v1/billing
 Codex:  GET https://chatgpt.com/backend-api/wham/usage
   (same numbers as chatgpt.com/codex/settings/usage and Codex /status)
   Auth: ~/.codex/auth.json ChatGPT OAuth tokens (auto-refreshed)
+
+Configuration is read once at startup from QUOTA_WIDGET_* environment
+variables and validated before any request; run with --print-config to see the
+active values. See README "Configuration".
 """
 
 from __future__ import annotations
@@ -34,7 +38,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from email.message import Message
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -80,7 +85,6 @@ def sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
-CLAUDE_CRED = Path.home() / ".claude" / ".credentials.json"
 CLAUDE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_TOKEN_URLS = (
@@ -88,11 +92,9 @@ CLAUDE_TOKEN_URLS = (
     "https://console.anthropic.com/v1/oauth/token",
 )
 
-GROK_AUTH = Path.home() / ".grok" / "auth.json"
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
 GROK_OIDC_DISCOVERY = "https://auth.x.ai/.well-known/openid-configuration"
 
-CODEX_AUTH = Path.home() / ".codex" / "auth.json"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -102,16 +104,17 @@ USER_AGENT = "quota-widget/1.0"
 # https://github.com/anthropics/claude-code/issues/30930
 CLAUDE_USER_AGENT = "claude-code/2.1.251"
 
-CURSOR_AUTH_JSON = Path.home() / ".config" / "cursor" / "auth.json"
 CURSOR_SUMMARY_URL = "https://cursor.com/api/usage-summary"
 
-CACHE_MAX_AGE_S = 24 * 3600
-HTTP_TIMEOUT_S = 12.0
 REFRESH_LOCK_NAME = "refresh.lock"
 # One poll holds the lock for at most a token round trip; a longer wait means
 # the holder died, and the caller refreshes anyway rather than never.
 REFRESH_LOCK_WAIT_S = 20.0
 REFRESH_LOCK_POLL_S = 0.25
+DEFAULT_CACHE_MAX_AGE_S = 24 * 3600
+DEFAULT_HTTP_TIMEOUT_S = 12.0
+MAX_HTTP_TIMEOUT_S = 300.0
+CACHE_DIR_MODE = 0o700
 FILE_MODE_PRIVATE = 0o600
 # Re-read-after-write retries before a token store is left to the racing writer.
 MERGE_WRITE_ATTEMPTS = 3
@@ -130,6 +133,144 @@ CODEX_WEEK_MIN_S = 6 * SECONDS_PER_DAY
 CODEX_WEEK_MAX_S = 8 * SECONDS_PER_DAY
 CODEX_MONTH_MIN_S = 28 * SECONDS_PER_DAY
 CODEX_MONTH_MAX_S = 32 * SECONDS_PER_DAY
+
+
+# ── configuration ───────────────────────────────────────────────────────────
+# Every knob is an environment variable read once at startup and validated
+# before any request. See README "Configuration" for the documented set.
+
+
+class ConfigError(Exception):
+    """A configuration value is unset-but-empty, unparsable, or out of range."""
+
+
+@dataclass(frozen=True)
+class Config:
+    home: Path
+    claude_cred: Path
+    codex_auth: Path
+    grok_auth: Path
+    cursor_auth: Path
+    cursor_state_db: Path
+    cache_dir: Path
+    http_timeout_s: float
+    cache_max_age_s: int
+
+    def describe(self) -> JsonDict:
+        """Active values for `--print-config`. Paths only; no token is read here."""
+        return {
+            "home": str(self.home),
+            "claude_cred": str(self.claude_cred),
+            "codex_auth": str(self.codex_auth),
+            "grok_auth": str(self.grok_auth),
+            "cursor_auth": str(self.cursor_auth),
+            "cursor_state_db": str(self.cursor_state_db),
+            "cache_dir": str(self.cache_dir),
+            "http_timeout_s": self.http_timeout_s,
+            "cache_max_age_s": self.cache_max_age_s,
+        }
+
+
+def _env_path(env: Mapping[str, str], name: str, default: Path) -> Path:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not value:
+        raise ConfigError(f"{name} is set but empty")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ConfigError(f"{name} must be an absolute path, got {value!r}")
+    return path
+
+
+def _env_number(
+    env: Mapping[str, str], name: str, default: float, maximum: float
+) -> float:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not value:
+        raise ConfigError(f"{name} is set but empty")
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number, got {value!r}") from exc
+    if not 0 < number <= maximum:
+        raise ConfigError(f"{name} must be in (0, {maximum:g}], got {number:g}")
+    return number
+
+
+def _cursor_config_root(env: Mapping[str, str], home: Path) -> Path:
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support"
+    if os.name == "nt":
+        appdata = env.get("APPDATA")
+        return Path(appdata) if appdata else home / "AppData" / "Roaming"
+    xdg = env.get("XDG_CONFIG_HOME")
+    return Path(xdg) if xdg else home / ".config"
+
+
+def _cursor_state_db(env: Mapping[str, str], home: Path) -> Path:
+    return (
+        _cursor_config_root(env, home)
+        / "Cursor"
+        / "User"
+        / "globalStorage"
+        / "state.vscdb"
+    )
+
+
+_CONFIG: Config | None = None
+
+
+def load_config(env: Mapping[str, str] | None = None) -> Config:
+    """Read and validate the environment. Raises ConfigError on bad values."""
+    values = os.environ if env is None else env
+    home = _env_path(values, "QUOTA_WIDGET_HOME", Path.home())
+    xdg_cache = values.get("XDG_CACHE_HOME")
+    cache_base = Path(xdg_cache) if xdg_cache else home / ".cache"
+    timeout = _env_number(
+        values, "QUOTA_WIDGET_HTTP_TIMEOUT", DEFAULT_HTTP_TIMEOUT_S, MAX_HTTP_TIMEOUT_S
+    )
+    max_age = _env_number(
+        values, "QUOTA_WIDGET_CACHE_MAX_AGE_S", float(DEFAULT_CACHE_MAX_AGE_S), 86400.0
+    )
+    global _CONFIG
+    _CONFIG = Config(
+        home=home,
+        claude_cred=_env_path(
+            values,
+            "QUOTA_WIDGET_CLAUDE_CREDENTIALS",
+            home / ".claude" / ".credentials.json",
+        ),
+        codex_auth=_env_path(
+            values, "QUOTA_WIDGET_CODEX_AUTH", home / ".codex" / "auth.json"
+        ),
+        grok_auth=_env_path(
+            values, "QUOTA_WIDGET_GROK_AUTH", home / ".grok" / "auth.json"
+        ),
+        cursor_auth=_env_path(
+            values,
+            "QUOTA_WIDGET_CURSOR_AUTH",
+            _cursor_config_root(values, home) / "cursor" / "auth.json",
+        ),
+        cursor_state_db=_env_path(
+            values, "QUOTA_WIDGET_CURSOR_STATE_DB", _cursor_state_db(values, home)
+        ),
+        cache_dir=_env_path(values, "QUOTA_WIDGET_CACHE", cache_base / "quota-widget"),
+        http_timeout_s=timeout,
+        cache_max_age_s=int(max_age),
+    )
+    return _CONFIG
+
+
+def config() -> Config:
+    """The validated configuration. main() loads it before any provider runs."""
+    if _CONFIG is None:
+        return load_config()
+    return _CONFIG
 
 
 def emit(obj: JsonDict) -> None:
@@ -256,19 +397,10 @@ def _merge_write_json(
     # tokens in memory stay usable for this poll.
 
 
-def _cache_dir() -> Path:
-    override = os.environ.get("QUOTA_WIDGET_CACHE")
-    if override:
-        return Path(override)
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".cache"
-    return base / "quota-widget"
+def _read_provider_cache(name: str, max_age_s: int | None = None) -> JsonDict | None:
+    path = config().cache_dir / f"{name}.json"
+    limit_s = config().cache_max_age_s if max_age_s is None else max_age_s
 
-
-def _read_provider_cache(
-    name: str, max_age_s: int = CACHE_MAX_AGE_S
-) -> JsonDict | None:
-    path = _cache_dir() / f"{name}.json"
     try:
         obj = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -280,7 +412,7 @@ def _read_provider_cache(
     if not payload.get("ok"):
         return None
     now = now_ms()
-    if now - int(ts) > max_age_s * 1000:
+    if now - int(ts) > limit_s * 1000:
         return None
     return payload
 
@@ -288,9 +420,9 @@ def _read_provider_cache(
 def _write_provider_cache(name: str, payload: JsonDict) -> None:
     if not payload.get("ok"):
         return
-    folder = _cache_dir()
+    folder = config().cache_dir
     try:
-        folder.mkdir(parents=True, exist_ok=True, mode=FILE_MODE_PRIVATE)
+        folder.mkdir(parents=True, mode=CACHE_DIR_MODE, exist_ok=True)
         _atomic_write_json(
             folder / f"{name}.json",
             {
@@ -330,8 +462,8 @@ def _refresh_lock() -> Iterator[None]:
     the second run sees the rotated state and skips the round trip.
     """
     try:
-        folder = _cache_dir()
-        folder.mkdir(parents=True, exist_ok=True)
+        folder = config().cache_dir
+        folder.mkdir(parents=True, mode=CACHE_DIR_MODE, exist_ok=True)
         fd = os.open(
             str(folder / REFRESH_LOCK_NAME),
             os.O_CREAT | os.O_RDWR,
@@ -362,14 +494,15 @@ def fetch_http(
     url: str,
     headers: dict[str, str],
     *,
-    timeout: float = HTTP_TIMEOUT_S,
+    timeout: float | None = None,
     data: bytes | None = None,
     method: str | None = None,
 ) -> tuple[int, object, Message | None]:
     """Return (status, decoded JSON or None, response headers)."""
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    req_timeout = config().http_timeout_s if timeout is None else timeout
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=req_timeout) as resp:
             body = resp.read()
             hdrs = resp.headers
             if not body:
@@ -396,7 +529,7 @@ def fetch_json(
     url: str,
     headers: dict[str, str],
     *,
-    timeout: float = HTTP_TIMEOUT_S,
+    timeout: float | None = None,
     data: bytes | None = None,
     method: str | None = None,
 ) -> tuple[int, object]:
@@ -420,7 +553,7 @@ def _claude_expired(oauth: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool:
 def _refresh_claude(cred: JsonDict) -> JsonDict | None:
     """Refresh Claude Code OAuth and write the rotated tokens back."""
     with _refresh_lock():
-        latest = _read_json_dict(CLAUDE_CRED)
+        latest = _read_json_dict(config().claude_cred)
         if latest is not None:
             cred = latest
         oauth = cred.get("claudeAiOauth")
@@ -470,7 +603,7 @@ def _refresh_claude(cred: JsonDict) -> JsonDict | None:
             return "claudeAiOauth", new_oauth
 
         try:
-            _merge_write_json(CLAUDE_CRED, put_oauth, new_cred)
+            _merge_write_json(config().claude_cred, put_oauth, new_cred)
         except OSError:
             pass  # still return in-memory tokens so this poll can proceed
         return new_cred
@@ -547,11 +680,11 @@ def _claude_session(data: JsonDict) -> tuple[Any, int | None]:
 
 
 def fetch_claude() -> JsonDict:
-    if not CLAUDE_CRED.is_file():
+    if not config().claude_cred.is_file():
         return {"ok": False, "error": "no-token"}
 
     try:
-        cred = json.loads(CLAUDE_CRED.read_text())
+        cred = json.loads(config().claude_cred.read_text())
         oauth = cred["claudeAiOauth"]
         token = oauth["accessToken"]
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
@@ -643,10 +776,10 @@ def fetch_claude() -> JsonDict:
 
 
 def _load_grok_auth() -> tuple[str, JsonDict] | None:
-    if not GROK_AUTH.is_file():
+    if not config().grok_auth.is_file():
         return None
     try:
-        store = json.loads(GROK_AUTH.read_text())
+        store = json.loads(config().grok_auth.read_text())
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(store, dict) or not store:
@@ -680,7 +813,7 @@ def _token_expired(entry: JsonDict, skew_s: int = TOKEN_SKEW_S) -> bool:
 def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
     """Refresh OIDC access token and persist the new tokens atomically."""
     with _refresh_lock():
-        store = _read_json_dict(GROK_AUTH) or {}
+        store = _read_json_dict(config().grok_auth) or {}
         current = _as_dict(store.get(auth_key))
         if current and not _token_expired(current):
             return current  # a concurrent run rotated the token while we waited
@@ -739,7 +872,7 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
             return auth_key, new_entry
 
         try:
-            _merge_write_json(GROK_AUTH, put_entry, {auth_key: new_entry})
+            _merge_write_json(config().grok_auth, put_entry, {auth_key: new_entry})
         except OSError:
             pass  # return the live token; writing auth.json failed
 
@@ -991,7 +1124,7 @@ def _codex_token_expired(tokens: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool
 
 def _refresh_codex(auth: JsonDict) -> JsonDict | None:
     with _refresh_lock():
-        latest = _read_json_dict(CODEX_AUTH)
+        latest = _read_json_dict(config().codex_auth)
         if latest is not None:
             auth = latest
         tokens = _as_dict(auth.get("tokens"))
@@ -1038,18 +1171,18 @@ def _refresh_codex(auth: JsonDict) -> JsonDict | None:
             return "tokens", new_tokens
 
         try:
-            _merge_write_json(CODEX_AUTH, put_tokens, new_auth)
+            _merge_write_json(config().codex_auth, put_tokens, new_auth)
         except OSError:
             pass  # return live tokens; writing auth.json failed
         return new_auth
 
 
 def fetch_codex() -> JsonDict:
-    if not CODEX_AUTH.is_file():
+    if not config().codex_auth.is_file():
         return {"ok": False, "error": "no-token"}
 
     try:
-        auth = json.loads(CODEX_AUTH.read_text())
+        auth = json.loads(config().codex_auth.read_text())
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {"ok": False, "error": "no-token"}
     if not isinstance(auth, dict):
@@ -1152,27 +1285,6 @@ def fetch_codex() -> JsonDict:
 # ── Cursor ──────────────────────────────────────────────────────────────────
 
 
-def _cursor_state_db() -> Path:
-    home = Path.home()
-    if sys.platform == "darwin":
-        return (
-            home
-            / "Library"
-            / "Application Support"
-            / "Cursor"
-            / "User"
-            / "globalStorage"
-            / "state.vscdb"
-        )
-    if os.name == "nt":
-        appdata = os.environ.get("APPDATA")
-        root = Path(appdata) if appdata else home / "AppData" / "Roaming"
-        return root / "Cursor" / "User" / "globalStorage" / "state.vscdb"
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    root = Path(xdg) if xdg else home / ".config"
-    return root / "Cursor" / "User" / "globalStorage" / "state.vscdb"
-
-
 def _vscdb_str(value: Any) -> str | None:
     """ItemTable cell: raw str, bytes, or JSON-quoted str."""
     if value is None:
@@ -1270,13 +1382,12 @@ def _read_cursor_state_db(path: Path) -> tuple[str, str] | None:
 
 
 def _load_cursor_auth() -> dict[str, str] | None:
-    """Return {token, plan} from env override, cursor-agent auth.json, or IDE DB."""
-    env_path = os.environ.get("CURSOR_AUTH_JSON")
-    candidates: list[tuple[Path, str]] = []
-    if env_path:
-        candidates.append((Path(env_path), "json"))
-    candidates.append((CURSOR_AUTH_JSON, "json"))
-    candidates.append((_cursor_state_db(), "vscdb"))
+    """Return {token, plan} from the cursor-agent auth.json, or the IDE DB."""
+    cfg = config()
+    candidates: list[tuple[Path, str]] = [
+        (cfg.cursor_auth, "json"),
+        (cfg.cursor_state_db, "vscdb"),
+    ]
 
     for path, kind in candidates:
         try:
@@ -1448,7 +1559,32 @@ def _safe_fetch(fetch: Callable[[], JsonDict]) -> JsonDict:
         return {"ok": False, "error": "net"}
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    args = sys.argv[1:] if argv is None else argv
+    try:
+        cfg = load_config()
+    except ConfigError as exc:
+        # No provider runs on a bad value; the panel shows "config" and the
+        # detail lands on stderr for anyone running the fetcher by hand.
+        print(f"fetch_quota: {exc}", file=sys.stderr)
+        emit(
+            {
+                "ok": False,
+                "error": "config",
+                "config_error": str(exc),
+                "claude": {"ok": False, "error": "config"},
+                "cursor": {"ok": False, "error": "config"},
+                "grok": {"ok": False, "error": "config"},
+                "codex": {"ok": False, "error": "config"},
+                "fetched_ms": now_ms(),
+            }
+        )
+    if args == ["--print-config"]:
+        emit({"ok": True, "config": cfg.describe()})
+    if args:
+        print(f"fetch_quota: unknown argument {args[0]!r}", file=sys.stderr)
+        raise SystemExit(2)
+
     providers: dict[str, Callable[[], JsonDict]] = {
         "claude": fetch_claude,
         "cursor": fetch_cursor,
