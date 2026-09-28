@@ -77,7 +77,11 @@ shows the paths and knobs it resolved, without reading a token.
 
 ## Development
 
-Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.11+ (`uv` installs it).
+Requires [`uv`](https://docs.astral.sh/uv/) 0.12.13 or newer (enforced by
+`[tool.uv] required-version` in `pyproject.toml`, so an older one stops at the
+first command with a version message), Python 3.11+ (`uv` installs it), and
+[`shellcheck`](https://www.shellcheck.net/) for the `install.sh` leg of the gate.
+Everything else the gate needs comes from `pyproject.toml`.
 
 Two env vars make a run reproducible. `QUOTA_WIDGET_CACHE` relocates the payload cache, and `QUOTA_WIDGET_NOW_MS` pins the clock to a fixed epoch-milliseconds value, so the same HTTP responses produce byte-identical output on every run. Both are for tests and smoke runs; production leaves them unset.
 

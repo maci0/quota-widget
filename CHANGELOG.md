@@ -30,6 +30,9 @@ prints, so a fetcher and UI shipped together never break each other.
 
 ### Fixed
 
+- `uv run ruff check .` failed on the Cursor `ItemTable` fixture in
+  `tests/test_fetch_quota.py` (`S608`, `C416`), so the gate was red for
+  everyone before a first change.
 - A Cursor response whose `membershipType` is not a string, or whose
   `billingCycleEnd` is not a date string, raised out of the parser and blanked
   the card instead of reading as unknown.
@@ -100,6 +103,9 @@ prints, so a fetcher and UI shipped together never break each other.
 
 ### Changed
 
+- `pyproject.toml` declares `[tool.uv] required-version = ">=0.12.13"`, the
+  release CI pins, so a uv too old for the lockfile's revision 3 stops with a
+  version message on the first command.
 - The `error: "config"` payload no longer carries `fetched_ms`, since the clock
   override can be the value that failed. The panel falls back to its own clock.
 

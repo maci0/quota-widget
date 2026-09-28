@@ -67,3 +67,10 @@ files = ["package/contents/code/fetch_quota.py", "tests", "scripts"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["package/contents/code", "scripts"]
+
+# CI pins setup-uv to this release, and uv.lock is revision 3. An older uv
+# cannot read that revision, so the mismatch would otherwise surface as a lock
+# parse error or a silently different resolution. Failing on the first uv
+# command in a clean clone names the actual problem instead.
+[tool.uv]
+required-version = ">=0.12.13"

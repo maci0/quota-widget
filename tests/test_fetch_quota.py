@@ -921,6 +921,8 @@ class CursorStateDbTest(unittest.TestCase):
             # sqlite takes no placeholder for an identifier, so the table name
             # is spliced in. It is a test literal, never provider input.
             con.execute(f"CREATE TABLE {table} (key TEXT, value BLOB)")
+            # The table name is a literal the test itself passes; the values are
+            # bound, so there is no injection surface here.
             con.executemany(
                 f"INSERT INTO {table} (key, value) VALUES (?, ?)",  # noqa: S608
                 list(rows.items()),

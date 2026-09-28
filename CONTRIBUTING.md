@@ -11,6 +11,12 @@ Do not commit to `main`.
 
 ## Setup and gate
 
+Two tools come from the system, not from `pyproject.toml`: `uv` 0.12.13 or newer
+(CI pins `setup-uv` to that release, and `[tool.uv] required-version` in
+`pyproject.toml` makes an older one fail on the first command) and `shellcheck`,
+which the last step below needs. Everything else installs into `.venv` with the
+first command.
+
 ```bash
 uv sync --extra dev --frozen
 uv run black --check . && uv run ruff check . && uv run mypy && uv run pytest && shellcheck install.sh
