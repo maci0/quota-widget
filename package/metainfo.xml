@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- What Plasma Discover and KNewStuff read to list the widget. The Id, the
+     name, the license, and the released version are the same values
+     package/metadata.json carries; tests/test_package_metadata.py holds the
+     two in step. -->
+<component type="addon">
+  <id>com.maci.quota-widget</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>AI Quota</name>
+  <summary>Live usage quotas for Claude, Cursor, Codex, and Grok</summary>
+  <description>
+    <p>
+      A panel widget that reads the usage limits of four AI CLIs already
+      signed in on this machine: Claude, Cursor, Codex, and Grok. It shows the
+      plan, the session and weekly windows, and the credit balance each vendor
+      reports, with no account data sent anywhere but the vendor's own usage
+      endpoint.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Bars or wrapping circular gauges, per widget</li>
+      <li>Refresh on a configurable interval, with a manual refresh</li>
+      <li>Reads only the credentials the vendor CLIs already wrote, nothing else</li>
+      <li>Keeps the last good reading for a rate limit or an outage</li>
+    </ul>
+  </description>
+  <categories>
+    <category>System</category>
+  </categories>
+  <keywords>
+    <keyword>quota</keyword>
+    <keyword>usage</keyword>
+    <keyword>claude</keyword>
+    <keyword>cursor</keyword>
+    <keyword>codex</keyword>
+    <keyword>grok</keyword>
+  </keywords>
+  <url type="homepage">https://github.com/maci0/quota-widget</url>
+  <url type="bugtracker">https://github.com/maci0/quota-widget/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.1.0" date="2026-09-28"/>
+  </releases>
+</component>

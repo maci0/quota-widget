@@ -37,6 +37,12 @@ fails if a Breaking entry lands in this section without a matching next version.
 
 ### Added
 
+- `package/metainfo.xml`, the AppStream component Plasma Discover and KNewStuff
+  read. Without it the widget is a directory Plasma loads but nothing lists,
+  updates, or describes: a packaged Plasma applet carries both the KPackage
+  `metadata.json` and the component. The Id, name, license, homepage, and the
+  released version are the values `metadata.json` already holds, and
+  `tests/test_package_metadata.py` fails when the two drift.
 - Every failed provider payload carries `transient`, the fetcher's own
   classification of whether a cached reading beats reporting the failure. The
   panel re-derived that rule from the error code, so a code added later read as

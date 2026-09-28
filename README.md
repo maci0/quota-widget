@@ -34,7 +34,10 @@ A provider with no token shows a sign-in line; the others still update.
 Right-click the desktop or a panel, Add Widgets, search **AI Quota**.
 
 The install links `package/` into `~/.local/share/plasma/plasmoids/com.maci.quota-widget`
-(honouring `XDG_DATA_HOME`). Re-running it upgrades in place. To remove the widget
+(honouring `XDG_DATA_HOME`). Re-running it upgrades in place. The package carries
+`package/metainfo.xml` as well as `package/metadata.json`, so Plasma Discover and
+KNewStuff can list and update it; a release bumps its version in both plus
+`pyproject.toml`. To remove the widget
 and keep your cache and settings:
 
 ```bash

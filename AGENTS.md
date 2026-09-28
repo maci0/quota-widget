@@ -39,7 +39,7 @@ through `flock`, `_atomic_write_json`, and the re-read in `_merge_write_json`.
 
 ## Layout
 
-- `package/`: plasmoid (metadata, QML, fetcher, `contents/config/main.xml` defaults, `contents/icons/com.maci.quota-widget.svg`)
+- `package/`: plasmoid (`metadata.json` for Plasma, `metainfo.xml` for Discover and KNewStuff, QML, fetcher, `contents/config/main.xml` defaults, `contents/icons/com.maci.quota-widget.svg`)
 - `docs/THREAT_MODEL.md`: entry points, trust boundaries, assets, and the threats per boundary
 - `tests/`: pytest. One file per module under test (`test_fetch_quota.py`,
   `test_main_qml.py`, `test_package_metadata.py`, `test_print_smoke.py`,

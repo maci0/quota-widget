@@ -1,7 +1,9 @@
-"""The shipped manifest: package/metadata.json is what Plasma reads.
+"""The shipped manifests: package/metadata.json is what Plasma reads, and
+package/metainfo.xml is what Discover and KNewStuff read.
 
 Every field here is a promise the panel makes to the user, so a stale or
-missing one ships a broken widget.
+missing one ships a broken widget, and the two files must name the same
+version or an update is hidden or advertised wrongly.
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
+import xml.etree.ElementTree as ET
 from typing import Any, cast
 
 from project_paths import project_root
@@ -17,6 +20,13 @@ ROOT = project_root()
 PKG = ROOT / "package"
 
 Manifest = dict[str, Any]
+
+
+def text(root: ET.Element, tag: str, **attrib: str) -> str:
+    """The text of `root/tag` selected by attributes, empty when absent."""
+    predicate = "".join(f"[@{k}={v!r}]" for k, v in attrib.items())
+    found = root.find(f"{tag}{predicate}")
+    return (found.text or "").strip() if found is not None else ""
 
 
 def metadata() -> Manifest:
@@ -63,7 +73,50 @@ def test_shipped_contents_are_the_applet_and_nothing_else() -> None:
         "contents/icons/com.maci.quota-widget.svg",
         "contents/ui/main.qml",
         "metadata.json",
+        "metainfo.xml",
     ]
+
+
+def metainfo() -> ET.Element:
+    """The AppStream component Plasma Discover and KNewStuff read to list the
+    widget. KPackage looks for `metainfo.xml` at the package root. It is parsed
+    with the stdlib, not defusedxml: the file is this repository's own, never
+    a download, and a test must run under the declared dev extra alone."""
+    root = ET.parse(PKG / "metainfo.xml").getroot()  # noqa: S314  # own file
+    assert root is not None, "metainfo.xml is empty"
+    return root
+
+
+def test_metainfo_describes_the_manifest() -> None:
+    plugin = metadata()["KPlugin"]
+    root = metainfo()
+    assert root.tag == "component"
+    assert root.get("type") == "addon"
+    assert text(root, "id") == plugin["Id"]
+    assert text(root, "name") == plugin["Name"]
+    assert text(root, "project_license") == plugin["License"]
+    assert text(root, "url", type="homepage") == plugin["Website"]
+    assert text(root, "summary"), "Discover lists the widget by its summary"
+
+
+def test_metainfo_release_is_the_shipped_version() -> None:
+    # A metainfo release is how Discover decides there is an update; one that
+    # names a version the package does not ship leaves users on a version they
+    # cannot get, and one that lags it hides an update that exists.
+    shipped = metadata()["KPlugin"]["Version"]
+    releases = metainfo().findall("./releases/release")
+    assert [release.get("version") for release in releases] == [shipped]
+    # An empty or malformed date is dropped by the catalog parser, so the
+    # release is listed with no date at all.
+    assert releases[0].get("date") is not None
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", releases[0].get("date") or "")
+
+
+def test_metainfo_declares_its_own_metadata_license() -> None:
+    # The file is metadata about the package, not part of it: CC0-1.0 is what
+    # AppStream requires, and MIT here would claim the MIT terms over the
+    # descriptive text.
+    assert text(metainfo(), "metadata_license") == "CC0-1.0"
 
 
 def kcfg_entries() -> dict[str, dict[str, str]]:
