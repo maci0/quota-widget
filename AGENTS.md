@@ -12,6 +12,8 @@ Plasmashell runs `python3 package/contents/code/fetch_quota.py`. That path is sy
 
 Every wall-clock read goes through `now_ms()` / `now_utc()`; `QUOTA_WIDGET_NOW_MS` pins the clock so a poll replays byte-for-byte. Call `time.time()` or `datetime.now()` directly anywhere else in the fetcher and the replay guarantee is gone.
 
+Every credential, cache, and state file is UTF-8 JSON, read through `fetch_quota._read_text()` and written by `_atomic_write_json()`. Never `Path.read_text()` bare: plasmashell can start under a C locale where `open()` defaults to ASCII, and the merge-write fallback would then rewrite a shared store without the fields it could not decode.
+
 Dev and CI use `uv` (`uv run pytest`, `uv run black`, `uv run ruff`, `uv run mypy`).
 
 ## Layout

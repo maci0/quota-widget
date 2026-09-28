@@ -845,7 +845,7 @@ class DurableWriteTest(unittest.TestCase):
             store["tokens"] = "new"
             return "tokens", "new"
 
-        def unreadable(self: Path) -> str:
+        def unreadable(self: Path, **kwargs: object) -> str:
             raise PermissionError("denied")
 
         with patch.object(Path, "read_text", unreadable):
@@ -956,6 +956,79 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             fetch_quota.main(["--nope"])
         self.assertEqual(ctx.exception.code, 2)
+
+
+class Utf8StateFileTest(unittest.TestCase):
+    """The credential, cache, and state files are UTF-8 whatever the locale is.
+
+    A plasmashell started without LANG gets a C locale, where open()'s default
+    is ASCII: a store holding a non-ASCII account name then fails to decode,
+    and the merge-write fallback rewrites the file without the parts it could
+    not read, dropping the other CLI's tokens from a file it shares.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "auth.json"
+        self.c_locale = patch.multiple(
+            "locale",
+            getencoding=lambda: "ascii",
+            getpreferredencoding=lambda do_setlocale=True: "ascii",
+        )
+        self.c_locale.start()
+        self.addCleanup(self.c_locale.stop)
+
+    def test_merge_write_keeps_non_ascii_fields_of_a_shared_store(self) -> None:
+        self.path.write_bytes(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "old",
+                        "accountName": "Ünïcodé ⛅",
+                    },
+                    "otherCli": {"token": "keep-me"},
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+
+        def rotate(store: dict[str, object]) -> tuple[str, object]:
+            oauth = dict(store["claudeAiOauth"])  # type: ignore[call-overload]
+            oauth["accessToken"] = "new"
+            store["claudeAiOauth"] = oauth
+            return "claudeAiOauth", oauth
+
+        fetch_quota._merge_write_json(self.path, rotate)
+
+        self.assertEqual(
+            json.loads(fetch_quota._read_text(self.path)),
+            {
+                "claudeAiOauth": {"accessToken": "new", "accountName": "Ünïcodé ⛅"},
+                "otherCli": {"token": "keep-me"},
+            },
+        )
+
+    def test_atomic_write_round_trips_non_ascii_under_a_c_locale(self) -> None:
+        store = {"accountName": "Ünïcodé ⛅"}
+
+        fetch_quota._atomic_write_json(self.path, store)
+
+        self.assertEqual(json.loads(fetch_quota._read_text(self.path)), store)
+
+    def test_provider_cache_reads_non_ascii_labels_under_a_c_locale(self) -> None:
+        payload = {"ok": True, "plan": "Max (20x) – Ünïcodé"}
+        account = fetch_quota._account_id(_fake_jwt("user_01UTF8"))
+        with config_env(QUOTA_WIDGET_CACHE=self.tmp.name):
+            with patch.object(fetch_quota, "now_ms", return_value=PINNED_NOW_MS):
+                fetch_quota._write_provider_cache("claude", payload, account)
+                self.assertEqual(
+                    fetch_quota._read_provider_cache("claude", account), payload
+                )
+
+    def test_vscdb_cell_that_is_not_utf8_is_dropped(self) -> None:
+        self.assertIsNone(fetch_quota._vscdb_str(b"\xff\xfe not utf-8"))
+        self.assertEqual(fetch_quota._vscdb_str('"Ünïcodé"'), "Ünïcodé")
 
 
 class HttpRetryableTest(unittest.TestCase):

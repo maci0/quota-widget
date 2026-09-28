@@ -52,12 +52,23 @@ JsonDict: TypeAlias = dict[str, Any]
 # Overrides every wall-clock read in this module; see now_ms().
 NOW_MS_ENV = "QUOTA_WIDGET_NOW_MS"
 
+# Every credential, cache, and state file is UTF-8 JSON, including the ones the
+# vendor CLIs write. Naming it beats open()'s locale default, which is ASCII
+# under a C locale (a plasmashell started without LANG) and would decode a
+# store holding a non-ASCII account name into a read error.
+JSON_ENCODING = "utf-8"
+
 # update(obj) mutates obj and returns the (key, value) pair that must survive.
 MergeUpdate: TypeAlias = Callable[[JsonDict], "tuple[str, Any]"]
 
 
 def _as_dict(value: object) -> JsonDict:
     return value if isinstance(value, dict) else {}
+
+
+def _read_text(path: Path) -> str:
+    """Read a JSON state file as UTF-8, whatever the process locale says."""
+    return path.read_text(encoding=JSON_ENCODING)
 
 
 def _http_retryable(status: int) -> bool:
@@ -367,7 +378,7 @@ def _atomic_write_json(path: Path, obj: Any) -> None:
         prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent)
     )
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding=JSON_ENCODING) as f:
             json.dump(obj, f, indent=2)
             f.write("\n")
             f.flush()
@@ -396,7 +407,7 @@ def _merge_write_json(
     """
     for _ in range(MERGE_WRITE_ATTEMPTS):
         try:
-            current = json.loads(path.read_text())
+            current = json.loads(_read_text(path))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             current = dict(base) if base is not None else {}
         if not isinstance(current, dict):
@@ -404,7 +415,7 @@ def _merge_write_json(
         key, value = update(current)
         _atomic_write_json(path, current)
         try:
-            after = json.loads(path.read_text())
+            after = json.loads(_read_text(path))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             continue
         if isinstance(after, dict) and after.get(key) == value:
@@ -444,7 +455,7 @@ def _read_provider_cache(
     path = config().cache_dir / f"{name}.json"
     limit_s = config().cache_max_age_s if max_age_s is None else max_age_s
     try:
-        obj = json.loads(path.read_text())
+        obj = json.loads(_read_text(path))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     ts = obj.get("cached_ms")
@@ -495,7 +506,7 @@ def _stale_cache(name: str, account: str | None) -> JsonDict | None:
 
 def _read_json_dict(path: Path) -> JsonDict | None:
     try:
-        obj = json.loads(path.read_text())
+        obj = json.loads(_read_text(path))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     return obj if isinstance(obj, dict) else None
@@ -733,7 +744,7 @@ def fetch_claude() -> JsonDict:
         return {"ok": False, "error": "no-token"}
 
     try:
-        cred = json.loads(config().claude_cred.read_text())
+        cred = json.loads(_read_text(config().claude_cred))
         oauth = cred["claudeAiOauth"]
         token = oauth["accessToken"]
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
@@ -829,7 +840,7 @@ def _load_grok_auth() -> tuple[str, JsonDict] | None:
     if not config().grok_auth.is_file():
         return None
     try:
-        store = json.loads(config().grok_auth.read_text())
+        store = json.loads(_read_text(config().grok_auth))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(store, dict) or not store:
@@ -1233,7 +1244,7 @@ def fetch_codex() -> JsonDict:
         return {"ok": False, "error": "no-token"}
 
     try:
-        auth = json.loads(config().codex_auth.read_text())
+        auth = json.loads(_read_text(config().codex_auth))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {"ok": False, "error": "no-token"}
     if not isinstance(auth, dict):
@@ -1342,7 +1353,12 @@ def _vscdb_str(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, bytes):
-        value = value.decode("utf-8", "replace")
+        try:
+            value = value.decode(JSON_ENCODING)
+        except UnicodeDecodeError:
+            # A token is an identity: a mangled one authenticates as nobody.
+            # Drop the cell so the caller falls through to the next source.
+            return None
     s = str(value).strip()
     if not s:
         return None
@@ -1393,7 +1409,7 @@ def cursor_plan_label(membership: str | None) -> str:
 
 def _read_cursor_auth_json(path: Path) -> tuple[str, str] | None:
     try:
-        store = json.loads(path.read_text())
+        store = json.loads(_read_text(path))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(store, dict):

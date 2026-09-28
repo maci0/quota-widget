@@ -54,7 +54,9 @@ def _load(path: Path) -> Payload:
             "python3 package/contents/code/fetch_quota.py > .scratch/smoke.json"
         )
     try:
-        return _dict(json.loads(path.read_text()))
+        return _dict(json.loads(path.read_text(encoding="utf-8")))
+    except UnicodeDecodeError as exc:
+        raise SystemExit(f"{path} is not valid UTF-8: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise SystemExit(f"{path} is not valid JSON: {exc}") from exc
 
