@@ -67,9 +67,15 @@ PlasmoidItem {
     property var grok: null
     property var codex: null
     property string errorMsg: ""
+    property string configError: ""
     property double nowMs: Date.now()
     property double fetchedMs: 0
     readonly property bool gaugeView: !!Plasmoid.configuration.gaugeView
+    readonly property bool firstLoad: root.noData() && root.errorMsg === ""
+    // A poll is in flight. exec.poll() drops a second one, so the header
+    // disables refresh and the compact view shows a placeholder meanwhile.
+    property bool fetching: false
+    property bool userRefreshing: false
 
     Plasmoid.icon: "com.maci.quota-widget.svg"
     toolTipMainText: "AI Quota"
@@ -86,6 +92,8 @@ PlasmoidItem {
         connectedSources: []
         onNewData: (sourceName, data) => {
             disconnectSource(sourceName)
+            root.fetching = false
+            root.userRefreshing = false
             if (data["exit code"] !== 0 && data["exit code"] !== "0") {
                 // Keep last-known values on transient failures.
                 if (root.noData())
@@ -99,6 +107,7 @@ PlasmoidItem {
                 root.grok = mergeProv(root.grok, p.grok)
                 root.codex = mergeProv(root.codex, p.codex)
                 root.fetchedMs = p.fetched_ms || Date.now()
+                root.configError = p.config_error || ""
                 const anyOk = (root.claude && root.claude.ok)
                     || (root.cursor && root.cursor.ok)
                     || (root.grok && root.grok.ok)
@@ -115,6 +124,7 @@ PlasmoidItem {
         function poll() {
             if (connectedSources.length)
                 return
+            root.fetching = true
             connectSource(root.cmd)
         }
     }
@@ -168,8 +178,8 @@ PlasmoidItem {
         const h = Math.floor((totalMin % 1440) / 60)
         const m = totalMin % 60
         if (d > 0) return d + "d " + h + "h"
-        if (h > 0) return h + " hr " + m + " min"
-        return m + " min"
+        if (h > 0) return h + "h " + m + "m"
+        return m + "m"
     }
 
     function resetAtStr(resetMs) {
@@ -250,12 +260,22 @@ PlasmoidItem {
         return lines.join("\n")
     }
 
+    // One vocabulary for a failure, so the banner and the provider cards never
+    // label the same condition differently ("Error" vs "Rate-limited").
+    function errText(code, signIn) {
+        if (code === "no-token" || code === "http-401")
+            return signIn
+        if (code === "net") return "Network error"
+        if (code === "exec") return "Offline"
+        if (code === "http-429") return "Rate-limited"
+        if (code === "empty") return "No provider data returned"
+        if (code === "config" && root.configError !== "")
+            return "Check fetcher config: " + root.configError
+        return "Unavailable"
+    }
+
     function statusText() {
-        if (errorMsg === "no-token" || errorMsg === "http-401")
-            return "Sign in to Claude / Cursor / Codex / Grok"
-        if (errorMsg === "net" || errorMsg === "exec")
-            return "Offline"
-        return "Error"
+        return errText(errorMsg, "Sign in to Claude / Cursor / Codex / Grok")
     }
 
     function compactPct(u) {
@@ -382,9 +402,13 @@ PlasmoidItem {
                         var g = compactPct(gp.util)
                         if (g) return g
                     }
-                    return root.errorMsg ? "!" : "wait"
+                    return root.errorMsg ? "!" : "…"
                 }
-                color: utilColor(maxUtil())
+                color: root.firstLoad
+                    ? Kirigami.Theme.neutralTextColor
+                    : (root.errorMsg
+                        ? Kirigami.Theme.negativeTextColor
+                        : utilColor(maxUtil()))
                 font.bold: true
                 font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.1
                 font.features: { "tnum": 1 }
@@ -454,15 +478,40 @@ PlasmoidItem {
                         PlasmaComponents3.ToolTip.visible: hovered || visualFocus
                         PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
                     }
+                    PlasmaComponents3.BusyIndicator {
+                        visible: root.userRefreshing
+                        implicitWidth: Kirigami.Units.gridUnit
+                        implicitHeight: Kirigami.Units.gridUnit
+                    }
                     PlasmaComponents3.ToolButton {
                         icon.name: "view-refresh"
                         text: "Refresh"
                         display: PlasmaComponents3.AbstractButton.IconOnly
-                        onClicked: exec.poll()
-                        PlasmaComponents3.ToolTip.text: "Refresh now"
+                        // A poll started while one is running is dropped by
+                        // exec.poll(); disable rather than swallow the click.
+                        enabled: !root.fetching
+                        // A disabled button drops hover, and the tooltip is the
+                        // only thing that says why the click did nothing.
+                        hoverEnabled: true
+                        onClicked: {
+                            root.userRefreshing = true
+                            exec.poll()
+                        }
+                        PlasmaComponents3.ToolTip.text: root.fetching
+                            ? "Refreshing…" : "Refresh now"
                         PlasmaComponents3.ToolTip.visible: hovered || visualFocus
                         PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
                     }
+                }
+
+                // First poll has not answered yet: the cards are still hidden,
+                // so the view would otherwise be blank under the heading.
+                PlasmaComponents3.Label {
+                    visible: root.firstLoad
+                    text: "Loading quota…"
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    Accessible.role: Accessible.StatusBar
                 }
 
                 // Error / empty
@@ -486,11 +535,12 @@ PlasmoidItem {
                     visible: root.claude !== null
                     title: "Claude"
                     subtitle: (root.claude && root.claude.ok && root.claude.plan)
-                        ? (root.claude.plan + (root.claude.stale ? " · cached" : ""))
+                        ? (root.claude.plan + staleSuffix(root.claude))
                         : ((root.claude && root.claude.error)
-                            ? errLabel(root.claude.error, "Sign in with Claude Code") : "Loading")
+                            ? errText(root.claude.error, "Sign in with Claude Code") : "Loading")
                     accent: root.claudeMark
                     ok: root.claude && root.claude.ok
+                    stale: !!(root.claude && root.claude.stale)
 
                     ColumnLayout {
                         Layout.fillWidth: true
@@ -542,10 +592,10 @@ PlasmoidItem {
                                     label: modelData.label || "Weekly"
                                     util: modelData.util
                                     detail: modelData.resets_ms
-                                        ? ("Resets " + resetAtStr(modelData.resets_ms))
+                                        ? ("Resets in " + remainStr(modelData.resets_ms))
                                         : ""
                                     subdetail: modelData.resets_ms
-                                        ? ("in " + remainStr(modelData.resets_ms)) : ""
+                                        ? resetAtStr(modelData.resets_ms) : ""
                                 }
                             }
                         }
@@ -590,11 +640,12 @@ PlasmoidItem {
                     visible: root.cursor !== null
                     title: "Cursor"
                     subtitle: (root.cursor && root.cursor.ok && root.cursor.plan)
-                        ? (root.cursor.plan + (root.cursor.stale ? " · cached" : ""))
+                        ? (root.cursor.plan + staleSuffix(root.cursor))
                         : ((root.cursor && root.cursor.error)
-                            ? errLabel(root.cursor.error, "Sign in to Cursor") : "Loading")
+                            ? errText(root.cursor.error, "Sign in to Cursor") : "Loading")
                     accent: root.cursorMark
                     ok: root.cursor && root.cursor.ok
+                    stale: !!(root.cursor && root.cursor.stale)
 
                     ColumnLayout {
                         Layout.fillWidth: true
@@ -648,11 +699,12 @@ PlasmoidItem {
                     visible: root.codex !== null
                     title: "Codex"
                     subtitle: (root.codex && root.codex.ok && root.codex.plan)
-                        ? root.codex.plan
+                        ? (root.codex.plan + staleSuffix(root.codex))
                         : ((root.codex && root.codex.error)
-                            ? errLabel(root.codex.error, "Sign in with `codex login`") : "Loading")
+                            ? errText(root.codex.error, "Sign in with `codex login`") : "Loading")
                     accent: root.codexMark
                     ok: root.codex && root.codex.ok
+                    stale: !!(root.codex && root.codex.stale)
 
                     ColumnLayout {
                         Layout.fillWidth: true
@@ -702,7 +754,7 @@ PlasmoidItem {
                         PlasmaComponents3.Label {
                             visible: root.codex && root.codex.windows
                                 && root.codex.windows.length === 0
-                            text: "No active usage windows reported"
+                            text: "No usage meters reported"
                             Layout.fillWidth: true
                         }
 
@@ -746,11 +798,12 @@ PlasmoidItem {
                     visible: root.grok !== null
                     title: "Grok"
                     subtitle: (root.grok && root.grok.ok)
-                        ? "Credit limits"
+                        ? ("Credit limits" + staleSuffix(root.grok))
                         : ((root.grok && root.grok.error)
-                            ? errLabel(root.grok.error, "Sign in with `grok login`") : "Loading")
+                            ? errText(root.grok.error, "Sign in with `grok login`") : "Loading")
                     accent: root.grokMark
                     ok: root.grok && root.grok.ok
+                    stale: !!(root.grok && root.grok.stale)
 
                     ColumnLayout {
                         Layout.fillWidth: true
@@ -779,6 +832,13 @@ PlasmoidItem {
                                     subdetail: periodSubdetail(modelData)
                                 }
                             }
+                        }
+
+                        PlasmaComponents3.Label {
+                            visible: !!(root.grok && root.grok.periods
+                                && root.grok.periods.length === 0)
+                            text: "No usage meters reported"
+                            Layout.fillWidth: true
                         }
 
                         PlasmaComponents3.Label {
@@ -812,12 +872,9 @@ PlasmoidItem {
         }
     }
 
-    function errLabel(code, signIn) {
-        if (code === "no-token" || code === "http-401")
-            return signIn
-        if (code === "net") return "Network error"
-        if (code === "http-429") return "Rate-limited"
-        return "Unavailable"
+    // Shown on every card that kept an old reading through a transient failure.
+    function staleSuffix(p) {
+        return (p && p.ok && p.stale) ? " · cached" : ""
     }
 
     // ── reusable bits ─────────────────────────────────────────────────────
@@ -827,6 +884,7 @@ PlasmoidItem {
         property string subtitle
         property color accent: Kirigami.Theme.highlightColor
         property bool ok: true
+        property bool stale: false
         default property alias content: body.data
 
         spacing: Kirigami.Units.smallSpacing
@@ -853,6 +911,14 @@ PlasmoidItem {
                 text: card.subtitle
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
+                // "cached" is opaque on its own: say what it means on hover.
+                HoverHandler { id: subtitleHover }
+                PlasmaComponents3.ToolTip.text: card.stale
+                    ? "Last known reading; the latest poll failed"
+                    : ""
+                PlasmaComponents3.ToolTip.visible: card.stale
+                    && subtitleHover.hovered
+                PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
             }
         }
 

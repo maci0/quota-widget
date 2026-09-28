@@ -41,6 +41,42 @@ class MainQmlAccessibilityTest(unittest.TestCase):
     def test_provider_titles_are_headings(self) -> None:
         self.assertIn("Accessible.role: Accessible.Heading", QML_SOURCE)
 
+    def test_first_poll_shows_a_loading_state(self) -> None:
+        # Cards stay hidden until the first poll answers, so without this the
+        # popup is a bare heading above an empty area.
+        self.assertIn("readonly property bool firstLoad", QML_SOURCE)
+        self.assertIn("visible: root.firstLoad", QML_SOURCE)
+
+    def test_refresh_reports_that_a_poll_is_running(self) -> None:
+        # exec.poll() drops a second poll, so the button must not look clickable
+        # while one is in flight, and a manual click must show progress.
+        self.assertIn("property bool fetching: false", QML_SOURCE)
+        self.assertIn("enabled: !root.fetching", QML_SOURCE)
+        self.assertIn("root.fetching = true", QML_SOURCE)
+        self.assertIn("root.fetching = false", QML_SOURCE)
+        self.assertIn("PlasmaComponents3.BusyIndicator", QML_SOURCE)
+
+    def test_failures_use_one_wording(self) -> None:
+        # The banner and the cards described the same failure differently
+        # ("Error" vs "Rate-limited"); both go through errText now.
+        self.assertNotIn("errLabel", QML_SOURCE)
+        self.assertIn("function errText(code, signIn)", QML_SOURCE)
+        self.assertEqual(QML_SOURCE.count("function errText("), 1)
+
+    def test_every_card_marks_a_cached_reading(self) -> None:
+        # Only Claude and Cursor said "cached" before, so a stale Codex or Grok
+        # reading looked live.
+        for provider in ("claude", "cursor", "codex", "grok"):
+            self.assertIn(
+                f"stale: !!(root.{provider} && root.{provider}.stale)",
+                QML_SOURCE,
+            )
+
+    def test_meters_state_the_reset_time_the_same_way(self) -> None:
+        # Claude's weekly rows showed the absolute time first and every other
+        # meter showed the countdown first, in the same two columns.
+        self.assertNotIn('"Resets " + resetAtStr(', QML_SOURCE)
+
 
 if __name__ == "__main__":
     unittest.main()

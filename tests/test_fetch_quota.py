@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from unittest.mock import patch
 
 import fetch_quota
@@ -37,11 +37,34 @@ _NEW_TOKENS: dict[str, object] = {
 
 JsonDict = dict[str, Any]
 
+_CREDENTIAL_FIELD: Final[dict[str, str]] = {
+    "CLAUDE_CRED": "claude_cred",
+    "CODEX_AUTH": "codex_auth",
+    "GROK_AUTH": "grok_auth",
+    "CURSOR_AUTH_JSON": "cursor_auth",
+}
+
 _SANDBOX = tempfile.TemporaryDirectory()
 _SANDBOX_ENV = {
     "QUOTA_WIDGET_HOME": _SANDBOX.name,
     "QUOTA_WIDGET_CACHE": str(Path(_SANDBOX.name) / "cache"),
 }
+
+
+@contextlib.contextmanager
+def point_credential(name: str, path: Path) -> Iterator[None]:
+    """Point one credential file at a temp path, then restore the config.
+
+    The fetcher reads credential paths from its Config, so a test swaps the
+    field there rather than rebinding a module-level constant.
+    """
+    original = fetch_quota.config()
+    updates: dict[str, Any] = {_CREDENTIAL_FIELD[name]: path}
+    fetch_quota._CONFIG = dataclasses.replace(original, **updates)
+    try:
+        yield
+    finally:
+        fetch_quota._CONFIG = original
 
 
 def setUpModule() -> None:
@@ -1392,6 +1415,7 @@ class ReplayTest(unittest.TestCase):
             contextlib.redirect_stdout(out),
             self.assertRaises(SystemExit),
         ):
+            # argv=None would read pytest's own flags off sys.argv.
             fetch_quota.main([])
         return out.getvalue()
 
