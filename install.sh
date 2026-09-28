@@ -3,6 +3,11 @@
 # it again with --uninstall.
 set -euo pipefail
 
+# Everything this script creates belongs to one user and carries poll output,
+# stderr, or the widget itself, so nothing it makes is group- or
+# world-readable. A dir that already exists keeps the mode it had.
+umask 077
+
 find_root() {
   local dir
   dir="$(cd "$(dirname "$0")" && pwd)"
@@ -18,7 +23,20 @@ find_root() {
 }
 
 ROOT="$(find_root)"
-PKG_ID="com.maci.quota-widget"
+
+# The install directory is the manifest's KPlugin Id, so the two cannot drift:
+# a name hardcoded here beside a different Id in package/metadata.json links
+# the payload under a directory Plasma never reads, and the guard below then
+# refuses to remove it again. The Id also lands in a path, so it has to be a
+# plain reverse-DNS name.
+PKG_ID="$(sed -n 's/.*"Id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$ROOT/package/metadata.json" | head -n 1)"
+if [[ ! "$PKG_ID" =~ ^[A-Za-z0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
+  echo "error: package/metadata.json has no usable KPlugin Id: '${PKG_ID}'" >&2
+  exit 1
+fi
+# A literal Id in dest_is_ours is a regex, so the dots need escaping.
+PKG_ID_RE="${PKG_ID//./\\.}"
 
 # The floor in pyproject.toml (`requires-python`): the fetcher uses dt.UTC, so
 # a 3.10 `python3` on PATH means plasmashell shows a broken data source with no
@@ -42,7 +60,7 @@ SCRATCH="$ROOT/.scratch"
 dest_is_ours() {
   [[ -L "$DEST" ]] && return 0
   [[ -f "$DEST/metadata.json" ]] || return 1
-  grep -q "$PKG_ID" "$DEST/metadata.json"
+  grep -Eq "\"Id\"[[:space:]]*:[[:space:]]*\"$PKG_ID_RE\"" "$DEST/metadata.json"
 }
 
 check_python() {
@@ -117,7 +135,6 @@ fi
 
 check_python || exit 1
 
-chmod +x "$ROOT/package/contents/code/fetch_quota.py"
 mkdir -p "$SCRATCH"
 
 if ! python3 "$ROOT/package/contents/code/fetch_quota.py" \

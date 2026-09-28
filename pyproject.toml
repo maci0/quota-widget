@@ -60,6 +60,10 @@ select = [
 # The fuzzer needs a reproducible stream, not a secure one: every generator is
 # seeded from BASE_SEED so a failure replays from the printed seed.
 "tests/test_fuzz_parsers.py" = ["S311"]
+# The installer test runs install.sh from this checkout with an argv the test
+# builds, which is the point: S603 wants a shell=False call whose every
+# argument is fixed, and the checkout path is one of them.
+"tests/test_install_script.py" = ["S603"]
 
 [tool.mypy]
 python_version = "3.11"

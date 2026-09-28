@@ -28,8 +28,11 @@ The QML owns the fetcher process. One run at a time: `exec.poll()` returns early
 - `docs/THREAT_MODEL.md`: entry points, trust boundaries, assets, and the threats per boundary
 - `tests/`: pytest. One file per module under test (`test_fetch_quota.py`,
   `test_main_qml.py`, `test_package_metadata.py`, `test_print_smoke.py`,
-  `test_release.py`); `project_paths.py` is the only shared helper and holds
-  `project_root()`.
+  `test_release.py`, `test_install_script.py`); `project_paths.py` is the only
+  shared helper and holds `project_root()`.
+- `tests/test_install_script.py`: runs `install.sh` against a checkout copied
+  into a temp dir, over the paths that decide a directory's fate. It never runs
+  the install itself, which polls four providers.
 - `tests/test_fuzz_parsers.py`: seeded randomized fuzzing of the parsers fed
   untrusted input (the Cursor usage-summary body, `ItemTable` cells, JWTs).
   Generators are seeded so a failure reproduces; raise `ITERATIONS` or move
@@ -42,7 +45,12 @@ Project marker: `package/metadata.json`. Scripts walk up to that file.
 
 `install.sh` deletes `~/.local/share/plasma/plasmoids/com.maci.quota-widget` before
 symlinking, but only when that path is a symlink or holds a `metadata.json` naming
-`com.maci.quota-widget`; anything else there is left alone and the run stops.
+`com.maci.quota-widget`; anything else there is left alone and the run stops. The
+install directory is the manifest's `KPlugin.Id`, read at run time, so a rename
+takes the link, the guard, and the uninstall with it and a manifest without a
+usable Id stops the run. It creates nothing group- or world-readable (`umask
+077`) and does not write to the checkout except `.scratch/` and removing
+`__pycache__` under `package/`.
 `./install.sh --uninstall` removes the widget and keeps the cache and the plasmoid
 config. Run the script only when the user asks to install, upgrade, or remove, never
 as a build or test step.

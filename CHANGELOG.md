@@ -70,6 +70,19 @@ fails if a Breaking entry lands in this section without a matching next version.
   that replaced it, and its numbers are the older ones. The provider cache and
   the panel now keep the newer reading instead of rewinding to the late one, so
   the cards and their age never go backwards.
+- `install.sh` hardcoded the install directory instead of reading it from
+  `package/metadata.json`, so a rename of `KPlugin.Id` would link the payload
+  under a name Plasma never reads and then refuse to remove it again. The Id is
+  read at run time, must be a name that can be a directory, and the check before
+  `rm -rf` matches that Id field instead of the string anywhere in the file.
+- `install.sh` marked `fetch_quota.py` executable on every run. Nothing execs it
+  (plasmashell runs `python3 <path>`) and it is already executable in the
+  checkout, so the call only dirtied the source tree and could fail the install
+  on a read-only one.
+- `install.sh` created the plasmoid directory and the smoke output at the
+  process umask, so the fetcher's stderr (a URL, an error, a traceback) landed
+  next to it world-readable while the fetcher's own files are `0600`. The
+  installer now runs under `umask 077`.
 - A `QUOTA_WIDGET_NOW_MS` past the year 9999 passed the config check and then
   raised `OverflowError` inside every provider, after the Codex refresh POST had
   already retired the stored refresh token. The pin is now bounded to the range
