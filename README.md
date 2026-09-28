@@ -17,7 +17,7 @@ Four vendor dashboards. Numbers match the same endpoints the CLIs and websites a
 ## Requirements
 
 - KDE Plasma 6
-- Python 3 (plasmashell runs the fetcher with `python3`)
+- Python 3.11 or newer on `PATH` as `python3` (plasmashell runs the fetcher with it; `install.sh` refuses an older one)
 - Claude Code logged in (`~/.claude/.credentials.json`)
 - Cursor logged in (`~/.config/Cursor/User/globalStorage/state.vscdb`, or `~/.config/cursor/auth.json` from cursor-agent)
 - Codex CLI logged in (`~/.codex/auth.json`)
@@ -41,10 +41,10 @@ and keep your cache and settings:
 ./install.sh --uninstall
 ```
 
-After QML edits:
+After QML edits, re-run `./install.sh` (it clears the plasmashell QML cache)
+and restart plasmashell:
 
 ```bash
-rm -rf ~/.cache/plasmashell/qmlcache
 systemctl --user restart plasma-plasmashell.service
 ```
 

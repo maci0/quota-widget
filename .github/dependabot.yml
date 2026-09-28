@@ -1,0 +1,10 @@
+# The workflow pins each third-party action to the commit behind its version
+# tag, so nothing moves the action a run executes. Dependabot opens the bump.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"

@@ -98,3 +98,9 @@ style ones, and every gate step is blocking in CI. `mypy` is strict over the
 fetcher, `tests/`, and `scripts/`. A
 `noqa` carries its rule and a reason; the per-file ignores in `pyproject.toml`
 are scoped to `tests/` and say why.
+
+`.github/workflows/test.yml` pins each third-party action to the commit behind
+its version tag; `.github/dependabot.yml` opens the bump. Do not repin one to a
+floating tag. The `uv` version there is pinned, so raise it there and nowhere
+else.
+

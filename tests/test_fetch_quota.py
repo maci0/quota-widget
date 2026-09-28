@@ -53,6 +53,10 @@ _CRED_ENV = {
     "CURSOR_AUTH_JSON": "QUOTA_WIDGET_CURSOR_AUTH",
 }
 
+# The Cursor state.vscdb tables a fixture may build: the one the reader looks
+# in, and any other name for the test that proves a missing table reads empty.
+_FIXTURE_TABLES = ("ItemTable", "Other")
+
 
 def setUpModule() -> None:
     """Point every test at a sandbox home and cache, never the real ones."""
@@ -921,6 +925,11 @@ class CursorStateDbTest(unittest.TestCase):
         self.db = Path(self.tmp.name) / "state.vscdb"
 
     def _write_db(self, rows: dict[str, object], table: str = "ItemTable") -> None:
+        # A table name cannot be a bound parameter, so the two names these
+        # tests build are named here and the statement interpolates nothing
+        # else.
+        if table not in _FIXTURE_TABLES:
+            raise ValueError(f"unknown fixture table: {table!r}")
         # closing, not a bare close() at the end: a statement that raises would
         # otherwise leave the connection holding a descriptor open.
         with contextlib.closing(sqlite3.connect(self.db)) as con, con:
@@ -934,7 +943,7 @@ class CursorStateDbTest(unittest.TestCase):
             # The table name is a literal the test itself passes; the values are
             # bound, so there is no injection surface here.
             con.executemany(
-                f"INSERT INTO {table} (key, value) VALUES (?, ?)",  # noqa: S608 (fixture)
+                f"INSERT INTO {table} (key, value) VALUES (?, ?)",  # noqa: S608 (checked table)
                 list(rows.items()),
             )
 

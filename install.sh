@@ -20,6 +20,12 @@ find_root() {
 ROOT="$(find_root)"
 PKG_ID="com.maci.quota-widget"
 
+# The floor in pyproject.toml (`requires-python`): the fetcher uses dt.UTC, so
+# a 3.10 `python3` on PATH means plasmashell shows a broken data source with no
+# explanation of why. Refuse before linking rather than after a restart.
+MIN_PY_MAJOR=3
+MIN_PY_MINOR=11
+
 # XDG base dirs: a relative value is invalid, so the spec default stands.
 # https://specifications.freedesktop.org/basedir-spec/latest/
 xdg_data="$HOME/.local/share"
@@ -37,6 +43,30 @@ dest_is_ours() {
   [[ -L "$DEST" ]] && return 0
   [[ -f "$DEST/metadata.json" ]] || return 1
   grep -q "$PKG_ID" "$DEST/metadata.json"
+}
+
+check_python() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "error: python3 not found on PATH; plasmashell runs the fetcher with it" >&2
+    return 1
+  fi
+  local ver major minor
+  ver="$(python3 -V 2>&1 | sed 's/^Python //')"
+  major="${ver%%.*}"
+  minor="${ver#*.}"
+  minor="${minor%%.*}"
+  case "$major$minor" in
+    '' | *[!0-9]*) # unparsable banner: show it rather than guess
+      echo "error: cannot read the python3 version from: $ver" >&2
+      return 1
+      ;;
+  esac
+  if ((major < MIN_PY_MAJOR)) ||
+    { ((major == MIN_PY_MAJOR)) && ((minor < MIN_PY_MINOR)); }; then
+    echo "error: python3 $ver is below $MIN_PY_MAJOR.$MIN_PY_MINOR, which the" \
+      "fetcher needs" >&2
+    return 1
+  fi
 }
 
 usage() {
@@ -78,6 +108,15 @@ case "${1:-}" in
     ;;
 esac
 
+# Both checks run before anything is fetched or written: a refused install
+# must leave the checkout and the plasmoid dir exactly as it found them.
+if [[ -e "$DEST" || -L "$DEST" ]] && ! dest_is_ours; then
+  echo "error: $DEST exists and is not this widget; remove it by hand" >&2
+  exit 1
+fi
+
+check_python || exit 1
+
 chmod +x "$ROOT/package/contents/code/fetch_quota.py"
 mkdir -p "$SCRATCH"
 
@@ -93,11 +132,6 @@ fi
 # Bytecode caches are build residue, not content: the whole package/ tree is
 # what gets linked into the plasmoid dir.
 find "$ROOT/package" -type d -name __pycache__ -prune -exec rm -rf {} +
-
-if [[ -e "$DEST" || -L "$DEST" ]] && ! dest_is_ours; then
-  echo "error: $DEST exists and is not this widget; remove it by hand" >&2
-  exit 1
-fi
 
 mkdir -p "$(dirname "$DEST")"
 rm -rf "$DEST"

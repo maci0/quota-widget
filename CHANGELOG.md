@@ -30,9 +30,17 @@ prints, so a fetcher and UI shipped together never break each other.
 
 ### Fixed
 
-- `uv run ruff check .` failed on the Cursor `ItemTable` fixture in
-  `tests/test_fetch_quota.py` (`S608`, `C416`), so the gate was red for
-  everyone before a first change.
+- The gate was red on a clean tree: `ruff` reported an unparameterized table
+  name and a needless comprehension in the Cursor `state.vscdb` fixture. The
+  table name is now checked against the names the fixture builds, so `CI` is
+  green again.
+- `install.sh` fetched from every provider and wrote `.scratch/` before it
+  decided whether the install could go ahead. A refused install now refuses
+  first, leaving the checkout and the plasmoid directory untouched.
+- `install.sh` ran the fetcher with whatever `python3` was on `PATH`. Below
+  3.11 (`dt.UTC`, the floor in `pyproject.toml`) the widget showed a broken
+  data source with no reason given; the install now stops with the version it
+  found.
 - A Cursor response whose `membershipType` is not a string, or whose
   `billingCycleEnd` is not a date string, raised out of the parser and blanked
   the card instead of reading as unknown.
@@ -108,6 +116,10 @@ prints, so a fetcher and UI shipped together never break each other.
   version message on the first command.
 - The `error: "config"` payload no longer carries `fetched_ms`, since the clock
   override can be the value that failed. The panel falls back to its own clock.
+- CI pins `actions/checkout` and `astral-sh/setup-uv` to the commit behind
+  their version tag, and Dependabot (`.github/dependabot.yml`) opens the bump,
+  so a moved tag can no longer change what the gate runs. The uv cache is keyed
+  on `uv.lock` explicitly rather than by the action's default glob.
 
 ## [1.1.0] - 2026-09-28
 
