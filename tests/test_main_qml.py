@@ -219,5 +219,23 @@ class MainQmlPollingTest(unittest.TestCase):
         self.assertIn("root.userRefreshing = false", block)
 
 
+class MainQmlStaleWindowTest(unittest.TestCase):
+    """The keep-while-failing window is the fetcher's setting, not a second
+    copy of it: QUOTA_WIDGET_CACHE_MAX_AGE_S has to reach the panel."""
+
+    def test_the_window_comes_from_the_poll_payload(self) -> None:
+        self.assertIn('root.staleKeepMs = (typeof keepS === "number"', QML_SOURCE)
+        self.assertIn("const keepS = p.cache_max_age_s", QML_SOURCE)
+
+    def test_the_fallback_window_is_not_writable_state(self) -> None:
+        # staleKeepMs is overwritten by every poll, so the default it falls
+        # back to has to be a separate readonly property.
+        self.assertIn(
+            "readonly property int defaultStaleKeepMs: 24 * 60 * 60 * 1000",
+            QML_SOURCE,
+        )
+        self.assertIn("property int staleKeepMs: defaultStaleKeepMs", QML_SOURCE)
+
+
 if __name__ == "__main__":
     unittest.main()

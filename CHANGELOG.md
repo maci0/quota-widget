@@ -47,6 +47,17 @@ prints, so a fetcher and UI shipped together never break each other.
   real seconds in the suite, and a replay of one is driven by an injected
   clock. A deadline read through the pinned wall clock would have expired on
   the first contended poll, since a pinned clock never advances.
+- `QUOTA_WIDGET_CACHE_MAX_AGE_S` shortened the fetcher's own cache but not the
+  panel's, which kept a reading on screen for 24 h regardless. Each poll now
+  reports the effective window as `cache_max_age_s` and the widget ages a kept
+  reading against it.
+- A misspelled `QUOTA_WIDGET_*` variable was ignored exactly like an unset one,
+  so the poll succeeded and the setting did nothing. An unknown name in that
+  namespace is now a configuration error naming the offender. The knob list in
+  `--help` and the check share one table, so help cannot drift from what
+  `load_config` accepts.
+- `QUOTA_WIDGET_NOW_MS` accepted a negative value, dating every reading before
+  the epoch.
 - A Cursor response whose `membershipType` is not a string, or whose
   `billingCycleEnd` is not a date string, raised out of the parser and blanked
   the card instead of reading as unknown.

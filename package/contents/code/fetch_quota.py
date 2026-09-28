@@ -64,6 +64,52 @@ JsonDict: TypeAlias = dict[str, Any]
 # Overrides every wall-clock read in this module; see now_ms().
 NOW_MS_ENV = "QUOTA_WIDGET_NOW_MS"
 
+# Every knob, in one place: the name load_config reads, the name --help prints,
+# and the membership test that rejects a misspelling. Adding a knob means
+# adding its row, not a third copy of the name.
+ENV_HOME = "QUOTA_WIDGET_HOME"
+ENV_CACHE = "QUOTA_WIDGET_CACHE"
+ENV_CACHE_MAX_AGE_S = "QUOTA_WIDGET_CACHE_MAX_AGE_S"
+ENV_HTTP_TIMEOUT = "QUOTA_WIDGET_HTTP_TIMEOUT"
+ENV_CLAUDE_CREDENTIALS = "QUOTA_WIDGET_CLAUDE_CREDENTIALS"
+ENV_CODEX_AUTH = "QUOTA_WIDGET_CODEX_AUTH"
+ENV_GROK_AUTH = "QUOTA_WIDGET_GROK_AUTH"
+ENV_CURSOR_AUTH = "QUOTA_WIDGET_CURSOR_AUTH"
+ENV_CURSOR_STATE_DB = "QUOTA_WIDGET_CURSOR_STATE_DB"
+
+# Prefix a knob must carry, so a variable the widget does not own is never
+# mistaken for a typo of one that it does.
+ENV_PREFIX = "QUOTA_WIDGET_"
+
+# (name, help text) in --help order. README's table carries the defaults.
+ENV_DOCS: tuple[tuple[str, str], ...] = (
+    (ENV_HOME, "base for credential and cache paths"),
+    (ENV_CACHE, "provider cache dir"),
+    (ENV_CACHE_MAX_AGE_S, "seconds a reading stays fresh (24 h, max 24 h)"),
+    (ENV_HTTP_TIMEOUT, "per-request timeout, 0 < s <= 300"),
+    (NOW_MS_ENV, "pin the clock (ms since epoch) for replays"),
+    (ENV_CLAUDE_CREDENTIALS, "Claude credentials file"),
+    (ENV_CODEX_AUTH, "Codex auth file"),
+    (ENV_GROK_AUTH, "Grok auth file"),
+    (ENV_CURSOR_AUTH, "Cursor auth file"),
+    (ENV_CURSOR_STATE_DB, "Cursor state db"),
+)
+KNOWN_ENV = frozenset(name for name, _ in ENV_DOCS)
+
+
+def _unknown_env(env: Mapping[str, str]) -> str | None:
+    """The first QUOTA_WIDGET_* name with no knob behind it, or None.
+
+    A misspelling is otherwise indistinguishable from an unset variable: the
+    poll succeeds and the setting the user asked for silently does nothing.
+    XDG_* are the base-directory spec's own and are read, not validated here.
+    """
+    for name in sorted(env):
+        if name.startswith(ENV_PREFIX) and name not in KNOWN_ENV:
+            return name
+    return None
+
+
 # Every credential, cache, and state file is UTF-8 JSON, including the ones the
 # vendor CLIs write. Naming it beats open()'s locale default, which is ASCII
 # under a C locale (a plasmashell started without LANG) and would decode a
@@ -108,11 +154,14 @@ def _pinned_ms(raw: str) -> int:
     if not raw.strip():
         raise ConfigError(f"{NOW_MS_ENV} is set but empty")
     try:
-        return int(raw)
+        pinned = int(raw)
     except ValueError:
         raise ConfigError(
             f"{NOW_MS_ENV}={raw!r} is not an integer epoch-ms value"
         ) from None
+    if pinned < 0:
+        raise ConfigError(f"{NOW_MS_ENV}={raw!r} is before the epoch")
+    return pinned
 
 
 def now_ms() -> int:
@@ -206,14 +255,18 @@ CLAUDE_USER_AGENT = "claude-code/2.1.251"
 CURSOR_SUMMARY_URL = "https://cursor.com/api/usage-summary"
 
 REFRESH_LOCK_NAME = "refresh.lock"
+SECONDS_PER_HOUR = 3600
+SECONDS_PER_DAY = 86400
 # One poll holds the lock for at most a token round trip; a longer wait means
 # the holder died, and the caller refreshes anyway rather than never.
 REFRESH_LOCK_WAIT_S = 20.0
 REFRESH_LOCK_POLL_S = 0.25
 # Longest a cached reading may be shown after the vendor API fails, unless
 # QUOTA_WIDGET_CACHE_MAX_AGE_S says otherwise. The plasmoid keeps its own copy
-# for the same window; see staleKeepMs in package/contents/ui/main.qml.
-DEFAULT_CACHE_MAX_AGE_S = 24 * 3600
+# for the same window, and takes the length from the poll payload so an
+# override reaches it; see staleKeepMs in package/contents/ui/main.qml.
+DEFAULT_CACHE_MAX_AGE_S = SECONDS_PER_DAY
+MAX_CACHE_MAX_AGE_S = SECONDS_PER_DAY
 DEFAULT_HTTP_TIMEOUT_S = 12.0
 MAX_HTTP_TIMEOUT_S = 300.0
 CACHE_DIR_MODE = 0o700
@@ -234,8 +287,6 @@ RETRY_AFTER_MAX_S = 10.0
 NETWORK_RETRY_BACKOFF_S = 0.5
 # Unix seconds vs milliseconds: values above this are treated as ms.
 MS_EPOCH_CUTOFF = 10_000_000_000
-SECONDS_PER_HOUR = 3600
-SECONDS_PER_DAY = 86400
 CODEX_SESSION_MAX_S = 6 * SECONDS_PER_HOUR
 CODEX_TWO_DAY_S = 2 * SECONDS_PER_DAY
 CODEX_WEEK_MIN_S = 6 * SECONDS_PER_DAY
@@ -375,13 +426,19 @@ def _home(env: Mapping[str, str]) -> Path:
 def load_config(env: Mapping[str, str] | None = None) -> Config:
     """Read and validate the environment. Raises ConfigError on bad values."""
     values = os.environ if env is None else env
-    home = _env_path(values, "QUOTA_WIDGET_HOME", _home(values))
+    unknown = _unknown_env(values)
+    if unknown is not None:
+        raise ConfigError(
+            f"{unknown} is not a knob this fetcher reads; "
+            f"known: {', '.join(sorted(KNOWN_ENV))}"
+        )
+    home = _env_path(values, ENV_HOME, _home(values))
     cache_base = _xdg_dir(values, "XDG_CACHE_HOME", home / ".cache")
     timeout = _env_number(
-        values, "QUOTA_WIDGET_HTTP_TIMEOUT", DEFAULT_HTTP_TIMEOUT_S, MAX_HTTP_TIMEOUT_S
+        values, ENV_HTTP_TIMEOUT, DEFAULT_HTTP_TIMEOUT_S, MAX_HTTP_TIMEOUT_S
     )
     max_age = _env_seconds(
-        values, "QUOTA_WIDGET_CACHE_MAX_AGE_S", DEFAULT_CACHE_MAX_AGE_S, 86400
+        values, ENV_CACHE_MAX_AGE_S, DEFAULT_CACHE_MAX_AGE_S, MAX_CACHE_MAX_AGE_S
     )
     # A malformed clock override would otherwise raise from now_ms() in the
     # middle of the poll, after the panel has already been told nothing.
@@ -392,24 +449,20 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         home=home,
         claude_cred=_env_path(
             values,
-            "QUOTA_WIDGET_CLAUDE_CREDENTIALS",
+            ENV_CLAUDE_CREDENTIALS,
             home / ".claude" / ".credentials.json",
         ),
-        codex_auth=_env_path(
-            values, "QUOTA_WIDGET_CODEX_AUTH", home / ".codex" / "auth.json"
-        ),
-        grok_auth=_env_path(
-            values, "QUOTA_WIDGET_GROK_AUTH", home / ".grok" / "auth.json"
-        ),
+        codex_auth=_env_path(values, ENV_CODEX_AUTH, home / ".codex" / "auth.json"),
+        grok_auth=_env_path(values, ENV_GROK_AUTH, home / ".grok" / "auth.json"),
         cursor_auth=_env_path(
             values,
-            "QUOTA_WIDGET_CURSOR_AUTH",
+            ENV_CURSOR_AUTH,
             _cursor_config_root(values, home) / "cursor" / "auth.json",
         ),
         cursor_state_db=_env_path(
-            values, "QUOTA_WIDGET_CURSOR_STATE_DB", _cursor_state_db(values, home)
+            values, ENV_CURSOR_STATE_DB, _cursor_state_db(values, home)
         ),
-        cache_dir=_env_path(values, "QUOTA_WIDGET_CACHE", cache_base / "quota-widget"),
+        cache_dir=_env_path(values, ENV_CACHE, cache_base / "quota-widget"),
         http_timeout_s=timeout,
         cache_max_age_s=max_age,
     )
@@ -1887,6 +1940,11 @@ def fetch_cursor() -> JsonDict:
 
 USAGE_LINE = "usage: fetch_quota.py [--print-config] [--help]"
 
+# The env table above is the single list of knobs, so --help cannot drift from
+# what load_config accepts. A name wider than the column is not truncated: the
+# longest is the left column and the help is monospace-ish prose, not a table.
+ENV_HELP = "\n".join(f"  {name:<30} {help_text}" for name, help_text in ENV_DOCS)
+
 HELP = f"""{USAGE_LINE}
 
 Poll each configured provider's usage endpoint and print one JSON object on
@@ -1899,17 +1957,9 @@ options:
   -h, --help      print this help and exit
 
 environment:
-  QUOTA_WIDGET_HOME                 base for credential and cache paths
-  QUOTA_WIDGET_CACHE                provider cache dir
-  QUOTA_WIDGET_CACHE_MAX_AGE_S      seconds a cache entry stays fresh (24 h)
-  QUOTA_WIDGET_HTTP_TIMEOUT         per-request timeout, 0 < s <= 300
-  QUOTA_WIDGET_NOW_MS               pin the clock (ms since epoch) for replays
-  QUOTA_WIDGET_CLAUDE_CREDENTIALS   Claude credentials file
-  QUOTA_WIDGET_CODEX_AUTH           Codex auth file
-  QUOTA_WIDGET_GROK_AUTH            Grok auth file
-  QUOTA_WIDGET_CURSOR_AUTH          Cursor auth file
-  QUOTA_WIDGET_CURSOR_STATE_DB      Cursor state db
+{ENV_HELP}
 
+Any other QUOTA_WIDGET_* name is rejected as a typo rather than ignored.
 Plasmashell does not read shell rc files: export a variable into the user
 session (systemctl --user import-environment NAME) or the widget never sees it.
 """
@@ -2002,6 +2052,10 @@ def main(argv: list[str] | None = None) -> None:
         {
             "ok": any(r.get("ok") for r in results.values()),
             **results,
+            # The panel ages a kept reading against this window, so an override
+            # of QUOTA_WIDGET_CACHE_MAX_AGE_S reaches it instead of being
+            # answered by the 24 h default compiled into the QML.
+            "cache_max_age_s": cfg.cache_max_age_s,
             "fetched_ms": now_ms(),
         }
     )

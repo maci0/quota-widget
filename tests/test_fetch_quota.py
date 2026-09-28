@@ -978,7 +978,9 @@ class CursorStateDbTest(unittest.TestCase):
         # otherwise leave the connection holding a descriptor open.
         with contextlib.closing(sqlite3.connect(self.db)) as con, con:
             # A throwaway fixture: the durability the real vscdb needs would
-            # cost an fsync per test and buys this suite nothing.
+            # cost an fsync per test and buys this suite nothing. SQLite takes
+            # no parameter for a table name, and the one here comes from a
+            # call-site literal in this module, never from input.
             con.execute("PRAGMA journal_mode = MEMORY")
             con.execute("PRAGMA synchronous = OFF")
             # An identifier cannot be a bound parameter, so the table name is
@@ -1771,13 +1773,60 @@ class ConfigTest(unittest.TestCase):
                 fetch_quota.load_config({"QUOTA_WIDGET_CACHE_MAX_AGE_S": bad})
 
     def test_pinned_clock_must_be_epoch_ms(self) -> None:
-        for bad in ("yesterday", "", "  ", "1.5"):
+        for bad in ("yesterday", "", "  ", "1.5", "-1"):
             with (
                 self.subTest(bad=bad),
                 self.assertRaises(fetch_quota.ConfigError) as ctx,
             ):
                 fetch_quota.load_config({"QUOTA_WIDGET_NOW_MS": bad})
             self.assertIn("QUOTA_WIDGET_NOW_MS", str(ctx.exception))
+
+    def test_a_misspelled_knob_is_rejected_not_ignored(self) -> None:
+        # An unknown name used to be indistinguishable from an unset one: the
+        # poll succeeded and the setting the user asked for did nothing.
+        with self.assertRaises(fetch_quota.ConfigError) as ctx:
+            fetch_quota.load_config(
+                {
+                    "QUOTA_WIDGET_HOME": "/home/widget",
+                    "QUOTA_WIDGET_CACHE_MAX_AGES": "60",
+                }
+            )
+        self.assertIn("QUOTA_WIDGET_CACHE_MAX_AGES", str(ctx.exception))
+
+    def test_every_documented_knob_is_accepted(self) -> None:
+        # The help table and the membership test are one list; a name in one
+        # and not the other would make a valid setting fail the poll.
+        self.assertEqual(
+            {name for name, _ in fetch_quota.ENV_DOCS}, fetch_quota.KNOWN_ENV
+        )
+        for name, _ in fetch_quota.ENV_DOCS:
+            with self.subTest(name=name):
+                self.assertIn(name, fetch_quota.HELP)
+
+    def test_unrelated_variables_are_left_alone(self) -> None:
+        cfg = fetch_quota.load_config(
+            {
+                "QUOTA_WIDGET_HOME": "/home/widget",
+                "XDG_CACHE_HOME": "/xdg/cache",
+                "PATH": "/usr/bin",
+                "QUOTA_WIDGET": "",
+            }
+        )
+        self.assertEqual(cfg.cache_dir, Path("/xdg/cache/quota-widget"))
+
+    def test_a_misspelled_knob_reports_config_instead_of_polling(self) -> None:
+        out = io.StringIO()
+        with (
+            patch.dict(os.environ, {"QUOTA_WIDGET_CASH": "/tmp"}),
+            patch.object(fetch_quota, "fetch_claude") as claude,
+            patch.object(sys, "argv", ["fetch_quota.py"]),
+            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(out),
+            self.assertRaises(SystemExit),
+        ):
+            fetch_quota.main([])
+        claude.assert_not_called()
+        self.assertEqual(json.loads(out.getvalue())["error"], "config")
 
     def test_a_bad_pin_reports_config_instead_of_killing_the_poll(self) -> None:
         # The emit path reads the clock, so an unvalidated pin would abort the
@@ -1803,6 +1852,28 @@ class ConfigTest(unittest.TestCase):
         ).describe()
         self.assertEqual(described["cache_dir"], "/home/widget/.cache/quota-widget")
         self.assertNotIn("token", json.dumps(described).lower())
+
+    def test_poll_reports_the_effective_cache_window(self) -> None:
+        # The panel ages a kept reading against this number, so an override has
+        # to travel with the payload rather than live only in the fetcher.
+        out = io.StringIO()
+        stub = {"ok": False, "error": "net"}
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        with (
+            config_env(
+                QUOTA_WIDGET_CACHE=str(Path(tmp) / "cache"),
+                QUOTA_WIDGET_CACHE_MAX_AGE_S="300",
+            ),
+            patch.object(fetch_quota, "fetch_claude", return_value=dict(stub)),
+            patch.object(fetch_quota, "fetch_cursor", return_value=dict(stub)),
+            patch.object(fetch_quota, "fetch_grok", return_value=dict(stub)),
+            patch.object(fetch_quota, "fetch_codex", return_value=dict(stub)),
+            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(out),
+            self.assertRaises(SystemExit),
+        ):
+            fetch_quota.main([])
+        self.assertEqual(json.loads(out.getvalue())["cache_max_age_s"], 300)
 
     def test_bad_config_fails_before_any_provider_runs(self) -> None:
         stderr = io.StringIO()

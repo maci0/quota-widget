@@ -7,6 +7,7 @@ missing one ships a broken widget.
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from pathlib import Path
 from typing import Any, cast
@@ -62,3 +63,47 @@ def test_shipped_contents_are_the_applet_and_nothing_else() -> None:
         "contents/ui/main.qml",
         "metadata.json",
     ]
+
+
+def kcfg_entries() -> dict[str, dict[str, str]]:
+    """Each <entry> in main.xml by name, with its type and default/min/max."""
+    text = (PKG / "contents" / "config" / "main.xml").read_text(encoding="utf-8")
+    entries: dict[str, dict[str, str]] = {}
+    for block in re.findall(r"<entry\b.*?</entry>", text, re.DOTALL):
+        name = re.search(r'name="([^"]+)"', block)
+        if name is None:
+            continue
+        bounds = dict(re.findall(r"<(default|min|max)>([^<]+)</\1>", block))
+        kind = re.search(r'type="([^"]+)"', block)
+        entries[name.group(1)] = {"type": kind.group(1) if kind else "", **bounds}
+    return entries
+
+
+def test_qml_fallbacks_match_the_shipped_kcfg_defaults() -> None:
+    # intSetting() falls back to a literal when the config file has no value
+    # for a key. A literal that drifts from main.xml is a widget that reads one
+    # number on a fresh install and a different one everywhere else.
+    qml = (PKG / "contents" / "ui" / "main.qml").read_text(encoding="utf-8")
+    mismatches = []
+    for name, values in kcfg_entries().items():
+        if values["type"] != "Int":
+            continue
+        call = re.search(
+            rf"intSetting\(\s*Plasmoid\.configuration\.{name},\s*(-?\d+),\s*"
+            rf"(-?\d+),\s*(-?\d+)\s*\)",
+            qml,
+        )
+        if call is None:
+            mismatches.append(f"{name}: not read through intSetting()")
+            continue
+        fallback, low, high = (int(group) for group in call.groups())
+        if (fallback, low, high) != (
+            int(values["default"]),
+            int(values["min"]),
+            int(values["max"]),
+        ):
+            mismatches.append(
+                f"{name}: QML {fallback}/{low}/{high} vs "
+                f"kcfg {values['default']}/{values['min']}/{values['max']}"
+            )
+    assert mismatches == []

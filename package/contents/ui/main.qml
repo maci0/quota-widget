@@ -39,8 +39,13 @@ PlasmoidItem {
         Plasmoid.configuration.utilWarnAt, 70, 1, 99)
     readonly property int utilCritAt: Math.max(utilWarnAt, intSetting(
         Plasmoid.configuration.utilCritAt, 90, 1, 100))
-    // Mirrors DEFAULT_CACHE_MAX_AGE_S in package/contents/code/fetch_quota.py.
-    readonly property int staleKeepMs: 24 * 60 * 60 * 1000
+    // Mirrors DEFAULT_CACHE_MAX_AGE_S in package/contents/code/fetch_quota.py,
+    // the value a poll reports before the fetcher has said otherwise. The
+    // effective window arrives as cache_max_age_s, so setting
+    // QUOTA_WIDGET_CACHE_MAX_AGE_S shortens this too instead of leaving the
+    // panel holding a reading the fetcher has already dropped.
+    readonly property int defaultStaleKeepMs: 24 * 60 * 60 * 1000
+    property int staleKeepMs: defaultStaleKeepMs
     // Longest one fetcher run may hold the data source before the poll timer
     // drops it: four providers, each with a bounded HTTP timeout, a
     // Retry-After sleep, and a refresh-lock wait, plus process startup.
@@ -113,6 +118,9 @@ PlasmoidItem {
                 root.grok = mergeProv(root.grok, p.grok)
                 root.codex = mergeProv(root.codex, p.codex)
                 root.fetchedMs = p.fetched_ms || Date.now()
+                const keepS = p.cache_max_age_s
+                root.staleKeepMs = (typeof keepS === "number" && keepS > 0)
+                    ? keepS * 1000 : root.defaultStaleKeepMs
                 root.configError = p.config_error || ""
                 const anyOk = (root.claude && root.claude.ok)
                     || (root.cursor && root.cursor.ok)

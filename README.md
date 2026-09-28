@@ -150,6 +150,15 @@ reason on stderr; no provider runs with a half-applied config.
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` set to a relative path are ignored, per
 the [base directory spec](https://specifications.freedesktop.org/basedir-spec/latest/).
 
+A `QUOTA_WIDGET_*` name the fetcher does not read is a configuration error, not
+an ignored variable: a typo such as `QUOTA_WIDGET_CASH` aborts the poll naming
+the offender, instead of leaving the setting quietly doing nothing. `XDG_*` and
+every other variable belong to the environment and are left alone.
+
+`QUOTA_WIDGET_CACHE_MAX_AGE_S` sets the window for both caches. Each poll
+reports the value it is using as `cache_max_age_s`, so the panel ages a kept
+reading against the same number instead of a constant of its own.
+
 Plasmashell does not read shell rc files, so a variable set in `.bashrc` never
 reaches the widget. Export it into the user session before starting Plasma:
 
