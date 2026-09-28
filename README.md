@@ -1,40 +1,29 @@
-# AI Quota — KDE Plasma widget
+# AI Quota
 
-Desktop / panel widget for **KDE Plasma 6** that shows your live **Claude**,
-**Codex**, and **Grok** usage quotas.
+KDE Plasma 6 desktop and panel widget for live Claude, Cursor, Codex, and Grok usage quotas.
 
-### Claude (same numbers as claude.ai → Settings → Usage)
+Four vendor dashboards. Numbers match the same endpoints the CLIs and websites already use, with credentials that are already on disk. The header toggle next to Refresh switches between bars and wrapping circular gauges.
 
-- Plan name (e.g. Max 20x)
-- Current session (5-hour window) % + reset countdown
-- Weekly limits (All models, Fable, …) % + reset times
-- Extra usage credits when enabled
+## What it shows
 
-### Codex (same numbers as chatgpt.com/codex/settings/usage)
+**Claude** (claude.ai Settings, Usage): plan, 5-hour session %, weekly bars, extra credits when enabled.
 
-- Plan (Plus, Pro, …)
-- Session / weekly usage toward the limit, with % and reset times
-- Credits balance and available limit resets when present
+**Cursor** (cursor.com/dashboard, Usage): plan, included usage for the billing cycle, Auto vs API bars when present, on-demand spend.
 
-### Grok
+**Codex** (chatgpt.com/codex/settings/usage): plan, session and weekly windows, credit balance and limit resets when present.
 
-- Weekly limit % used (matches the `Weekly limit left` line in the Grok CLI)
-- Monthly limit % used, with $ spent / remaining
-- Reset time for each period
-
-Whichever meters the billing API returns are shown; accounts with only one
-period show one bar.
+**Grok**: weekly % (the CLI "Weekly limit left" line), monthly $ used / remaining, reset time. One bar when the API returns one period.
 
 ## Requirements
 
 - KDE Plasma 6
-- Python 3
-- **Claude:** [Claude Code](https://claude.com/claude-code) logged in
-  (`~/.claude/.credentials.json`)
-- **Codex:** [Codex CLI](https://developers.openai.com/codex) logged in
-  (`~/.codex/auth.json`, `codex login`)
-- **Grok:** [Grok Build CLI](https://x.ai) logged in (`~/.grok/auth.json`,
-  `grok login`)
+- Python 3 (plasmashell runs the fetcher with `python3`)
+- Claude Code logged in (`~/.claude/.credentials.json`)
+- Cursor logged in (`~/.config/Cursor/User/globalStorage/state.vscdb`, or `~/.config/cursor/auth.json` from cursor-agent)
+- Codex CLI logged in (`~/.codex/auth.json`)
+- Grok CLI logged in (`~/.grok/auth.json`)
+
+A provider with no token shows a sign-in line; the others still update.
 
 ## Install
 
@@ -42,51 +31,60 @@ period show one bar.
 ./install.sh
 ```
 
-Then: right-click the desktop or a panel → **Add Widgets** → search **AI Quota**.
+Right-click the desktop or a panel, Add Widgets, search **AI Quota**.
 
-To pick up QML edits after changing source:
+After QML edits:
 
 ```bash
 rm -rf ~/.cache/plasmashell/qmlcache
 systemctl --user restart plasma-plasmashell.service
 ```
 
-## How data is fetched
+## Fetching
 
-A small Python helper ships inside the package and is polled every 60s:
+`package/contents/code/fetch_quota.py` is polled every 2 minutes.
 
 | Provider | Endpoint | Credentials |
 | --- | --- | --- |
-| Claude | `GET https://api.anthropic.com/api/oauth/usage` | Claude Code OAuth token |
-| Codex | `GET https://chatgpt.com/backend-api/wham/usage` | Codex ChatGPT OAuth token |
-| Grok | `GET https://cli-chat-proxy.grok.com/v1/billing` | Grok OIDC token |
+| Claude | `GET https://api.anthropic.com/api/oauth/usage` | Claude Code OAuth |
+| Cursor | `GET https://cursor.com/api/usage-summary` | Cursor IDE or cursor-agent session |
+| Codex | `GET https://chatgpt.com/backend-api/wham/usage` | Codex ChatGPT OAuth |
+| Grok | `GET https://cli-chat-proxy.grok.com/v1/billing` | Grok OIDC |
 
-Tokens never leave your machine except to those HTTPS endpoints. Grok and Codex
-tokens are refreshed in place when near expiry (and written back to the CLI auth
-files so the CLIs keep working).
+Tokens leave the machine only for those HTTPS calls. Grok, Codex, and Claude OAuth tokens are refreshed in place when near expiry.
+
+Claude's usage API 429s unknown User-Agents. The fetcher sends Claude Code's User-Agent on that request, waits only for a short `Retry-After`, and reuses `~/.cache/quota-widget` when a usage call still 429s or 5xxs. Grok and Codex use that cache too. An expired Claude token whose refresh is also 429 is shown as rate-limited, not signed-out.
 
 Smoke-test without Plasma:
 
 ```bash
-python3 package/contents/code/fetch_quota.py | jq .
+python3 package/contents/code/fetch_quota.py
+```
+
+Dev gate (`uv`):
+
+```bash
+uv sync --extra dev
+uv run pytest
+uv run black --check .
+uv run ruff check .
+uv run mypy
 ```
 
 ## Layout
 
 ```
-package/
-  metadata.json
-  contents/
-    ui/main.qml              # panel compact + full card
-    code/fetch_quota.py      # data source
+package/metadata.json
+package/contents/config/main.xml
+package/contents/ui/main.qml
+package/contents/code/fetch_quota.py
+scripts/print_smoke.py
 install.sh
 ```
 
 ## Disclaimer
 
-Unofficial. Not affiliated with Anthropic, OpenAI, or xAI. The Claude and Codex
-usage endpoints are reverse-engineered from their CLIs and may change. Use only
-with your own accounts.
+Unofficial. Not affiliated with the vendors. Usage endpoints are reverse-engineered from their apps and can change. Use only with your own accounts.
 
 ## License
 

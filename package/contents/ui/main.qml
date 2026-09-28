@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Shapes
 import org.kde.plasma.plasmoid
 import org.kde.plasma.components as PlasmaComponents3
 import org.kde.plasma.plasma5support as P5Support
@@ -8,18 +9,31 @@ import org.kde.kirigami as Kirigami
 PlasmoidItem {
     id: root
 
-    readonly property string scriptPath: Qt.resolvedUrl("../code/fetch_quota.py")
-        .toString().replace(/^file:\/\//, "")
-    readonly property string cmd: "python3 '" + scriptPath + "'"
-    // 2 min: the Claude usage endpoint rate-limits (429) on tighter polling.
-    readonly property int pollMs: 120 * 1000
+    readonly property string scriptPath: {
+        var s = Qt.resolvedUrl("../code/fetch_quota.py").toString()
+        if (s.indexOf("file://") === 0)
+            s = s.substring(7)
+        try {
+            return decodeURIComponent(s)
+        } catch (e) {
+            return s
+        }
+    }
+    readonly property string cmd: "python3 '"
+        + scriptPath.replace(/'/g, "'\\''") + "'"
+    readonly property int pollSeconds: 120
+    readonly property int pollMs: pollSeconds * 1000
+    readonly property int utilWarnAt: 70
+    readonly property int utilCritAt: 90
 
     property var claude: null
+    property var cursor: null
     property var grok: null
     property var codex: null
     property string errorMsg: ""
     property double nowMs: Date.now()
     property double fetchedMs: 0
+    readonly property bool gaugeView: !!Plasmoid.configuration.gaugeView
 
     Plasmoid.icon: "office-chart-pie"
     toolTipMainText: "AI Quota"
@@ -38,28 +52,35 @@ PlasmoidItem {
             disconnectSource(sourceName)
             if (data["exit code"] !== 0 && data["exit code"] !== "0") {
                 // Keep last-known values on transient failures.
-                if (!root.claude && !root.grok && !root.codex)
+                if (!root.claude && !root.cursor && !root.grok && !root.codex)
                     root.errorMsg = "exec"
                 return
             }
             try {
                 const p = JSON.parse(data["stdout"])
                 root.claude = mergeProv(root.claude, p.claude)
+                root.cursor = mergeProv(root.cursor, p.cursor)
                 root.grok = mergeProv(root.grok, p.grok)
                 root.codex = mergeProv(root.codex, p.codex)
                 root.fetchedMs = p.fetched_ms || Date.now()
                 const anyOk = (root.claude && root.claude.ok)
+                    || (root.cursor && root.cursor.ok)
                     || (root.grok && root.grok.ok)
                     || (root.codex && root.codex.ok)
                 root.errorMsg = anyOk ? "" : ((p.claude && p.claude.error)
+                    || (p.cursor && p.cursor.error)
                     || (p.grok && p.grok.error)
                     || (p.codex && p.codex.error) || "empty")
             } catch (e) {
-                if (!root.claude && !root.grok && !root.codex)
+                if (!root.claude && !root.cursor && !root.grok && !root.codex)
                     root.errorMsg = "parse"
             }
         }
-        function poll() { connectSource(root.cmd) }
+        function poll() {
+            if (connectedSources.length)
+                return
+            connectSource(root.cmd)
+        }
     }
 
     Timer {
@@ -91,7 +112,7 @@ PlasmoidItem {
     }
 
     function remainStr(resetMs) {
-        if (!resetMs) return "—"
+        if (!resetMs) return "n/a"
         const ms = Math.max(0, resetMs - nowMs)
         const totalMin = Math.floor(ms / 60000)
         const d = Math.floor(totalMin / 1440)
@@ -109,22 +130,35 @@ PlasmoidItem {
 
     function utilColor(u) {
         if (u === undefined || u === null) return Kirigami.Theme.textColor
-        if (u >= 90) return Kirigami.Theme.negativeTextColor
-        if (u >= 70) return Kirigami.Theme.neutralTextColor
+        if (u >= root.utilCritAt) return Kirigami.Theme.negativeTextColor
+        if (u >= root.utilWarnAt) return Kirigami.Theme.neutralTextColor
         return Kirigami.Theme.positiveTextColor
     }
 
     function pct(u) {
-        if (u === undefined || u === null) return "—"
+        if (u === undefined || u === null) return "n/a"
         const n = Number(u)
-        if (isNaN(n)) return "—"
+        if (isNaN(n)) return "n/a"
         return (Math.round(n * 10) / 10) + "%"
     }
 
+    function periodSubdetail(p) {
+        if (!p) return ""
+        const when = p.resets_ms ? resetAtStr(p.resets_ms) : ""
+        if (p.unit === "cents" && (p.used != null || p.limit != null)) {
+            const spent = moneyFromCents(p.used)
+            const cap = p.limit != null ? moneyFromCents(p.limit) : "no cap"
+            return spent + " / " + cap + (when ? (" · " + when) : "")
+        }
+        if (p.used != null && p.limit != null)
+            return p.used + " / " + p.limit + (when ? (" · " + when) : "")
+        return when
+    }
+
     function moneyFromCents(cents) {
-        if (cents === undefined || cents === null) return "—"
+        if (cents === undefined || cents === null) return "n/a"
         const n = Number(cents) / 100
-        if (isNaN(n)) return "—"
+        if (isNaN(n)) return "n/a"
         return "$" + n.toLocaleString(undefined, {
             minimumFractionDigits: n % 1 === 0 ? 0 : 2,
             maximumFractionDigits: 2
@@ -136,7 +170,10 @@ PlasmoidItem {
         if (claude && claude.ok && claude.session)
             lines.push("Claude session " + pct(claude.session.util)
                 + " · weekly " + (claude.weekly && claude.weekly[0]
-                    ? pct(claude.weekly[0].util) : "—"))
+                    ? pct(claude.weekly[0].util) : "n/a"))
+        if (cursor && cursor.ok && cursor.periods && cursor.periods.length)
+            lines.push("Cursor " + (cursor.plan || "usage")
+                + " " + pct(cursor.periods[0].util))
         if (codex && codex.ok && codex.windows && codex.windows.length)
             lines.push("Codex " + (codex.windows[0].label || "usage")
                 + " " + pct(codex.windows[0].util))
@@ -146,26 +183,47 @@ PlasmoidItem {
                     + " " + pct(grok.periods[i].util))
         }
         if (lines.length === 0)
-            return errorMsg ? statusText() : "Loading…"
+            return errorMsg ? statusText() : "Loading"
         return lines.join("\n")
     }
 
     function statusText() {
         if (errorMsg === "no-token" || errorMsg === "http-401")
-            return "Sign in to Claude / Codex / Grok"
+            return "Sign in to Claude / Cursor / Codex / Grok"
         if (errorMsg === "net" || errorMsg === "exec")
             return "Offline"
         return "Error"
     }
 
-    // Grok period with the highest utilization (for the compact readout).
-    function grokTopPeriod() {
-        if (!(grok && grok.ok && grok.periods && grok.periods.length)) return null
-        let top = grok.periods[0]
-        for (let i = 1; i < grok.periods.length; i++)
-            if ((Number(grok.periods[i].util) || 0) > (Number(top.util) || 0))
-                top = grok.periods[i]
+    function compactPct(u) {
+        if (u === undefined || u === null) return ""
+        const n = Number(u)
+        if (isNaN(n)) return ""
+        return Math.round(n) + "%"
+    }
+
+    function topByUtil(rows) {
+        if (!rows || !rows.length) return null
+        let top = rows[0]
+        for (let i = 1; i < rows.length; i++)
+            if ((Number(rows[i].util) || 0) > (Number(top.util) || 0))
+                top = rows[i]
         return top
+    }
+
+    function cursorTopPeriod() {
+        if (!(cursor && cursor.ok)) return null
+        return topByUtil(cursor.periods)
+    }
+
+    function grokTopPeriod() {
+        if (!(grok && grok.ok)) return null
+        return topByUtil(grok.periods)
+    }
+
+    function codexTopWindow() {
+        if (!(codex && codex.ok)) return null
+        return topByUtil(codex.windows)
     }
 
     function maxUtil() {
@@ -175,6 +233,12 @@ PlasmoidItem {
         if (claude && claude.ok && claude.weekly) {
             for (let i = 0; i < claude.weekly.length; i++) {
                 const u = Number(claude.weekly[i].util)
+                if (!isNaN(u)) m = Math.max(m, u)
+            }
+        }
+        if (cursor && cursor.ok && cursor.periods) {
+            for (let i = 0; i < cursor.periods.length; i++) {
+                const u = Number(cursor.periods[i].util)
                 if (!isNaN(u)) m = Math.max(m, u)
             }
         }
@@ -210,12 +274,26 @@ PlasmoidItem {
             PlasmaComponents3.Label {
                 Layout.alignment: Qt.AlignHCenter
                 text: {
-                    if (root.claude && root.claude.ok && root.claude.session)
-                        return Math.round(root.claude.session.util) + "%"
+                    if (root.claude && root.claude.ok && root.claude.session) {
+                        var p = compactPct(root.claude.session.util)
+                        if (p) return p
+                    }
+                    var cp = root.cursorTopPeriod()
+                    if (cp) {
+                        var c = compactPct(cp.util)
+                        if (c) return c
+                    }
+                    var xp = root.codexTopWindow()
+                    if (xp) {
+                        var x = compactPct(xp.util)
+                        if (x) return x
+                    }
                     var gp = root.grokTopPeriod()
-                    if (gp)
-                        return Math.round(gp.util) + "%"
-                    return root.errorMsg ? "!" : "…"
+                    if (gp) {
+                        var g = compactPct(gp.util)
+                        if (g) return g
+                    }
+                    return root.errorMsg ? "!" : "wait"
                 }
                 color: utilColor(maxUtil())
                 font.bold: true
@@ -228,6 +306,12 @@ PlasmoidItem {
                 text: {
                     if (root.claude && root.claude.ok && root.claude.session)
                         return remainStr(root.claude.session.resets_ms)
+                    var cp = root.cursorTopPeriod()
+                    if (cp)
+                        return remainStr(cp.resets_ms)
+                    var xp = root.codexTopWindow()
+                    if (xp)
+                        return remainStr(xp.resets_ms)
                     var gp = root.grokTopPeriod()
                     if (gp)
                         return remainStr(gp.resets_ms)
@@ -267,6 +351,16 @@ PlasmoidItem {
                         Layout.fillWidth: true
                     }
                     PlasmaComponents3.ToolButton {
+                        icon.name: root.gaugeView ? "view-list-details" : "speedometer"
+                        text: root.gaugeView ? "List view" : "Gauge view"
+                        display: PlasmaComponents3.AbstractButton.IconOnly
+                        onClicked: Plasmoid.configuration.gaugeView = !root.gaugeView
+                        PlasmaComponents3.ToolTip.text: root.gaugeView
+                            ? "List view" : "Gauge view"
+                        PlasmaComponents3.ToolTip.visible: hovered
+                        PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    }
+                    PlasmaComponents3.ToolButton {
                         icon.name: "view-refresh"
                         text: "Refresh"
                         display: PlasmaComponents3.AbstractButton.IconOnly
@@ -281,6 +375,7 @@ PlasmoidItem {
                 PlasmaComponents3.Label {
                     visible: root.errorMsg !== ""
                         && !(root.claude && root.claude.ok)
+                        && !(root.cursor && root.cursor.ok)
                         && !(root.grok && root.grok.ok)
                         && !(root.codex && root.codex.ok)
                     text: statusText()
@@ -295,9 +390,9 @@ PlasmoidItem {
                     visible: root.claude !== null
                     title: "Claude"
                     subtitle: (root.claude && root.claude.ok && root.claude.plan)
-                        ? root.claude.plan
+                        ? (root.claude.plan + (root.claude.stale ? " · cached" : ""))
                         : ((root.claude && root.claude.error)
-                            ? claudeErr(root.claude.error) : "…")
+                            ? claudeErr(root.claude.error) : "Loading")
                     accent: "#D97757"
                     ok: root.claude && root.claude.ok
 
@@ -306,46 +401,56 @@ PlasmoidItem {
                         spacing: Kirigami.Units.smallSpacing
                         visible: root.claude && root.claude.ok
 
-                        // Plan usage limits header
                         PlasmaComponents3.Label {
+                            visible: !root.gaugeView
                             text: "Plan usage limits"
                             font.bold: true
                             Layout.fillWidth: true
                         }
 
-                        UsageRow {
+                        Flow {
                             Layout.fillWidth: true
-                            label: "Current session"
-                            util: root.claude && root.claude.session
-                                ? root.claude.session.util : null
-                            detail: root.claude && root.claude.session
-                                ? ("Resets in " + remainStr(root.claude.session.resets_ms))
-                                : ""
-                            subdetail: root.claude && root.claude.session
-                                ? resetAtStr(root.claude.session.resets_ms) : ""
-                        }
+                            Layout.preferredHeight: implicitHeight
+                            spacing: root.gaugeView
+                                ? Kirigami.Units.largeSpacing
+                                : Kirigami.Units.smallSpacing
 
-                        Kirigami.Separator { Layout.fillWidth: true }
-
-                        PlasmaComponents3.Label {
-                            text: "Weekly limits"
-                            font.bold: true
-                            Layout.fillWidth: true
-                        }
-
-                        Repeater {
-                            model: (root.claude && root.claude.weekly)
-                                ? root.claude.weekly : []
-                            delegate: UsageRow {
-                                required property var modelData
-                                Layout.fillWidth: true
-                                label: modelData.label || "Weekly"
-                                util: modelData.util
-                                detail: modelData.resets_ms
-                                    ? ("Resets " + resetAtStr(modelData.resets_ms))
+                            UsageRow {
+                                label: "Current session"
+                                util: root.claude && root.claude.session
+                                    ? root.claude.session.util : null
+                                detail: root.claude && root.claude.session
+                                    ? ("Resets in " + remainStr(root.claude.session.resets_ms))
                                     : ""
-                                subdetail: modelData.resets_ms
-                                    ? ("in " + remainStr(modelData.resets_ms)) : ""
+                                subdetail: root.claude && root.claude.session
+                                    ? resetAtStr(root.claude.session.resets_ms) : ""
+                            }
+
+                            Kirigami.Separator {
+                                visible: !root.gaugeView
+                                width: parent.width
+                            }
+
+                            PlasmaComponents3.Label {
+                                visible: !root.gaugeView
+                                width: parent.width
+                                text: "Weekly limits"
+                                font.bold: true
+                            }
+
+                            Repeater {
+                                model: (root.claude && root.claude.weekly)
+                                    ? root.claude.weekly : []
+                                delegate: UsageRow {
+                                    required property var modelData
+                                    label: modelData.label || "Weekly"
+                                    util: modelData.util
+                                    detail: modelData.resets_ms
+                                        ? ("Resets " + resetAtStr(modelData.resets_ms))
+                                        : ""
+                                    subdetail: modelData.resets_ms
+                                        ? ("in " + remainStr(modelData.resets_ms)) : ""
+                                }
                             }
                         }
 
@@ -382,6 +487,65 @@ PlasmoidItem {
                     }
                 }
 
+                // ═══════════════ Cursor ═══════════════
+                ProviderCard {
+                    Layout.fillWidth: true
+                    visible: root.cursor !== null
+                    title: "Cursor"
+                    subtitle: (root.cursor && root.cursor.ok && root.cursor.plan)
+                        ? (root.cursor.plan + (root.cursor.stale ? " · cached" : ""))
+                        : ((root.cursor && root.cursor.error)
+                            ? cursorErr(root.cursor.error) : "Loading")
+                    accent: "#F54E00"
+                    ok: root.cursor && root.cursor.ok
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+                        visible: root.cursor && root.cursor.ok
+
+                        PlasmaComponents3.Label {
+                            visible: !!(root.cursor && root.cursor.unlimited)
+                            text: "Unlimited included usage"
+                            Layout.fillWidth: true
+                        }
+
+                        Flow {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: implicitHeight
+                            visible: !!(root.cursor && root.cursor.periods
+                                && root.cursor.periods.length)
+                            spacing: root.gaugeView
+                                ? Kirigami.Units.largeSpacing
+                                : Kirigami.Units.smallSpacing
+
+                            Repeater {
+                                model: (root.cursor && root.cursor.periods)
+                                    ? root.cursor.periods : []
+                                delegate: UsageRow {
+                                    required property var modelData
+                                    label: (modelData.label || "Usage")
+                                        + (modelData.unit === "cents" ? " spend" : "")
+                                    util: modelData.util
+                                    detail: modelData.resets_ms
+                                        ? ("Resets in " + remainStr(modelData.resets_ms))
+                                        : ""
+                                    subdetail: periodSubdetail(modelData)
+                                }
+                            }
+                        }
+
+                        PlasmaComponents3.Label {
+                            visible: root.cursor && root.cursor.ok
+                                && !(root.cursor.unlimited)
+                                && !(root.cursor.periods && root.cursor.periods.length)
+                            text: "No usage meters reported"
+                            opacity: 0.7
+                            Layout.fillWidth: true
+                        }
+                    }
+                }
+
                 // ═══════════════ Codex ═══════════════
                 ProviderCard {
                     Layout.fillWidth: true
@@ -390,7 +554,7 @@ PlasmoidItem {
                     subtitle: (root.codex && root.codex.ok && root.codex.plan)
                         ? root.codex.plan
                         : ((root.codex && root.codex.error)
-                            ? codexErr(root.codex.error) : "…")
+                            ? codexErr(root.codex.error) : "Loading")
                     accent: "#10A37F"
                     ok: root.codex && root.codex.ok
 
@@ -400,6 +564,7 @@ PlasmoidItem {
                         visible: root.codex && root.codex.ok
 
                         PlasmaComponents3.Label {
+                            visible: !root.gaugeView
                             text: "Usage limits"
                             font.bold: true
                             Layout.fillWidth: true
@@ -413,19 +578,28 @@ PlasmoidItem {
                             Layout.fillWidth: true
                         }
 
-                        Repeater {
-                            model: (root.codex && root.codex.windows)
-                                ? root.codex.windows : []
-                            delegate: UsageRow {
-                                required property var modelData
-                                Layout.fillWidth: true
-                                label: modelData.label || "Usage"
-                                util: modelData.util
-                                detail: modelData.resets_ms
-                                    ? ("Resets in " + remainStr(modelData.resets_ms))
-                                    : ""
-                                subdetail: modelData.resets_ms
-                                    ? resetAtStr(modelData.resets_ms) : ""
+                        Flow {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: implicitHeight
+                            visible: !!(root.codex && root.codex.windows
+                                && root.codex.windows.length)
+                            spacing: root.gaugeView
+                                ? Kirigami.Units.largeSpacing
+                                : Kirigami.Units.smallSpacing
+
+                            Repeater {
+                                model: (root.codex && root.codex.windows)
+                                    ? root.codex.windows : []
+                                delegate: UsageRow {
+                                    required property var modelData
+                                    label: modelData.label || "Usage"
+                                    util: modelData.util
+                                    detail: modelData.resets_ms
+                                        ? ("Resets in " + remainStr(modelData.resets_ms))
+                                        : ""
+                                    subdetail: modelData.resets_ms
+                                        ? resetAtStr(modelData.resets_ms) : ""
+                                }
                             }
                         }
 
@@ -481,7 +655,7 @@ PlasmoidItem {
                     subtitle: (root.grok && root.grok.ok)
                         ? "Credit limits"
                         : ((root.grok && root.grok.error)
-                            ? grokErr(root.grok.error) : "…")
+                            ? grokErr(root.grok.error) : "Loading")
                     accent: "#1DA1F2"
                     ok: root.grok && root.grok.ok
 
@@ -490,26 +664,26 @@ PlasmoidItem {
                         spacing: Kirigami.Units.smallSpacing
                         visible: root.grok && root.grok.ok && root.grok.periods
 
-                        Repeater {
-                            model: (root.grok && root.grok.periods)
-                                ? root.grok.periods : []
-                            delegate: UsageRow {
-                                required property var modelData
-                                Layout.fillWidth: true
-                                label: (modelData.label || "Usage") + " limit"
-                                util: modelData.util
-                                detail: modelData.resets_ms
-                                    ? ("Resets in " + remainStr(modelData.resets_ms))
-                                    : ""
-                                subdetail: {
-                                    const when = modelData.resets_ms
-                                        ? resetAtStr(modelData.resets_ms) : ""
-                                    // Unified credits report percent only, no $.
-                                    if (modelData.used == null && modelData.limit == null)
-                                        return when
-                                    return moneyFromCents(modelData.used) + " / "
-                                        + moneyFromCents(modelData.limit)
-                                        + (when ? (" · " + when) : "")
+                        Flow {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: implicitHeight
+                            visible: !!(root.grok && root.grok.periods
+                                && root.grok.periods.length)
+                            spacing: root.gaugeView
+                                ? Kirigami.Units.largeSpacing
+                                : Kirigami.Units.smallSpacing
+
+                            Repeater {
+                                model: (root.grok && root.grok.periods)
+                                    ? root.grok.periods : []
+                                delegate: UsageRow {
+                                    required property var modelData
+                                    label: (modelData.label || "Usage") + " limit"
+                                    util: modelData.util
+                                    detail: modelData.resets_ms
+                                        ? ("Resets in " + remainStr(modelData.resets_ms))
+                                        : ""
+                                    subdetail: periodSubdetail(modelData)
                                 }
                             }
                         }
@@ -550,7 +724,14 @@ PlasmoidItem {
         if (code === "no-token" || code === "http-401")
             return "Sign in with Claude Code"
         if (code === "net") return "Network error"
-        if (code === "http-429") return "Rate-limited, retrying…"
+        if (code === "http-429") return "Rate-limited"
+        return "Unavailable"
+    }
+    function cursorErr(code) {
+        if (code === "no-token" || code === "http-401")
+            return "Sign in to Cursor"
+        if (code === "net") return "Network error"
+        if (code === "http-429") return "Rate-limited"
         return "Unavailable"
     }
     function codexErr(code) {
@@ -615,9 +796,33 @@ PlasmoidItem {
         property string detail: ""
         property string subdetail: ""
 
-        spacing: 2
+        readonly property real frac: {
+            if (row.util === undefined || row.util === null)
+                return 0
+            const n = Number(row.util)
+            if (isNaN(n))
+                return 0
+            return Math.min(1, Math.max(0, n / 100))
+        }
+        property real shownFrac: frac
+        Behavior on shownFrac {
+            NumberAnimation { duration: 280; easing.type: Easing.OutCubic }
+        }
 
+        readonly property int gaugeSize: Kirigami.Units.gridUnit * 5
+        readonly property real ring: Math.max(5, gaugeSize * 0.1)
+        readonly property real arcRadius: gaugeSize / 2 - ring
+        readonly property real startDeg: 135
+        readonly property real maxSweep: 270
+
+        spacing: root.gaugeView ? Kirigami.Units.smallSpacing : 2
+        width: root.gaugeView ? gaugeSize : (parent ? parent.width : gaugeSize)
+        implicitWidth: root.gaugeView ? gaugeSize : (parent ? parent.width : gaugeSize)
+        Layout.alignment: root.gaugeView ? Qt.AlignHCenter : Qt.AlignLeft
+
+        // list (bars)
         RowLayout {
+            visible: !root.gaugeView
             Layout.fillWidth: true
             PlasmaComponents3.Label {
                 text: row.label
@@ -632,8 +837,8 @@ PlasmoidItem {
             }
         }
 
-        // Custom bar for clearer colouring than ProgressBar
         Item {
+            visible: !root.gaugeView
             Layout.fillWidth: true
             height: 8
 
@@ -647,16 +852,15 @@ PlasmoidItem {
                 anchors.left: parent.left
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
-                width: parent.width * Math.min(1, Math.max(0, (Number(row.util) || 0) / 100))
+                width: parent.width * row.shownFrac
                 radius: 4
                 color: utilColor(row.util)
-                Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
             }
         }
 
         RowLayout {
+            visible: !root.gaugeView && (row.detail !== "" || row.subdetail !== "")
             Layout.fillWidth: true
-            visible: row.detail !== "" || row.subdetail !== ""
             PlasmaComponents3.Label {
                 text: row.detail
                 opacity: 0.7
@@ -672,6 +876,106 @@ PlasmoidItem {
                 elide: Text.ElideRight
                 horizontalAlignment: Text.AlignRight
             }
+        }
+
+        // gauge
+        Item {
+            visible: root.gaugeView
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: row.gaugeSize
+            Layout.preferredHeight: row.gaugeSize
+            width: row.gaugeSize
+            height: row.gaugeSize
+
+            HoverHandler { id: gaugeHover }
+
+            PlasmaComponents3.ToolTip.visible: gaugeHover.hovered
+                && (row.detail !== "" || row.subdetail !== "")
+            PlasmaComponents3.ToolTip.text: row.detail
+                + (row.detail !== "" && row.subdetail !== "" ? "\n" : "")
+                + row.subdetail
+            PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
+
+            Shape {
+                anchors.fill: parent
+                opacity: 0.25
+                ShapePath {
+                    strokeWidth: row.ring
+                    strokeColor: Kirigami.Theme.disabledTextColor
+                    fillColor: "transparent"
+                    capStyle: ShapePath.RoundCap
+                    startX: row.gaugeSize / 2
+                        + row.arcRadius * Math.cos(row.startDeg * Math.PI / 180)
+                    startY: row.gaugeSize / 2
+                        + row.arcRadius * Math.sin(row.startDeg * Math.PI / 180)
+                    PathAngleArc {
+                        centerX: row.gaugeSize / 2
+                        centerY: row.gaugeSize / 2
+                        radiusX: row.arcRadius
+                        radiusY: row.arcRadius
+                        startAngle: row.startDeg
+                        sweepAngle: row.maxSweep
+                    }
+                }
+            }
+
+            Shape {
+                anchors.fill: parent
+                visible: row.util !== undefined && row.util !== null
+                    && !isNaN(Number(row.util))
+                ShapePath {
+                    strokeWidth: row.ring
+                    strokeColor: utilColor(row.util)
+                    fillColor: "transparent"
+                    capStyle: ShapePath.RoundCap
+                    startX: row.gaugeSize / 2
+                        + row.arcRadius * Math.cos(row.startDeg * Math.PI / 180)
+                    startY: row.gaugeSize / 2
+                        + row.arcRadius * Math.sin(row.startDeg * Math.PI / 180)
+                    PathAngleArc {
+                        centerX: row.gaugeSize / 2
+                        centerY: row.gaugeSize / 2
+                        radiusX: row.arcRadius
+                        radiusY: row.arcRadius
+                        startAngle: row.startDeg
+                        sweepAngle: row.maxSweep * row.shownFrac
+                    }
+                }
+            }
+
+            PlasmaComponents3.Label {
+                anchors.centerIn: parent
+                anchors.verticalCenterOffset: row.ring * 0.15
+                text: pct(row.util)
+                font.bold: true
+                font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.05)
+                font.features: { "tnum": 1 }
+                color: utilColor(row.util)
+            }
+        }
+
+        PlasmaComponents3.Label {
+            visible: root.gaugeView
+            text: row.label
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            maximumLineCount: 2
+            elide: Text.ElideRight
+            Layout.fillWidth: true
+            Layout.preferredWidth: row.gaugeSize
+        }
+
+        PlasmaComponents3.Label {
+            visible: root.gaugeView && row.detail !== ""
+            text: row.detail
+            opacity: 0.7
+            font.pointSize: Kirigami.Theme.smallFont.pointSize
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+            maximumLineCount: 2
+            elide: Text.ElideRight
+            Layout.fillWidth: true
+            Layout.preferredWidth: row.gaugeSize
         }
     }
 }

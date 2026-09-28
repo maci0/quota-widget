@@ -8,7 +8,7 @@
             }
         ],
         "Category": "System Information",
-        "Description": "Claude, Codex, and Grok usage quotas: session, weekly, and monthly credit limits",
+        "Description": "Claude, Cursor, Codex, and Grok usage quotas: session, weekly, and monthly credit limits",
         "Icon": "office-chart-pie",
         "Id": "com.maci.quota-widget",
         "License": "MIT",

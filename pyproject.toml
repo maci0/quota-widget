@@ -1,0 +1,38 @@
+[project]
+name = "quota-widget"
+version = "1.0.0"
+description = "KDE Plasma 6 widget for Claude, Cursor, Codex, and Grok usage quotas"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.10.0",
+    "mypy>=1.13.0",
+    "pytest>=8.3.0",
+    "ruff>=0.8.0",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+include = '''\.pyi?$'''
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["package/contents/code", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "package/contents/code"
+files = ["package/contents/code/fetch_quota.py", "tests", "scripts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["package/contents/code"]

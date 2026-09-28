@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Fetch Claude + Grok + Codex usage quotas for the Plasma widget.
+"""Fetch Claude + Cursor + Grok + Codex usage quotas for the Plasma widget.
 
 Claude: GET https://api.anthropic.com/api/oauth/usage
   (same numbers as claude.ai Settings → Usage / Claude Code /usage)
   Auth: ~/.claude/.credentials.json → claudeAiOauth.accessToken
+
+Cursor: GET https://cursor.com/api/usage-summary
+  (same numbers as cursor.com/dashboard → Usage)
+  Auth: Cursor IDE session in state.vscdb, or cursor-agent ~/.config/cursor/auth.json
 
 Grok:   GET https://cli-chat-proxy.grok.com/v1/billing
   Auth: ~/.grok/auth.json OIDC access token (auto-refreshed)
@@ -17,38 +21,80 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import email.utils
 import json
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.message import Message
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
+from urllib.request import pathname2url
+
+# Unversioned HTTP JSON: keys and nesting change by plan, host, and API revision.
+JsonDict: TypeAlias = dict[str, Any]
+
+
+def _as_dict(value: object) -> JsonDict:
+    return value if isinstance(value, dict) else {}
+
+
+def _http_retryable(status: int) -> bool:
+    return status in (429, 503) or status >= 500
+
 
 CLAUDE_CRED = Path.home() / ".claude" / ".credentials.json"
 CLAUDE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLAUDE_TOKEN_URLS = (
+    "https://platform.claude.com/v1/oauth/token",
+    "https://console.anthropic.com/v1/oauth/token",
+)
 
 GROK_AUTH = Path.home() / ".grok" / "auth.json"
-# Base billing endpoint. "?format=credits" returns the current period the CLI
-# shows ("Weekly limit left", creditUsagePercent); the bare URL returns the
-# legacy monthly $ limit. We fetch both and show whichever meters exist.
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
 GROK_OIDC_DISCOVERY = "https://auth.x.ai/.well-known/openid-configuration"
 
 CODEX_AUTH = Path.home() / ".codex" / "auth.json"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
-# Public client id embedded in the Codex CLI for ChatGPT login.
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 USER_AGENT = "quota-widget/1.0"
+# Anthropic rate-limits /api/oauth/usage per User-Agent; Claude Code's bucket works.
+# https://github.com/anthropics/claude-code/issues/30930
+CLAUDE_USER_AGENT = "claude-code/2.1.251"
+
+CURSOR_AUTH_JSON = Path.home() / ".config" / "cursor" / "auth.json"
+CURSOR_SUMMARY_URL = "https://cursor.com/api/usage-summary"
+
+CACHE_MAX_AGE_S = 24 * 3600
+HTTP_TIMEOUT_S = 12.0
+FILE_MODE_PRIVATE = 0o600
+TOKEN_SKEW_MS = 120_000
+TOKEN_SKEW_S = 120
+RETRY_AFTER_MIN_S = 0.5
+RETRY_AFTER_MAX_S = 10.0
+# Unix seconds vs milliseconds: values above this are treated as ms.
+MS_EPOCH_CUTOFF = 10_000_000_000
+ERROR_BODY_PREVIEW = 200
+CODEX_SESSION_MAX_S = 6 * 3600
+CODEX_TWO_DAY_S = 2 * 86400
+CODEX_WEEK_MIN_S = 6 * 86400
+CODEX_WEEK_MAX_S = 8 * 86400
+CODEX_MONTH_MIN_S = 28 * 86400
+CODEX_MONTH_MAX_S = 32 * 86400
+SECONDS_PER_HOUR = 3600
+SECONDS_PER_DAY = 86400
 
 
-def emit(obj: dict[str, Any]) -> None:
+def emit(obj: JsonDict) -> None:
     print(json.dumps(obj, separators=(",", ":")))
     raise SystemExit(0)
 
@@ -57,10 +103,9 @@ def iso_to_ms(value: str | None) -> int | None:
     if not value:
         return None
     try:
-        # Handle both "…Z" and offset forms; fromisoformat needs +00:00 not Z.
         s = value.replace("Z", "+00:00")
         return int(dt.datetime.fromisoformat(s).timestamp() * 1000)
-    except Exception:
+    except (TypeError, ValueError, OSError):
         return None
 
 
@@ -87,36 +132,211 @@ def plan_label(subscription: str | None, tier: str | None) -> str:
     return "Claude"
 
 
-def fetch_json(
+def parse_retry_after(value: str | None) -> float | None:
+    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date)."""
+    if not value:
+        return None
+    s = value.strip()
+    try:
+        return max(0.0, float(s))
+    except ValueError:
+        pass  # not delta-seconds; try HTTP-date next
+    try:
+        when = email.utils.parsedate_to_datetime(s)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=dt.UTC)
+        return max(0.0, (when - dt.datetime.now(dt.UTC)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None  # HTTP-date present but not parseable
+
+
+def _cache_dir() -> Path:
+    override = os.environ.get("QUOTA_WIDGET_CACHE")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    return base / "quota-widget"
+
+
+def _read_provider_cache(
+    name: str, max_age_s: int = CACHE_MAX_AGE_S
+) -> JsonDict | None:
+    path = _cache_dir() / f"{name}.json"
+    try:
+        obj = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    ts = obj.get("cached_ms")
+    payload = obj.get("payload")
+    if not isinstance(ts, (int, float)) or not isinstance(payload, dict):
+        return None
+    if not payload.get("ok"):
+        return None
+    now = int(time.time() * 1000)
+    if now - int(ts) > max_age_s * 1000:
+        return None
+    return payload
+
+
+def _write_provider_cache(name: str, payload: JsonDict) -> None:
+    if not payload.get("ok"):
+        return
+    folder = _cache_dir()
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{name}.json"
+        fd, tmp = tempfile.mkstemp(prefix=f".{name}.", suffix=".json", dir=str(folder))
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(
+                    {
+                        "cached_ms": int(dt.datetime.now(dt.UTC).timestamp() * 1000),
+                        "payload": payload,
+                    },
+                    f,
+                    separators=(",", ":"),
+                )
+                f.write("\n")
+            os.chmod(tmp, FILE_MODE_PRIVATE)
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass  # tmp already gone
+            raise
+    except OSError:
+        pass  # cache is best-effort; a full disk must not fail the poll
+
+
+def _stale_cache(name: str) -> JsonDict | None:
+    cached = _read_provider_cache(name)
+    if not cached:
+        return None
+    out = dict(cached)
+    out["stale"] = True
+    out["ok"] = True
+    return out
+
+
+def fetch_http(
     url: str,
     headers: dict[str, str],
     *,
-    timeout: float = 12,
+    timeout: float = HTTP_TIMEOUT_S,
     data: bytes | None = None,
     method: str | None = None,
-) -> tuple[int, Any]:
+) -> tuple[int, object, Message | None]:
+    """Return (status, decoded JSON or None, response headers)."""
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
+            hdrs = resp.headers
             if not body:
-                return resp.status, None
-            return resp.status, json.loads(body.decode())
-    except urllib.error.HTTPError as e:
-        try:
-            payload = e.read().decode()
+                return resp.status, None, hdrs
             try:
-                return e.code, json.loads(payload)
-            except Exception:
-                return e.code, {"raw": payload[:200]}
-        except Exception:
-            return e.code, None
+                return resp.status, json.loads(body.decode("utf-8")), hdrs
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return resp.status, None, hdrs
+    except urllib.error.HTTPError as e:
+        hdrs = e.headers if e.headers is not None else Message()
+        try:
+            payload = e.read().decode("utf-8", "replace")
+            try:
+                return e.code, json.loads(payload), hdrs
+            except json.JSONDecodeError:
+                return e.code, {"raw": payload[:ERROR_BODY_PREVIEW]}, hdrs
+        except OSError:
+            return e.code, None, hdrs
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return 0, None, None
+
+
+def fetch_json(
+    url: str,
+    headers: dict[str, str],
+    *,
+    timeout: float = HTTP_TIMEOUT_S,
+    data: bytes | None = None,
+    method: str | None = None,
+) -> tuple[int, object]:
+    status, body, _hdrs = fetch_http(
+        url, headers, timeout=timeout, data=data, method=method
+    )
+    return status, body
 
 
 # ── Claude ──────────────────────────────────────────────────────────────────
 
 
-def fetch_claude() -> dict[str, Any]:
+def _claude_expired(oauth: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool:
+    exp = oauth.get("expiresAt")
+    if not isinstance(exp, (int, float)):
+        return False
+    ts_ms = int(exp if exp > MS_EPOCH_CUTOFF else exp * 1000)
+    now_ms = int(dt.datetime.now(dt.UTC).timestamp() * 1000)
+    return ts_ms <= now_ms + skew_ms
+
+
+def _refresh_claude(cred: JsonDict) -> JsonDict | None:
+    """Refresh Claude Code OAuth and write the rotated tokens back."""
+    try:
+        latest = json.loads(CLAUDE_CRED.read_text())
+        if isinstance(latest, dict):
+            cred = latest
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        pass  # use the in-memory cred already loaded
+    oauth = cred.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    refresh = oauth.get("refreshToken")
+    if not isinstance(refresh, str) or not refresh:
+        return None
+
+    body = json.dumps(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": CLAUDE_CLIENT_ID,
+        }
+    ).encode()
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    tok: Any = None  # OAuth token JSON; fields vary by host
+    for url in CLAUDE_TOKEN_URLS:
+        status, tok = fetch_json(url, headers, data=body, method="POST")
+        if status == 200 and isinstance(tok, dict) and tok.get("access_token"):
+            break
+        if status in (400, 401):
+            return None
+        tok = None
+    if not isinstance(tok, dict) or not tok.get("access_token"):
+        return None
+
+    new_oauth = dict(oauth)
+    new_oauth["accessToken"] = tok["access_token"]
+    if tok.get("refresh_token"):
+        new_oauth["refreshToken"] = tok["refresh_token"]
+    expires_in = tok.get("expires_in")
+    if isinstance(expires_in, (int, float)):
+        new_oauth["expiresAt"] = int(
+            (dt.datetime.now(dt.UTC).timestamp() + int(expires_in)) * 1000
+        )
+    new_cred = dict(cred)
+    new_cred["claudeAiOauth"] = new_oauth
+    try:
+        _atomic_write_json(CLAUDE_CRED, new_cred)
+    except OSError:
+        pass  # still return in-memory tokens so this poll can proceed
+    return new_cred
+
+
+def fetch_claude() -> JsonDict:
     if not CLAUDE_CRED.is_file():
         return {"ok": False, "error": "no-token"}
 
@@ -124,32 +344,62 @@ def fetch_claude() -> dict[str, Any]:
         cred = json.loads(CLAUDE_CRED.read_text())
         oauth = cred["claudeAiOauth"]
         token = oauth["accessToken"]
-    except Exception:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
         return {"ok": False, "error": "no-token"}
+
+    refreshed_already = False
+    if _claude_expired(oauth):
+        refreshed = _refresh_claude(cred)
+        refreshed_already = True
+        if refreshed:
+            cred = refreshed
+            oauth = _as_dict(cred.get("claudeAiOauth"))
+            token = oauth.get("accessToken")
+            if not isinstance(token, str) or not token:
+                return {"ok": False, "error": "no-token"}
 
     headers = {
         "Authorization": f"Bearer {token}",
         "anthropic-beta": "oauth-2025-04-20",
         "anthropic-version": "2023-06-01",
-        "User-Agent": USER_AGENT,
+        "User-Agent": CLAUDE_USER_AGENT,
         "Accept": "application/json",
     }
-    # The usage endpoint sporadically 429s; a short retry heals most blips
-    # within one poll. ponytail: fixed 2s backoff, honor Retry-After when given.
-    status, data = fetch_json(CLAUDE_URL, headers)
+    status, data, hdrs = fetch_http(CLAUDE_URL, headers)
+    if status == 401 and not refreshed_already:
+        refreshed = _refresh_claude(cred)
+        if refreshed:
+            oauth = _as_dict(refreshed.get("claudeAiOauth"))
+            token = oauth.get("accessToken")
+            if not isinstance(token, str) or not token:
+                return {"ok": False, "error": "no-token"}
+            headers["Authorization"] = f"Bearer {token}"
+            status, data, hdrs = fetch_http(CLAUDE_URL, headers)
     if status in (429, 503):
-        time.sleep(2)
-        status, data = fetch_json(CLAUDE_URL, headers)
+        wait = parse_retry_after(hdrs.get("Retry-After") if hdrs else None)
+        if wait is not None and RETRY_AFTER_MIN_S <= wait <= RETRY_AFTER_MAX_S:
+            time.sleep(wait)
+            status, data, hdrs = fetch_http(CLAUDE_URL, headers)
     if status == 401:
+        cached = _stale_cache("claude")
+        if cached:
+            return cached
+        # Refresh 429 with a still-valid refresh token is not a sign-out.
+        if oauth.get("refreshToken"):
+            return {"ok": False, "error": "http-429"}
         return {"ok": False, "error": "http-401"}
     if status != 200 or not isinstance(data, dict):
+        if _http_retryable(status):
+            cached = _stale_cache("claude")
+            if cached:
+                return cached
         return {"ok": False, "error": f"http-{status}" if status else "net"}
 
     plan = plan_label(oauth.get("subscriptionType"), oauth.get("rateLimitTier"))
 
     # Prefer the structured `limits` array (matches the website list,
     # including scoped weekly bars like Fable). Fall back to legacy keys.
-    weekly: list[dict[str, Any]] = []
+    weekly: list[JsonDict] = []
     limits = data.get("limits")
     if isinstance(limits, list) and limits:
         for item in limits:
@@ -161,14 +411,13 @@ def fetch_claude() -> dict[str, Any]:
                 # handled separately below
                 continue
             label = "All models"
-            scope = item.get("scope") or {}
-            if isinstance(scope, dict):
-                model = scope.get("model") or {}
-                if isinstance(model, dict) and model.get("display_name"):
-                    label = str(model["display_name"])
-                surface = scope.get("surface")
-                if surface:
-                    label = str(surface)
+            scope = _as_dict(item.get("scope"))
+            model = _as_dict(scope.get("model"))
+            if model.get("display_name"):
+                label = str(model["display_name"])
+            surface = scope.get("surface")
+            if surface:
+                label = str(surface)
             if kind == "weekly_all":
                 label = "All models"
             weekly.append(
@@ -186,7 +435,7 @@ def fetch_claude() -> dict[str, Any]:
             ("seven_day_sonnet", "Sonnet"),
             ("seven_day_cowork", "Cowork"),
         ):
-            block = data.get(key)
+            block = _as_dict(data.get(key))
             if not block:
                 continue
             weekly.append(
@@ -198,7 +447,7 @@ def fetch_claude() -> dict[str, Any]:
                 }
             )
 
-    five = data.get("five_hour") or {}
+    five = _as_dict(data.get("five_hour"))
     # Also pull session percent from limits if present
     session_util = five.get("utilization")
     session_reset = iso_to_ms(five.get("resets_at"))
@@ -213,10 +462,11 @@ def fetch_claude() -> dict[str, Any]:
                     session_reset = iso_to_ms(item.get("resets_at"))
                 break
 
-    extra = data.get("extra_usage") or {}
-    spend = data.get("spend") or {}
+    extra = _as_dict(data.get("extra_usage"))
+    spend = _as_dict(data.get("spend"))
+    spend_used = _as_dict(spend.get("used"))
 
-    return {
+    result = {
         "ok": True,
         "plan": plan,
         "session": {
@@ -233,29 +483,30 @@ def fetch_claude() -> dict[str, Any]:
         "spend": {
             "enabled": bool(spend.get("enabled")),
             "percent": spend.get("percent"),
-            "used_minor": (spend.get("used") or {}).get("amount_minor"),
-            "currency": (spend.get("used") or {}).get("currency")
-            or extra.get("currency"),
-            "exponent": (spend.get("used") or {}).get("exponent", 2),
+            "used_minor": spend_used.get("amount_minor"),
+            "currency": spend_used.get("currency") or extra.get("currency"),
+            "exponent": spend_used.get("exponent", 2),
         },
     }
+    _write_provider_cache("claude", result)
+    return result
 
 
 # ── Grok ────────────────────────────────────────────────────────────────────
 
 
-def _load_grok_auth() -> tuple[str, dict[str, Any]] | None:
+def _load_grok_auth() -> tuple[str, JsonDict] | None:
     if not GROK_AUTH.is_file():
         return None
     try:
         store = json.loads(GROK_AUTH.read_text())
-    except Exception:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(store, dict) or not store:
         return None
     # Prefer the entry with the latest expires_at
     best_key = None
-    best_entry: dict[str, Any] | None = None
+    best_entry: JsonDict | None = None
     best_exp = ""
     for key, entry in store.items():
         if not isinstance(entry, dict) or "key" not in entry:
@@ -268,19 +519,19 @@ def _load_grok_auth() -> tuple[str, dict[str, Any]] | None:
     return best_key, best_entry
 
 
-def _token_expired(entry: dict[str, Any], skew_s: int = 120) -> bool:
+def _token_expired(entry: JsonDict, skew_s: int = TOKEN_SKEW_S) -> bool:
     exp = entry.get("expires_at")
     if not exp:
         return False
     try:
         when = dt.datetime.fromisoformat(str(exp).replace("Z", "+00:00"))
-        now = dt.datetime.now(dt.timezone.utc)
+        now = dt.datetime.now(dt.UTC)
         return when <= now + dt.timedelta(seconds=skew_s)
-    except Exception:
+    except (TypeError, ValueError, OSError):
         return False
 
 
-def _refresh_grok(auth_key: str, entry: dict[str, Any]) -> dict[str, Any] | None:
+def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
     """Refresh OIDC access token and persist the new tokens atomically."""
     client_id = entry.get("oidc_client_id")
     if not client_id and "::" in auth_key:
@@ -289,15 +540,14 @@ def _refresh_grok(auth_key: str, entry: dict[str, Any]) -> dict[str, Any] | None
     if not client_id or not refresh:
         return None
 
-    try:
-        _, discovery = fetch_json(
-            GROK_OIDC_DISCOVERY,
-            {"Accept": "application/json", "User-Agent": USER_AGENT},
-        )
-        token_url = (discovery or {}).get("token_endpoint")
-        if not token_url:
-            return None
-    except Exception:
+    _, discovery = fetch_json(
+        GROK_OIDC_DISCOVERY,
+        {"Accept": "application/json", "User-Agent": USER_AGENT},
+    )
+    if not isinstance(discovery, dict):
+        return None
+    token_url = discovery.get("token_endpoint")
+    if not isinstance(token_url, str) or not token_url:
         return None
 
     body = urllib.parse.urlencode(
@@ -326,7 +576,7 @@ def _refresh_grok(auth_key: str, entry: dict[str, Any]) -> dict[str, Any] | None
         new_entry["refresh_token"] = tok["refresh_token"]
     expires_in = tok.get("expires_in")
     if isinstance(expires_in, (int, float)):
-        exp = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=int(expires_in))
+        exp = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=int(expires_in))
         new_entry["expires_at"] = exp.isoformat().replace("+00:00", "Z")
 
     # Persist so subsequent polls (and the Grok CLI) keep working.
@@ -342,43 +592,40 @@ def _refresh_grok(auth_key: str, entry: dict[str, Any]) -> dict[str, Any] | None
             with os.fdopen(fd, "w") as f:
                 json.dump(store, f, indent=2)
                 f.write("\n")
-            os.chmod(tmp, 0o600)
+            os.chmod(tmp, FILE_MODE_PRIVATE)
             os.replace(tmp, GROK_AUTH)
-        except Exception:
+        except OSError:
             try:
                 os.unlink(tmp)
             except OSError:
-                pass
+                pass  # tmp already gone
             raise
-    except Exception:
-        # Still return the live token even if we couldn't write.
-        pass
+    except OSError:
+        pass  # return the live token; writing auth.json failed
 
     return new_entry
 
 
-def _money_val(obj: Any) -> int | None:
+def _money_val(obj: Any) -> int | None:  # JSON number or {val: int}
     if obj is None:
         return None
     if isinstance(obj, dict) and "val" in obj:
         try:
             return int(obj["val"])
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return None
     if isinstance(obj, (int, float)):
         return int(obj)
     return None
 
 
-def _parse_grok_period(cfg: dict[str, Any]) -> dict[str, Any]:
+def _parse_grok_period(cfg: JsonDict) -> JsonDict:
     """Parse one billing config into a period dict (weekly or monthly shape)."""
     on_demand = _money_val(cfg.get("onDemandCap") or cfg.get("on_demand_cap"))
-    period = cfg.get("currentPeriod") or {}
+    period = _as_dict(cfg.get("currentPeriod"))
     ptype = str(period.get("type") or "")
     label = (
-        "Weekly" if "WEEKLY" in ptype
-        else "Monthly" if "MONTHLY" in ptype
-        else "Usage"
+        "Weekly" if "WEEKLY" in ptype else "Monthly" if "MONTHLY" in ptype else "Usage"
     )
 
     # Unified-billing users: a single percent for the current period, no $
@@ -406,9 +653,7 @@ def _parse_grok_period(cfg: dict[str, Any]) -> dict[str, Any]:
         start_ms = iso_to_ms(
             cfg.get("billingPeriodStart") or cfg.get("billing_period_start")
         )
-        end_ms = iso_to_ms(
-            cfg.get("billingPeriodEnd") or cfg.get("billing_period_end")
-        )
+        end_ms = iso_to_ms(cfg.get("billingPeriodEnd") or cfg.get("billing_period_end"))
         if label == "Usage":
             label = "Monthly"
 
@@ -425,7 +670,7 @@ def _parse_grok_period(cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def fetch_grok() -> dict[str, Any]:
+def fetch_grok() -> JsonDict:
     loaded = _load_grok_auth()
     if not loaded:
         return {"ok": False, "error": "no-token"}
@@ -438,8 +683,8 @@ def fetch_grok() -> dict[str, Any]:
 
     state = {"entry": entry}
 
-    def get_cfg(url: str) -> tuple[int | None, dict[str, Any] | None]:
-        def call(token: str) -> tuple[int, Any]:
+    def get_cfg(url: str) -> tuple[int | None, JsonDict | None]:
+        def call(token: str) -> tuple[int, object]:
             return fetch_json(
                 url,
                 {
@@ -449,22 +694,29 @@ def fetch_grok() -> dict[str, Any]:
                 },
             )
 
-        status, data = call(state["entry"]["key"])
+        token = state["entry"].get("key")
+        if not isinstance(token, str) or not token:
+            return 0, None
+        status, data = call(token)
         if status == 401:
             refreshed = _refresh_grok(auth_key, state["entry"])
             if not refreshed:
                 return 401, None
             state["entry"] = refreshed
-            status, data = call(state["entry"]["key"])
+            token = state["entry"].get("key")
+            if not isinstance(token, str) or not token:
+                return 401, None
+            status, data = call(token)
         if status != 200 or not isinstance(data, dict):
             return status, None
-        return status, (data.get("config") or data)
+        cfg = data.get("config")
+        return status, cfg if isinstance(cfg, dict) else data
 
     # Weekly (unified credits) + monthly ($ limit) are separate meters; show both.
     st_week, week_cfg = get_cfg(GROK_BILLING_URL + "?format=credits")
     st_month, month_cfg = get_cfg(GROK_BILLING_URL)
 
-    periods: list[dict[str, Any]] = []
+    periods: list[JsonDict] = []
     seen: set[tuple[str, int | None]] = set()
     for cfg in (week_cfg, month_cfg):
         if not cfg:
@@ -477,12 +729,18 @@ def fetch_grok() -> dict[str, Any]:
         periods.append(p)
 
     if not periods:
-        status = st_week or st_month
+        status = st_week or st_month or 0
         if status == 401:
             return {"ok": False, "error": "http-401"}
+        if _http_retryable(status):
+            cached = _stale_cache("grok")
+            if cached:
+                return cached
         return {"ok": False, "error": f"http-{status}" if status else "net"}
 
-    return {"ok": True, "plan": "Grok", "periods": periods}
+    result = {"ok": True, "plan": "Grok", "periods": periods}
+    _write_provider_cache("grok", result)
+    return result
 
 
 # ── Codex ───────────────────────────────────────────────────────────────────
@@ -495,44 +753,52 @@ def _jwt_exp_ms(token: str) -> int | None:
             return None
         pad = "=" * ((4 - len(parts[1]) % 4) % 4)
         payload = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+        if not isinstance(payload, dict):
+            return None
         exp = payload.get("exp")
         if exp is None:
             return None
         return int(exp) * 1000
-    except Exception:
+    except (ValueError, TypeError, KeyError):
         return None
 
 
 def _jwt_claim(token: str, *path: str) -> Any:
+    """Nested JWT payload value; claim types are not a closed set."""
     try:
         parts = token.split(".")
         if len(parts) < 2:
             return None
         pad = "=" * ((4 - len(parts[1]) % 4) % 4)
         payload = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+        if not isinstance(payload, dict):
+            return None
         cur: Any = payload
         for key in path:
             if not isinstance(cur, dict):
                 return None
             cur = cur.get(key)
         return cur
-    except Exception:
+    except (ValueError, TypeError, KeyError):
         return None
 
 
 def _atomic_write_json(path: Path, obj: Any) -> None:
-    fd, tmp = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
+    """Atomically replace path with JSON. obj is any json.dump value."""
+    fd, tmp = tempfile.mkstemp(
+        prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(obj, f, indent=2)
             f.write("\n")
-        os.chmod(tmp, 0o600)
+        os.chmod(tmp, FILE_MODE_PRIVATE)
         os.replace(tmp, path)
-    except Exception:
+    except OSError:
         try:
             os.unlink(tmp)
         except OSError:
-            pass
+            pass  # tmp already gone
         raise
 
 
@@ -540,21 +806,20 @@ def _codex_window_label(window_seconds: int | None, name: str) -> str:
     """Map primary/secondary window duration to a human label."""
     if not window_seconds:
         return name.replace("_", " ").title()
-    # 5-hour session windows are typically 18000s; weekly is 604800s.
-    if window_seconds <= 6 * 3600:
+    if window_seconds <= CODEX_SESSION_MAX_S:
         return "Current session"
-    if window_seconds <= 2 * 86400:
-        hours = max(1, round(window_seconds / 3600))
+    if window_seconds <= CODEX_TWO_DAY_S:
+        hours = max(1, round(window_seconds / SECONDS_PER_HOUR))
         return f"{hours}-hour"
-    if 6 * 86400 <= window_seconds <= 8 * 86400:
+    if CODEX_WEEK_MIN_S <= window_seconds <= CODEX_WEEK_MAX_S:
         return "Weekly"
-    if 28 * 86400 <= window_seconds <= 32 * 86400:
+    if CODEX_MONTH_MIN_S <= window_seconds <= CODEX_MONTH_MAX_S:
         return "Monthly"
-    days = max(1, round(window_seconds / 86400))
+    days = max(1, round(window_seconds / SECONDS_PER_DAY))
     return f"{days}-day"
 
 
-def _codex_window(block: dict[str, Any] | None, name: str) -> dict[str, Any] | None:
+def _codex_window(block: JsonDict | None, name: str) -> JsonDict | None:
     if not isinstance(block, dict):
         return None
     raw_used = block.get("used_percent")
@@ -567,7 +832,7 @@ def _codex_window(block: dict[str, Any] | None, name: str) -> dict[str, Any] | N
     window_s = block.get("limit_window_seconds")
     try:
         window_s_i = int(window_s) if window_s is not None else None
-    except Exception:
+    except (TypeError, ValueError):
         window_s_i = None
 
     resets_ms = None
@@ -577,9 +842,7 @@ def _codex_window(block: dict[str, Any] | None, name: str) -> dict[str, Any] | N
     else:
         after = block.get("reset_after_seconds")
         if isinstance(after, (int, float)):
-            resets_ms = int(
-                (dt.datetime.now(dt.timezone.utc).timestamp() + float(after)) * 1000
-            )
+            resets_ms = int((dt.datetime.now(dt.UTC).timestamp() + float(after)) * 1000)
 
     return {
         "label": _codex_window_label(window_s_i, name),
@@ -590,7 +853,7 @@ def _codex_window(block: dict[str, Any] | None, name: str) -> dict[str, Any] | N
     }
 
 
-def _codex_reset_credits(data: dict[str, Any]) -> dict[str, Any]:
+def _codex_reset_credits(data: JsonDict) -> JsonDict:
     """Preserve a reported empty reset-credit balance as an explicit zero."""
     reported = "rate_limit_reset_credits" in data
     raw = data.get("rate_limit_reset_credits")
@@ -604,8 +867,8 @@ def _codex_reset_credits(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _refresh_codex(auth: dict[str, Any]) -> dict[str, Any] | None:
-    tokens = auth.get("tokens") or {}
+def _refresh_codex(auth: JsonDict) -> JsonDict | None:
+    tokens = _as_dict(auth.get("tokens"))
     refresh = tokens.get("refresh_token")
     if not refresh:
         return None
@@ -639,27 +902,29 @@ def _refresh_codex(auth: dict[str, Any]) -> dict[str, Any] | None:
 
     new_auth = dict(auth)
     new_auth["tokens"] = new_tokens
-    new_auth["last_refresh"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    new_auth["last_refresh"] = dt.datetime.now(dt.UTC).isoformat()
 
     try:
         _atomic_write_json(CODEX_AUTH, new_auth)
-    except Exception:
-        pass
+    except OSError:
+        pass  # return live tokens; writing auth.json failed
     return new_auth
 
 
-def fetch_codex() -> dict[str, Any]:
+def fetch_codex() -> JsonDict:
     if not CODEX_AUTH.is_file():
         return {"ok": False, "error": "no-token"}
 
     try:
         auth = json.loads(CODEX_AUTH.read_text())
-    except Exception:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "no-token"}
+    if not isinstance(auth, dict):
         return {"ok": False, "error": "no-token"}
 
-    tokens = auth.get("tokens") or {}
+    tokens = _as_dict(auth.get("tokens"))
     access = tokens.get("access_token")
-    if not access:
+    if not isinstance(access, str) or not access:
         return {"ok": False, "error": "no-token"}
 
     account_id = tokens.get("account_id") or _jwt_claim(
@@ -667,16 +932,18 @@ def fetch_codex() -> dict[str, Any]:
     )
 
     exp_ms = _jwt_exp_ms(access)
-    now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
-    if exp_ms is not None and exp_ms <= now_ms + 120_000:
+    now_ms = int(dt.datetime.now(dt.UTC).timestamp() * 1000)
+    if exp_ms is not None and exp_ms <= now_ms + TOKEN_SKEW_MS:
         refreshed = _refresh_codex(auth)
         if refreshed:
             auth = refreshed
-            tokens = auth.get("tokens") or {}
+            tokens = _as_dict(auth.get("tokens"))
             access = tokens.get("access_token")
             account_id = tokens.get("account_id") or account_id
+            if not isinstance(access, str) or not access:
+                return {"ok": False, "error": "no-token"}
 
-    def call(token: str) -> tuple[int, Any]:
+    def call(token: str) -> tuple[int, object]:
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
@@ -691,18 +958,24 @@ def fetch_codex() -> dict[str, Any]:
         refreshed = _refresh_codex(auth)
         if not refreshed:
             return {"ok": False, "error": "http-401"}
-        tokens = refreshed.get("tokens") or {}
+        tokens = _as_dict(refreshed.get("tokens"))
         access = tokens.get("access_token")
+        if not isinstance(access, str):
+            return {"ok": False, "error": "http-401"}
         status, data = call(access)
 
     if status != 200 or not isinstance(data, dict):
+        if _http_retryable(status):
+            cached = _stale_cache("codex")
+            if cached:
+                return cached
         return {"ok": False, "error": f"http-{status}" if status else "net"}
 
     plan_type = data.get("plan_type") or "Codex"
     plan = str(plan_type).replace("_", " ").title()
 
-    rate = data.get("rate_limit") or {}
-    windows: list[dict[str, Any]] = []
+    rate = _as_dict(data.get("rate_limit"))
+    windows: list[JsonDict] = []
     for key in ("primary_window", "secondary_window"):
         w = _codex_window(rate.get(key), key)
         if w:
@@ -724,10 +997,10 @@ def fetch_codex() -> dict[str, Any]:
                 w["label"] = "Code review"
                 windows.append(w)
 
-    credits = data.get("credits") or {}
+    credits = _as_dict(data.get("credits"))
     reset_credits = _codex_reset_credits(data)
 
-    return {
+    result = {
         "ok": True,
         "plan": plan,
         "allowed": rate.get("allowed"),
@@ -741,35 +1014,346 @@ def fetch_codex() -> dict[str, Any]:
         },
         "reset_credits": reset_credits,
     }
+    _write_provider_cache("codex", result)
+    return result
+
+
+# ── Cursor ──────────────────────────────────────────────────────────────────
+
+
+def _cursor_state_db() -> Path:
+    home = Path.home()
+    if sys.platform == "darwin":
+        return (
+            home
+            / "Library"
+            / "Application Support"
+            / "Cursor"
+            / "User"
+            / "globalStorage"
+            / "state.vscdb"
+        )
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        root = Path(appdata) if appdata else home / "AppData" / "Roaming"
+        return root / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(xdg) if xdg else home / ".config"
+    return root / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+
+
+def _vscdb_str(value: Any) -> str | None:
+    """ItemTable cell: raw str, bytes, or JSON-quoted str."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.startswith('"'):
+        try:
+            decoded = json.loads(s)
+            if isinstance(decoded, str):
+                return decoded
+        except json.JSONDecodeError:
+            pass  # keep the raw cell text
+    return s
+
+
+def _workos_user_id(sub: str) -> str:
+    """WorkOS user id from a JWT sub (`auth0|user_01abc` -> `user_01abc`)."""
+    if "|" in sub:
+        return sub.rsplit("|", 1)[-1]
+    return sub
+
+
+def _jwt_sub(token: str) -> str | None:
+    sub = _jwt_claim(token, "sub")
+    if not isinstance(sub, str) or not sub:
+        return None
+    return _workos_user_id(sub)
+
+
+def cursor_plan_label(membership: str | None) -> str:
+    m = (membership or "").strip().lower().replace("-", "_").replace(" ", "_")
+    names = {
+        "free": "Free",
+        "hobby": "Hobby",
+        "pro": "Pro",
+        "pro_plus": "Pro+",
+        "proplus": "Pro+",
+        "ultra": "Ultra",
+        "business": "Business",
+        "team": "Team",
+        "teams": "Team",
+        "enterprise": "Enterprise",
+    }
+    if m in names:
+        return names[m]
+    if m:
+        return m.replace("_", " ").title()
+    return "Cursor"
+
+
+def _read_cursor_auth_json(path: Path) -> tuple[str, str] | None:
+    try:
+        store = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(store, dict):
+        return None
+    token = store.get("accessToken")
+    if not isinstance(token, str) or not token:
+        return None
+    return token, ""
+
+
+def _read_cursor_state_db(path: Path) -> tuple[str, str] | None:
+    if not path.is_file():
+        return None
+    uri = "file:" + pathname2url(str(path)) + "?mode=ro"
+    con = None
+    try:
+        try:
+            con = sqlite3.connect(uri, uri=True, timeout=1.0)
+        except sqlite3.OperationalError:
+            con = sqlite3.connect(uri + "&immutable=1", uri=True, timeout=1.0)
+        rows = con.execute(
+            "SELECT key, value FROM ItemTable WHERE key IN (?, ?)",
+            ("cursorAuth/accessToken", "cursorAuth/stripeMembershipType"),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except sqlite3.Error:
+                pass  # connection already closed or unusable
+    m = {k: _vscdb_str(v) for k, v in rows}
+    token = m.get("cursorAuth/accessToken")
+    if not token:
+        return None
+    return token, (m.get("cursorAuth/stripeMembershipType") or "")
+
+
+def _load_cursor_auth() -> dict[str, str] | None:
+    """Return {token, plan} from env override, cursor-agent auth.json, or IDE DB."""
+    env_path = os.environ.get("CURSOR_AUTH_JSON")
+    candidates: list[tuple[Path, str]] = []
+    if env_path:
+        candidates.append((Path(env_path), "json"))
+    candidates.append((CURSOR_AUTH_JSON, "json"))
+    candidates.append((_cursor_state_db(), "vscdb"))
+
+    for path, kind in candidates:
+        try:
+            if not path.is_file():
+                continue
+            loaded = (
+                _read_cursor_auth_json(path)
+                if kind == "json"
+                else _read_cursor_state_db(path)
+            )
+        except PermissionError:
+            continue
+        if not loaded:
+            continue
+        token, plan = loaded
+        sub = _jwt_sub(token)
+        if not sub:
+            continue
+        return {"token": token, "sub": sub, "plan": plan}
+    return None
+
+
+def _cursor_meter(
+    block: Any,  # usage-summary meter object; keys vary by plan
+    label: str,
+    unit: str,
+    resets_ms: int | None,
+) -> JsonDict | None:
+    if not isinstance(block, dict) or not block.get("enabled", True):
+        return None
+    used = block.get("used")
+    limit = block.get("limit")
+    util = block.get("totalPercentUsed")
+    if (
+        util is None
+        and isinstance(used, (int, float))
+        and isinstance(limit, (int, float))
+        and limit
+    ):
+        util = round(100.0 * float(used) / float(limit), 1)
+    if util is None and used is None and limit is None:
+        return None
+    return {
+        "label": label,
+        "util": util,
+        "used": used,
+        "limit": limit,
+        "resets_ms": resets_ms,
+        "unit": unit,
+    }
+
+
+def parse_cursor_summary(data: JsonDict, plan_hint: str | None = None) -> JsonDict:
+    """Turn /api/usage-summary JSON into widget periods."""
+    plan = cursor_plan_label(data.get("membershipType") or plan_hint)
+    cycle_end = iso_to_ms(data.get("billingCycleEnd"))
+    unlimited = bool(data.get("isUnlimited"))
+    periods: list[JsonDict] = []
+
+    iu = (
+        data.get("individualUsage")
+        if isinstance(data.get("individualUsage"), dict)
+        else {}
+    )
+    plan_u = iu.get("plan") if isinstance(iu, dict) else None
+    overall = iu.get("overall") if isinstance(iu, dict) else None
+
+    if not unlimited:
+        included = (
+            _cursor_meter(plan_u, "Included", "count", cycle_end) if plan_u else None
+        )
+        if included is None:
+            included = _cursor_meter(overall, "Included", "cents", cycle_end)
+        if included:
+            periods.append(included)
+        if isinstance(plan_u, dict):
+            auto_pct = plan_u.get("autoPercentUsed")
+            api_pct = plan_u.get("apiPercentUsed")
+            util = included["util"] if included else None
+            if (
+                isinstance(auto_pct, (int, float))
+                and isinstance(api_pct, (int, float))
+                and (auto_pct != api_pct)
+                and (
+                    util is None
+                    or abs(float(auto_pct) - float(util)) > 0.5
+                    or abs(float(api_pct) - float(util)) > 0.5
+                )
+            ):
+                periods.append(
+                    {
+                        "label": "Auto + Composer",
+                        "util": auto_pct,
+                        "used": None,
+                        "limit": None,
+                        "resets_ms": cycle_end,
+                        "unit": "percent",
+                    }
+                )
+                periods.append(
+                    {
+                        "label": "API",
+                        "util": api_pct,
+                        "used": None,
+                        "limit": None,
+                        "resets_ms": cycle_end,
+                        "unit": "percent",
+                    }
+                )
+
+    on_demand = _cursor_meter(
+        iu.get("onDemand") if isinstance(iu, dict) else None,
+        "On-demand",
+        "cents",
+        cycle_end,
+    )
+    team = data.get("teamUsage") if isinstance(data.get("teamUsage"), dict) else {}
+    team_od = _cursor_meter(
+        team.get("onDemand") if isinstance(team, dict) else None,
+        "Team on-demand" if on_demand else "On-demand",
+        "cents",
+        cycle_end,
+    )
+    if on_demand:
+        periods.append(on_demand)
+    if team_od and (not on_demand or team_od.get("used") != on_demand.get("used")):
+        periods.append(team_od)
+
+    return {
+        "ok": True,
+        "plan": plan,
+        "unlimited": unlimited,
+        "limit_type": data.get("limitType"),
+        "periods": periods,
+        "resets_ms": cycle_end,
+    }
+
+
+def fetch_cursor() -> JsonDict:
+    auth = _load_cursor_auth()
+    if not auth:
+        return {"ok": False, "error": "no-token"}
+
+    cookie = "WorkosCursorSessionToken=" + urllib.parse.quote(
+        auth["sub"] + "::" + auth["token"], safe=""
+    )
+    headers = {
+        "Cookie": cookie,
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+        "Origin": "https://cursor.com",
+        "Referer": "https://cursor.com/dashboard/usage",
+    }
+    status, data = fetch_json(CURSOR_SUMMARY_URL, headers)
+    if status in (401, 403):
+        return {"ok": False, "error": "http-401"}
+    if _http_retryable(status):
+        cached = _stale_cache("cursor")
+        if cached:
+            return cached
+        return {"ok": False, "error": f"http-{status}"}
+    if status != 200 or not isinstance(data, dict):
+        return {"ok": False, "error": f"http-{status}" if status else "net"}
+
+    result = parse_cursor_summary(data, auth.get("plan"))
+    _write_provider_cache("cursor", result)
+    return result
 
 
 # ── main ────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
-    claude: dict[str, Any]
-    grok: dict[str, Any]
-    codex: dict[str, Any]
+    claude: JsonDict
+    cursor: JsonDict
+    grok: JsonDict
+    codex: JsonDict
     try:
         claude = fetch_claude()
-    except Exception as e:
-        claude = {"ok": False, "error": "net", "detail": str(e)}
+    except Exception:
+        # Plasmashell needs JSON every poll; one provider must not abort the rest.
+        claude = {"ok": False, "error": "net"}
+    try:
+        cursor = fetch_cursor()
+    except Exception:
+        cursor = {"ok": False, "error": "net"}
     try:
         grok = fetch_grok()
-    except Exception as e:
-        grok = {"ok": False, "error": "net", "detail": str(e)}
+    except Exception:
+        grok = {"ok": False, "error": "net"}
     try:
         codex = fetch_codex()
-    except Exception as e:
-        codex = {"ok": False, "error": "net", "detail": str(e)}
+    except Exception:
+        codex = {"ok": False, "error": "net"}
 
     emit(
         {
-            "ok": bool(claude.get("ok") or grok.get("ok") or codex.get("ok")),
+            "ok": bool(
+                claude.get("ok")
+                or cursor.get("ok")
+                or grok.get("ok")
+                or codex.get("ok")
+            ),
             "claude": claude,
+            "cursor": cursor,
             "grok": grok,
             "codex": codex,
-            "fetched_ms": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000),
+            "fetched_ms": int(dt.datetime.now(dt.UTC).timestamp() * 1000),
         }
     )
 
