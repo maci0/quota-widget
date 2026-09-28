@@ -800,6 +800,22 @@ def warn(message: str) -> None:
     print(f"fetch_quota: {_redact(message)}", file=sys.stderr)
 
 
+def warn_traceback(exc: BaseException) -> None:
+    """Print a crash's traceback with the home directory spelled `~`.
+
+    traceback.print_exc writes to stderr itself, past warn() and its
+    redaction, and every frame names a file under the checkout, which sits
+    under the home directory on every install path. The journal keeps the line
+    long after the poll wrote it, so the account name the path's first
+    component carries would outlive the run in it.
+    """
+    print(
+        _redact("".join(traceback.format_exception(type(exc), exc, exc.__traceback__))),
+        file=sys.stderr,
+        end="",
+    )
+
+
 def iso_to_utc(value: str) -> dt.datetime | None:
     """Parse an ISO 8601 timestamp to an aware UTC datetime, or None.
 
@@ -2688,7 +2704,7 @@ def _safe_fetch(name: str, fetch: Callable[[], JsonDict]) -> JsonDict:
         # journal: a bug here otherwise looks exactly like a dropped connection
         # on the display.
         warn(f"provider {name} raised {type(exc).__name__}: {exc}")
-        traceback.print_exc()
+        warn_traceback(exc)
         return _failure("net", transient=True)
 
 

@@ -116,6 +116,12 @@ fails if a Breaking entry lands in this section without a matching next version.
 
 ### Fixed
 
+- The traceback a crashing provider writes to the session journal spelled the
+  home directory out. `traceback.print_exc` writes to stderr itself, past the
+  redaction every `warn` line goes through, and each frame names a file under
+  the checkout, which sits under the home directory on every install path, so
+  the account name in that path's first component reached the journal on every
+  crash. The traceback is printed through the same redaction now.
 - A Grok token refresh raised `OverflowError` when the new expiry fell past the
   last instant the calendar holds, which is what a `QUOTA_WIDGET_NOW_MS` at the
   ceiling the fetcher accepts, or a lifetime far longer than the calendar, both

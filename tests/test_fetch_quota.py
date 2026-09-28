@@ -3012,6 +3012,32 @@ class ProviderCrashTest(unittest.TestCase):
         self.assertIn("meters exploded", logged)
         self.assertIn("Traceback", logged)
 
+    def test_the_traceback_hides_the_home_directory(self) -> None:
+        """A frame names a file under the checkout, and the checkout is under
+        the home directory, so an unredacted traceback spells the account name
+        into the journal on every install path."""
+        home = "/home/someone"
+        frame_file = Path(home) / "quota-widget" / "fetch_quota.py"
+        namespace: dict[str, Any] = {}
+        exec(  # noqa: S102 (a frame under a named home, which is the subject)
+            compile(
+                "def boom():\n    raise RuntimeError('meters exploded')\n",
+                str(frame_file),
+                "exec",
+            ),
+            namespace,
+        )
+        boom: Callable[[], JsonDict] = namespace["boom"]
+
+        err = io.StringIO()
+        with config_env(QUOTA_WIDGET_HOME=home):
+            with contextlib.redirect_stderr(err):
+                fetch_quota._safe_fetch("claude", boom)
+        logged = err.getvalue()
+        self.assertIn("Traceback", logged)
+        self.assertIn("~/quota-widget/fetch_quota.py", logged)
+        self.assertNotIn("someone", logged)
+
 
 class CodexExpiryClockTest(unittest.TestCase):
     def test_expiry_reads_the_pinned_clock(self) -> None:
