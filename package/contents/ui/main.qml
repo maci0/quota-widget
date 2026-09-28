@@ -163,6 +163,17 @@ PlasmoidItem {
         return Kirigami.Theme.positiveTextColor
     }
 
+    // Severity is a text channel, not only the meter color, so it survives
+    // colorblindness and high-contrast themes.
+    function utilSeverity(u) {
+        if (u === undefined || u === null) return "unknown"
+        const n = Number(u)
+        if (isNaN(n)) return "unknown"
+        if (n >= root.utilCritAt) return "critical"
+        if (n >= root.utilWarnAt) return "high"
+        return "normal"
+    }
+
     function pct(u) {
         if (u === undefined || u === null) return "n/a"
         const n = Number(u)
@@ -292,7 +303,24 @@ PlasmoidItem {
         Layout.preferredWidth: compactCol.implicitWidth + Kirigami.Units.smallSpacing * 2
         Layout.minimumHeight: compactCol.implicitHeight
         hoverEnabled: true
+        focus: true
+        activeFocusOnTab: true
+        Accessible.role: Accessible.Button
+        Accessible.name: "AI Quota"
+        Accessible.description: root.tooltipBody()
+        Keys.onSpacePressed: root.expanded = !root.expanded
+        Keys.onReturnPressed: root.expanded = !root.expanded
+        Keys.onEscapePressed: root.expanded = false
         onClicked: root.expanded = !root.expanded
+
+        Rectangle {
+            anchors.fill: parent
+            radius: Kirigami.Units.smallRadius
+            color: "transparent"
+            border.width: 2
+            border.color: Kirigami.Theme.focusColor
+            visible: compact.activeFocus
+        }
 
         ColumnLayout {
             id: compactCol
@@ -325,7 +353,7 @@ PlasmoidItem {
                 }
                 color: utilColor(maxUtil())
                 font.bold: true
-                font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.1)
+                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.1
                 font.features: { "tnum": 1 }
                 horizontalAlignment: Text.AlignHCenter
             }
@@ -345,8 +373,7 @@ PlasmoidItem {
                         return remainStr(gp.resets_ms)
                     return "quota"
                 }
-                opacity: 0.8
-                font.pixelSize: Math.round(Kirigami.Theme.smallFont.pixelSize)
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
                 font.features: { "tnum": 1 }
                 horizontalAlignment: Text.AlignHCenter
             }
@@ -385,7 +412,7 @@ PlasmoidItem {
                         onClicked: Plasmoid.configuration.gaugeView = !root.gaugeView
                         PlasmaComponents3.ToolTip.text: root.gaugeView
                             ? "List view" : "Gauge view"
-                        PlasmaComponents3.ToolTip.visible: hovered
+                        PlasmaComponents3.ToolTip.visible: hovered || visualFocus
                         PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
                     }
                     PlasmaComponents3.ToolButton {
@@ -394,7 +421,7 @@ PlasmoidItem {
                         display: PlasmaComponents3.AbstractButton.IconOnly
                         onClicked: exec.poll()
                         PlasmaComponents3.ToolTip.text: "Refresh now"
-                        PlasmaComponents3.ToolTip.visible: hovered
+                        PlasmaComponents3.ToolTip.visible: hovered || visualFocus
                         PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
                     }
                 }
@@ -410,6 +437,8 @@ PlasmoidItem {
                     color: Kirigami.Theme.negativeTextColor
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
+                    Accessible.role: Accessible.AlertMessage
+                    Accessible.name: statusText()
                 }
 
                 // ═══════════════ Claude ═══════════════
@@ -507,7 +536,6 @@ PlasmoidItem {
                                 }
                                 return "Extra usage credits: " + used + " " + cur
                             }
-                            opacity: 0.75
                             font.pointSize: Kirigami.Theme.smallFont.pointSize
                             Layout.fillWidth: true
                             wrapMode: Text.WordWrap
@@ -568,7 +596,6 @@ PlasmoidItem {
                                 && !(root.cursor.unlimited)
                                 && !(root.cursor.periods && root.cursor.periods.length)
                             text: "No usage meters reported"
-                            opacity: 0.7
                             Layout.fillWidth: true
                         }
                     }
@@ -635,7 +662,6 @@ PlasmoidItem {
                             visible: root.codex && root.codex.windows
                                 && root.codex.windows.length === 0
                             text: "No active usage windows reported"
-                            opacity: 0.7
                             Layout.fillWidth: true
                         }
 
@@ -650,7 +676,6 @@ PlasmoidItem {
                                 if (c.unlimited) return "Credits: unlimited"
                                 return "Credits balance: " + (c.balance || "0")
                             }
-                            opacity: 0.75
                             font.pointSize: Kirigami.Theme.smallFont.pointSize
                             Layout.fillWidth: true
                         }
@@ -668,7 +693,6 @@ PlasmoidItem {
                                         ? (" (" + r.applicable + " usable now)")
                                         : "")
                             }
-                            opacity: 0.75
                             font.pointSize: Kirigami.Theme.smallFont.pointSize
                             Layout.fillWidth: true
                         }
@@ -727,7 +751,6 @@ PlasmoidItem {
                                         + moneyFromCents(periods[0].on_demand_cap))
                                     : ""
                             }
-                            opacity: 0.75
                             font.pointSize: Kirigami.Theme.smallFont.pointSize
                             Layout.fillWidth: true
                         }
@@ -739,10 +762,10 @@ PlasmoidItem {
                         ? ("Updated "
                             + Qt.formatTime(new Date(root.fetchedMs), "h:mm AP"))
                         : ""
-                    opacity: 0.5
                     font.pointSize: Kirigami.Theme.smallFont.pointSize
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignRight
+                    Accessible.role: Accessible.StatusBar
                 }
             }
         }
@@ -781,13 +804,14 @@ PlasmoidItem {
             PlasmaComponents3.Label {
                 text: card.title
                 font.bold: true
-                font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.15)
+                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.15
+                Accessible.role: Accessible.Heading
+                Accessible.name: card.title
             }
             PlasmaComponents3.Label {
                 text: card.subtitle
-                opacity: 0.7
                 Layout.fillWidth: true
-                elide: Text.ElideRight
+                wrapMode: Text.WordWrap
             }
         }
 
@@ -804,6 +828,16 @@ PlasmoidItem {
         property var util
         property string detail: ""
         property string subdetail: ""
+
+        // One spoken summary per meter: children below are ignored so the
+        // label, value, severity and reset time are not read twice.
+        Accessible.role: Accessible.ProgressBar
+        Accessible.name: row.label
+        Accessible.description: [
+            pct(row.util) + ", " + utilSeverity(row.util) + " usage",
+            row.detail,
+            row.subdetail
+        ].filter(s => s !== "").join(", ")
 
         readonly property real frac: {
             if (row.util === undefined || row.util === null)
@@ -837,12 +871,14 @@ PlasmoidItem {
                 text: row.label
                 Layout.fillWidth: true
                 elide: Text.ElideRight
+                Accessible.ignored: true
             }
             PlasmaComponents3.Label {
                 text: pct(row.util)
                 font.bold: true
                 font.features: { "tnum": 1 }
                 color: utilColor(row.util)
+                Accessible.ignored: true
             }
         }
 
@@ -855,7 +891,8 @@ PlasmoidItem {
                 anchors.fill: parent
                 radius: 4
                 color: Kirigami.Theme.disabledTextColor
-                opacity: 0.2
+                opacity: 0.45
+                Accessible.ignored: true
             }
             Rectangle {
                 anchors.left: parent.left
@@ -872,18 +909,18 @@ PlasmoidItem {
             Layout.fillWidth: true
             PlasmaComponents3.Label {
                 text: row.detail
-                opacity: 0.7
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
                 Layout.fillWidth: true
                 elide: Text.ElideRight
+                Accessible.ignored: true
             }
             PlasmaComponents3.Label {
                 text: row.subdetail
-                opacity: 0.6
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
                 font.features: { "tnum": 1 }
                 elide: Text.ElideRight
                 horizontalAlignment: Text.AlignRight
+                Accessible.ignored: true
             }
         }
 
@@ -904,10 +941,11 @@ PlasmoidItem {
                 + (row.detail !== "" && row.subdetail !== "" ? "\n" : "")
                 + row.subdetail
             PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
+            Accessible.ignored: true
 
             Shape {
                 anchors.fill: parent
-                opacity: 0.25
+                opacity: 0.45
                 ShapePath {
                     strokeWidth: row.ring
                     strokeColor: Kirigami.Theme.disabledTextColor
@@ -957,9 +995,10 @@ PlasmoidItem {
                 anchors.verticalCenterOffset: row.ring * 0.15
                 text: pct(row.util)
                 font.bold: true
-                font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.05)
+                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.05
                 font.features: { "tnum": 1 }
                 color: utilColor(row.util)
+                Accessible.ignored: true
             }
         }
 
@@ -968,23 +1007,20 @@ PlasmoidItem {
             text: row.label
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
-            maximumLineCount: 2
-            elide: Text.ElideRight
             Layout.fillWidth: true
             Layout.preferredWidth: row.gaugeSize
+            Accessible.ignored: true
         }
 
         PlasmaComponents3.Label {
             visible: root.gaugeView && row.detail !== ""
             text: row.detail
-            opacity: 0.7
             font.pointSize: Kirigami.Theme.smallFont.pointSize
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
-            maximumLineCount: 2
-            elide: Text.ElideRight
             Layout.fillWidth: true
             Layout.preferredWidth: row.gaugeSize
+            Accessible.ignored: true
         }
     }
 }
