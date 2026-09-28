@@ -93,6 +93,17 @@ Tests are hermetic: no network, no credentials, no home-directory state. `uv run
 
 Conventions, branching, and how to add a test or a dependency: [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Local state
+
+The widget keeps two kinds of file on disk, both under your home directory:
+
+| Path | Contents | If lost |
+| --- | --- | --- |
+| `~/.cache/quota-widget/*.json` | Last successful usage payload per provider, used when an API call 429s or 5xxs | Nothing. Refills on the next successful poll. |
+| `~/.claude/.credentials.json`, `~/.grok/auth.json`, `~/.codex/auth.json` | Rotated OAuth tokens, written by the fetcher during a refresh | Re-run that CLI's login. The widget never creates these. |
+
+Token writes go through a temp file that is flushed and renamed, then the directory is flushed, so a crash leaves either the old tokens or the new ones. The token files are shared with the vendor CLIs: the fetcher re-reads and re-applies its refresh if a CLI writes the same file in between, so the two do not clobber each other's rotation. The cache files are disposable; deleting `~/.cache/quota-widget` costs one poll of 429 fallback.
+
 ## Layout
 
 ```

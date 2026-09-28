@@ -32,6 +32,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from email.message import Message
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -42,6 +43,9 @@ JsonDict: TypeAlias = dict[str, Any]
 
 # Overrides every wall-clock read in this module; see now_ms().
 NOW_MS_ENV = "QUOTA_WIDGET_NOW_MS"
+
+# update(obj) mutates obj and returns the (key, value) pair that must survive.
+MergeUpdate: TypeAlias = Callable[[JsonDict], "tuple[str, Any]"]
 
 
 def _as_dict(value: object) -> JsonDict:
@@ -102,6 +106,8 @@ CURSOR_SUMMARY_URL = "https://cursor.com/api/usage-summary"
 CACHE_MAX_AGE_S = 24 * 3600
 HTTP_TIMEOUT_S = 12.0
 FILE_MODE_PRIVATE = 0o600
+# Re-read-after-write retries before a token store is left to the racing writer.
+MERGE_WRITE_ATTEMPTS = 3
 TOKEN_SKEW_MS = 120_000
 TOKEN_SKEW_S = 120
 RETRY_AFTER_MIN_S = 0.5
@@ -175,6 +181,76 @@ def parse_retry_after(value: str | None) -> float | None:
         return None  # HTTP-date present but not parseable
 
 
+def _fsync_dir(path: Path) -> None:
+    """Flush a directory entry so a completed rename survives a crash."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return  # directory not openable (Windows, permissions); rename still ordered
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass  # some filesystems reject fsync on a directory
+    finally:
+        os.close(fd)
+
+
+def _atomic_write_json(path: Path, obj: Any) -> None:
+    """Replace path with obj as JSON, durably.
+
+    Content is fsynced before the rename and the directory after it, so a crash
+    can leave the old file or the new one, never a truncated token store.
+    """
+    fd, tmp = tempfile.mkstemp(
+        prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, FILE_MODE_PRIVATE)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass  # tmp already gone
+        raise
+    _fsync_dir(path.parent)
+
+
+def _merge_write_json(
+    path: Path, update: MergeUpdate, base: JsonDict | None = None
+) -> None:
+    """Apply update to the JSON object at path without losing a concurrent write.
+
+    The token stores are shared with the vendor CLIs, so a read-modify-write can
+    land on top of a refresh another process just committed. Re-reading until our
+    value survives keeps that refresh instead of dropping it on the floor, which
+    would sign the user out of the CLI as well as the widget. base is the store the
+    caller already holds, used when the file itself cannot be read.
+    """
+    for _ in range(MERGE_WRITE_ATTEMPTS):
+        try:
+            current = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            current = dict(base) if base is not None else {}
+        if not isinstance(current, dict):
+            current = dict(base) if base is not None else {}
+        key, value = update(current)
+        _atomic_write_json(path, current)
+        try:
+            after = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(after, dict) and after.get(key) == value:
+            return
+    # A writer kept winning the race; it holds the rotated token itself, so the
+    # tokens in memory stay usable for this poll.
+
+
 def _cache_dir() -> Path:
     override = os.environ.get("QUOTA_WIDGET_CACHE")
     if override:
@@ -209,28 +285,14 @@ def _write_provider_cache(name: str, payload: JsonDict) -> None:
         return
     folder = _cache_dir()
     try:
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"{name}.json"
-        fd, tmp = tempfile.mkstemp(prefix=f".{name}.", suffix=".json", dir=str(folder))
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(
-                    {
-                        "cached_ms": now_ms(),
-                        "payload": payload,
-                    },
-                    f,
-                    separators=(",", ":"),
-                )
-                f.write("\n")
-            os.chmod(tmp, FILE_MODE_PRIVATE)
-            os.replace(tmp, path)
-        except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass  # tmp already gone
-            raise
+        folder.mkdir(parents=True, exist_ok=True, mode=FILE_MODE_PRIVATE)
+        _atomic_write_json(
+            folder / f"{name}.json",
+            {
+                "cached_ms": now_ms(),
+                "payload": payload,
+            },
+        )
     except OSError:
         pass  # cache is best-effort; a full disk must not fail the poll
 
@@ -351,8 +413,13 @@ def _refresh_claude(cred: JsonDict) -> JsonDict | None:
         new_oauth["expiresAt"] = now_ms() + int(expires_in) * 1000
     new_cred = dict(cred)
     new_cred["claudeAiOauth"] = new_oauth
+
+    def put_oauth(store: JsonDict) -> tuple[str, Any]:
+        store["claudeAiOauth"] = new_oauth
+        return "claudeAiOauth", new_oauth
+
     try:
-        _atomic_write_json(CLAUDE_CRED, new_cred)
+        _merge_write_json(CLAUDE_CRED, put_oauth, new_cred)
     except OSError:
         pass  # still return in-memory tokens so this poll can proceed
     return new_cred
@@ -601,26 +668,12 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
         new_entry["expires_at"] = exp.isoformat().replace("+00:00", "Z")
 
     # Persist so subsequent polls (and the Grok CLI) keep working.
-    try:
-        store = json.loads(GROK_AUTH.read_text()) if GROK_AUTH.is_file() else {}
-        if not isinstance(store, dict):
-            store = {}
+    def put_entry(store: JsonDict) -> tuple[str, Any]:
         store[auth_key] = new_entry
-        fd, tmp = tempfile.mkstemp(
-            prefix=".auth.", suffix=".json", dir=str(GROK_AUTH.parent)
-        )
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(store, f, indent=2)
-                f.write("\n")
-            os.chmod(tmp, FILE_MODE_PRIVATE)
-            os.replace(tmp, GROK_AUTH)
-        except OSError:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass  # tmp already gone
-            raise
+        return auth_key, new_entry
+
+    try:
+        _merge_write_json(GROK_AUTH, put_entry, {auth_key: new_entry})
     except OSError:
         pass  # return the live token; writing auth.json failed
 
@@ -804,25 +857,6 @@ def _jwt_claim(token: str, *path: str) -> Any:
         return None
 
 
-def _atomic_write_json(path: Path, obj: Any) -> None:
-    """Atomically replace path with JSON. obj is any json.dump value."""
-    fd, tmp = tempfile.mkstemp(
-        prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent)
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(obj, f, indent=2)
-            f.write("\n")
-        os.chmod(tmp, FILE_MODE_PRIVATE)
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass  # tmp already gone
-        raise
-
-
 def _codex_window_label(window_seconds: int | None, name: str) -> str:
     """Map primary/secondary window duration to a human label."""
     if not window_seconds:
@@ -925,8 +959,13 @@ def _refresh_codex(auth: JsonDict) -> JsonDict | None:
     new_auth["tokens"] = new_tokens
     new_auth["last_refresh"] = now_utc().isoformat()
 
+    def put_tokens(store: JsonDict) -> tuple[str, Any]:
+        store["tokens"] = new_tokens
+        store["last_refresh"] = new_auth["last_refresh"]
+        return "tokens", new_tokens
+
     try:
-        _atomic_write_json(CODEX_AUTH, new_auth)
+        _merge_write_json(CODEX_AUTH, put_tokens, new_auth)
     except OSError:
         pass  # return live tokens; writing auth.json failed
     return new_auth

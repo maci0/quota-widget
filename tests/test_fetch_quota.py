@@ -575,6 +575,91 @@ class ProviderCacheTest(unittest.TestCase):
         self.assertIsNone(fetch_quota._read_provider_cache("grok"))
 
 
+class DurableWriteTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "auth.json"
+
+    def test_content_and_directory_are_flushed(self) -> None:
+        flushed: list[int] = []
+        real_fsync = os.fsync
+
+        def spy(fd: int) -> None:
+            flushed.append(fd)
+            real_fsync(fd)
+
+        with patch("os.fsync", spy):
+            fetch_quota._atomic_write_json(self.path, {"a": 1})
+
+        self.assertEqual(json.loads(self.path.read_text()), {"a": 1})
+        self.assertGreaterEqual(len(flushed), 2)  # file, then directory
+
+    def test_failed_write_keeps_previous_file_and_leaves_no_temp(self) -> None:
+        fetch_quota._atomic_write_json(self.path, {"tokens": "first"})
+
+        with patch.object(json, "dump", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                fetch_quota._atomic_write_json(self.path, {"tokens": "second"})
+
+        self.assertEqual(json.loads(self.path.read_text()), {"tokens": "first"})
+        self.assertEqual(list(self.path.parent.glob(".*.tmp")), [])
+
+    def test_merge_write_keeps_fields_another_process_added(self) -> None:
+        fetch_quota._atomic_write_json(self.path, {"tokens": "old", "other": 1})
+
+        def put_tokens(store: dict[str, object]) -> tuple[str, object]:
+            store["tokens"] = "new"
+            return "tokens", "new"
+
+        fetch_quota._merge_write_json(self.path, put_tokens)
+
+        self.assertEqual(
+            json.loads(self.path.read_text()), {"tokens": "new", "other": 1}
+        )
+
+    def test_merge_write_retries_when_a_concurrent_writer_wins(self) -> None:
+        fetch_quota._atomic_write_json(self.path, {"tokens": "old"})
+        writes: list[int] = []
+        real_write = fetch_quota._atomic_write_json
+
+        def racing_write(target: Path, obj: object) -> None:
+            real_write(target, obj)
+            writes.append(1)
+            if len(writes) == 1:
+                # The vendor CLI refreshed at the same moment.
+                real_write(target, {"tokens": "cli"})
+
+        def put_tokens(store: dict[str, object]) -> tuple[str, object]:
+            store["tokens"] = "widget"
+            return "tokens", "widget"
+
+        with patch.object(fetch_quota, "_atomic_write_json", racing_write):
+            fetch_quota._merge_write_json(self.path, put_tokens)
+
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(json.loads(self.path.read_text())["tokens"], "widget")
+
+    def test_merge_write_falls_back_to_the_callers_store(self) -> None:
+        fetch_quota._atomic_write_json(self.path, {"tokens": "torn"})
+
+        def put_tokens(store: dict[str, object]) -> tuple[str, object]:
+            store["tokens"] = "new"
+            return "tokens", "new"
+
+        def unreadable(self: Path) -> str:
+            raise PermissionError("denied")
+
+        with patch.object(Path, "read_text", unreadable):
+            fetch_quota._merge_write_json(
+                self.path, put_tokens, {"tokens": "old", "other": 2}
+            )
+
+        self.assertEqual(
+            json.loads(self.path.read_text()), {"tokens": "new", "other": 2}
+        )
+
+
 class HttpRetryableTest(unittest.TestCase):
     def test_retryable_status_codes(self) -> None:
         self.assertTrue(fetch_quota._http_retryable(429))
