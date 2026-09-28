@@ -22,6 +22,12 @@ Adding a dependency: `uv add <pkg>` (or `uv add --optional dev <pkg>`), which
 rewrites `pyproject.toml` and `uv.lock`. Hand-editing `uv.lock` is not a change a
 review can follow. Never hand-edit it.
 
+The fetcher plasmashell runs is stdlib only, so a new runtime dependency lands on
+a machine with no venv. Do not add one for a single function. Every dev tool
+carries an upper bound below its next major (`black>=24.10.0,<27` and its
+siblings), because `uv add` writes an uncapped range; restore the cap in the same
+commit.
+
 ## Releasing
 
 `package/metadata.json` `KPlugin.Version` is the version Plasma shows and the

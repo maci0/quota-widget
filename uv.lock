@@ -429,10 +429,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "black", marker = "extra == 'dev'", specifier = ">=24.10.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
+    { name = "black", marker = "extra == 'dev'", specifier = ">=24.10.0,<27" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13.0,<3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0,<10" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0,<1" },
 ]
 provides-extras = ["dev"]
 

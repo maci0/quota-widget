@@ -6,12 +6,15 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 
+# The fetcher that plasmashell runs is stdlib only, so every dependency here is
+# a gate tool and none of it ships. Each is capped below its next major so a
+# re-lock cannot pull an unreviewed major into the gate.
 [project.optional-dependencies]
 dev = [
-    "black>=24.10.0",
-    "mypy>=1.13.0",
-    "pytest>=8.3.0",
-    "ruff>=0.8.0",
+    "black>=24.10.0,<27",
+    "mypy>=1.13.0,<3",
+    "pytest>=8.3.0,<10",
+    "ruff>=0.8.0,<1",
 ]
 
 [tool.black]
