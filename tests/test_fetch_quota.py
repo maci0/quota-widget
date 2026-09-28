@@ -7,6 +7,7 @@ import dataclasses
 import datetime as dt
 import email.message
 import errno
+import hashlib
 import http.client
 import io
 import json
@@ -1614,6 +1615,28 @@ class ProviderCacheTest(unittest.TestCase):
         path.write_text(json.dumps(entry))
         self.assertIsNone(fetch_quota._stale_cache("grok", self.account))
 
+    def test_an_expired_entry_is_deleted_whatever_account_asks(self) -> None:
+        # The retention window outlives the account that wrote the entry: once
+        # another account is signed in, nothing ever reads that file again
+        # under the digest that scopes it, so an expiry checked only after the
+        # account matched would never fire for it.
+        fetch_quota._write_provider_cache(
+            "grok", {"ok": True, "plan": "Grok"}, self.account
+        )
+        path = Path(self.tmp.name) / "grok.json"
+        entry = json.loads(path.read_text())
+        entry["cached_ms"] = int(
+            (
+                dt.datetime.now(dt.UTC).timestamp()
+                - fetch_quota.config().cache_max_age_s
+                - 60
+            )
+            * 1000
+        )
+        path.write_text(json.dumps(entry))
+        self.assertIsNone(fetch_quota._read_provider_cache("grok", "acct-2"))
+        self.assertFalse(path.exists())
+
     def test_replayed_reading_reports_its_write_time_not_the_read_time(self) -> None:
         written_ms = int(
             (dt.datetime.now(dt.UTC).timestamp() - 3600) * 1000  # an hour ago
@@ -1685,6 +1708,84 @@ class ProviderCacheTest(unittest.TestCase):
             second = fetch_quota._read_provider_cache("grok", "acct-2")
         self.assertIsNone(first)
         self.assertIsNotNone(second)
+
+
+class AccountKeyTest(unittest.TestCase):
+    """The account digest is a scope, not a published identifier.
+
+    The value behind it is a short vendor account id, so a digest of it that
+    anyone can compute from a guess is a way to name the account, not a way to
+    keep the entry to the account. The per-installation key is what makes the
+    guess useless; the scoping it serves is unchanged, because it only ever
+    compares two digests taken under the same key.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _digest_under(self, cache: Path, account: str) -> str | None:
+        """A digest taken with no key loaded, so the file is the only source."""
+        saved = fetch_quota._ACCOUNT_SALT
+        self.addCleanup(setattr, fetch_quota, "_ACCOUNT_SALT", saved)
+        fetch_quota._ACCOUNT_SALT = None
+        with config_env(QUOTA_WIDGET_CACHE=str(cache)):
+            return fetch_quota._digest(account)
+
+    def test_the_digest_is_not_the_bare_hash_of_the_account_id(self) -> None:
+        cache = Path(self.tmp.name) / "cache"
+        bare = hashlib.sha256(b"user_01ABC").hexdigest()[:16]
+        self.assertNotEqual(self._digest_under(cache, "user_01ABC"), bare)
+
+    def test_two_installations_do_not_agree_on_the_same_account(self) -> None:
+        one = Path(self.tmp.name) / "one"
+        two = Path(self.tmp.name) / "two"
+        self.assertNotEqual(
+            self._digest_under(one, "user_01ABC"), self._digest_under(two, "user_01ABC")
+        )
+
+    def test_the_key_is_reused_across_polls(self) -> None:
+        cache = Path(self.tmp.name) / "cache"
+        first = self._digest_under(cache, "user_01ABC")
+        self.assertIsNotNone(first)
+        self.assertEqual(first, self._digest_under(cache, "user_01ABC"))
+
+    def test_the_key_is_written_private_next_to_the_entries(self) -> None:
+        cache = Path(self.tmp.name) / "cache"
+        self._digest_under(cache, "user_01ABC")
+        key = cache / fetch_quota.ACCOUNT_SALT_NAME
+        self.assertTrue(key.is_file())
+        self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(cache.stat().st_mode & 0o777, fetch_quota.CACHE_DIR_MODE)
+
+
+class RedactionTest(unittest.TestCase):
+    """A printed line never spells out whose machine it came from.
+
+    A path under the home directory carries the account name, and the journal
+    and the panel both keep the line long after the poll wrote it.
+    """
+
+    def test_a_warning_hides_the_home_directory(self) -> None:
+        stderr = io.StringIO()
+        with config_env(QUOTA_WIDGET_HOME="/home/someone"):
+            with contextlib.redirect_stderr(stderr):
+                fetch_quota.warn("could not write /home/someone/.codex/auth.json")
+        self.assertIn("~/.codex/auth.json", stderr.getvalue())
+        self.assertNotIn("someone", stderr.getvalue())
+
+    def test_an_exception_text_hides_the_home_directory(self) -> None:
+        stderr = io.StringIO()
+        with config_env(QUOTA_WIDGET_HOME="/home/someone"):
+            with contextlib.redirect_stderr(stderr):
+                fetch_quota.warn(
+                    "cache entry failed: "
+                    "[Errno 13] Permission denied: '/home/someone/.cache/qw/grok.json'"
+                )
+        self.assertNotIn("someone", stderr.getvalue())
+
+    def test_a_home_outside_the_message_changes_nothing(self) -> None:
+        self.assertEqual(fetch_quota._redact("nothing to hide"), "nothing to hide")
 
 
 class ReadingAgeTest(unittest.TestCase):
@@ -2176,6 +2277,43 @@ class ConfigTest(unittest.TestCase):
                     fetch_quota.main(["--print-config"])
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["config"]["home"], "/home/widget")
+
+    def test_clear_cache_erases_the_entries_and_the_account_key(self) -> None:
+        # The key outlives the entries it scopes, so erasing one without the
+        # other leaves a key that can still read a restored backup.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cache_dir = Path(tmp.name) / "cache"
+        with config_env(QUOTA_WIDGET_CACHE=str(cache_dir)):
+            # The key is loaded once per process, so drop it and let this
+            # cache directory create its own, the way a fresh install would.
+            saved = fetch_quota._ACCOUNT_SALT
+            self.addCleanup(setattr, fetch_quota, "_ACCOUNT_SALT", saved)
+            fetch_quota._ACCOUNT_SALT = None
+            account = fetch_quota._account_id(_fake_jwt("user_01GROK"))
+            fetch_quota._write_provider_cache(
+                "grok", {"ok": True, "plan": "G"}, account
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                with self.assertRaises(SystemExit) as ctx:
+                    fetch_quota.main(["--clear-cache"])
+        self.assertEqual(ctx.exception.code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(sorted(payload["removed"]), ["account-salt", "grok.json"])
+        self.assertEqual(list(cache_dir.iterdir()), [])
+
+    def test_clear_cache_on_an_empty_cache_dir_is_not_an_error(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cache_dir = Path(tmp.name) / "cache"
+        with config_env(QUOTA_WIDGET_CACHE=str(cache_dir)):
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                with self.assertRaises(SystemExit) as ctx:
+                    fetch_quota.main(["--clear-cache"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["removed"], [])
+        self.assertFalse(cache_dir.exists())
 
     def test_unknown_argument_exits_nonzero(self) -> None:
         stderr = io.StringIO()

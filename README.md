@@ -73,7 +73,9 @@ python3 scripts/print_smoke.py .scratch/smoke.json
 
 Both take `--help`. The fetcher prints one JSON object on stdout and keeps
 diagnostics on stderr, so `fetch_quota.py > dump.json` is safe; `--print-config`
-shows the paths and knobs it resolved, without reading a token.
+shows the paths and knobs it resolved, without reading a token, and
+`--clear-cache` deletes the cached readings and the key they are scoped by (see
+[Data and privacy](#data-and-privacy)).
 
 ## Development
 
@@ -196,16 +198,23 @@ Token writes go through a temp file that is flushed and renamed, then the direct
 
 The widget is local-only. It has no telemetry, no analytics, no crash reporting, and no network calls other than the four usage endpoints and the OAuth token refreshes named in the fetching section above. It never sends a request to a server it does not already name there.
 
-What the fetcher reads from your account is what a usage bar needs: plan name, period percentages, reset times, and credit balances. Account identifiers (the WorkOS user id in the Cursor session, the ChatGPT account id header) are used to authorize a request. The raw value is never written to the cache, the emitted JSON, or any log; the cache stores a 16-character SHA-256 digest of it, which is what scopes an entry to one account, and that digest (never the value) travels in each provider payload as `account` so the panel scopes the reading it keeps through a failed poll the same way. A poll whose account digest differs from the one a card is holding drops it instead of showing another account's numbers. The card shows a status such as `http-429` and nothing more. Every failed provider also carries `transient`, the fetcher's own classification of whether a cached reading beats reporting the failure, which is what the panel acts on when it decides to hold a card; the cause behind a failed call goes to stderr, which is the journal under Plasma, and that line carries the URL and the error, never a response body: the body of a failed HTTP response is drained and discarded rather than captured. A provider that crashes instead of returning writes its exception text and a traceback to the same stream, and that text is built from whatever the vendor sent, so the journal is not a place to paste a value you care about. `QUOTA_WIDGET_NOW_MS` pins the fetcher's clock, and is for tests and one-off runs only; leave it unset in a normal session. `install.sh` writes one run's output to `.scratch/smoke.json` and the failure detail to `.scratch/smoke.err` in the checkout, both gitignored.
+What the fetcher reads from your account is what a usage bar needs: plan name, period percentages, reset times, and credit balances. Account identifiers (the WorkOS user id in the Cursor session, the ChatGPT account id header) are used to authorize a request. The raw value is never written to the cache, the emitted JSON, or any log; the cache stores a 16-character digest of it taken under a per-installation key kept beside the cache entries, which is what scopes an entry to one account, and that digest (never the value) travels in each provider payload as `account` so the panel scopes the reading it keeps through a failed poll the same way. A poll whose account digest differs from the one a card is holding drops it instead of showing another account's numbers. The card shows a status such as `http-429` and nothing more. Every failed provider also carries `transient`, the fetcher's own classification of whether a cached reading beats reporting the failure, which is what the panel acts on when it decides to hold a card; the cause behind a failed call goes to stderr, which is the journal under Plasma, and that line carries the URL and the error, never a response body: the body of a failed HTTP response is drained and discarded rather than captured. Every line the fetcher prints spells a path under your home directory as `~`, so the account name in it does not outlive the poll in the journal or on the card. A provider that crashes instead of returning writes its exception text and a traceback to the same stream, and that text is built from whatever the vendor sent, so the journal is not a place to paste a value you care about. `QUOTA_WIDGET_NOW_MS` pins the fetcher's clock, and is for tests and one-off runs only; leave it unset in a normal session. `install.sh` writes one run's output to `.scratch/smoke.json` and the failure detail to `.scratch/smoke.err` in the checkout, both gitignored.
 
 Retention:
 
 | Data | Where | How long |
 | --- | --- | --- |
-| Usage payload cache | `~/.cache/quota-widget/*.json` | At most 24 hours (`DEFAULT_CACHE_MAX_AGE_S`, overridable with `QUOTA_WIDGET_CACHE_MAX_AGE_S`); an expired file is deleted when it is next read |
+| Usage payload cache | `~/.cache/quota-widget/*.json` | At most 24 hours (`DEFAULT_CACHE_MAX_AGE_S`, overridable with `QUOTA_WIDGET_CACHE_MAX_AGE_S`); an expired file is deleted when it is next read, whichever account asks |
+| Account digest key | `~/.cache/quota-widget/account-salt` | Created on the first poll, removed by `--clear-cache` |
 | OAuth tokens | vendor token files above | Rotated by the vendor's own expiry, written back only on refresh |
 
-Both are written `0600` under your home directory, and the cache directory is `0700`, tightened on every poll if it was created with a wider mode. To erase everything the widget keeps, remove the cache directory and revoke the sessions from each vendor's account page; the token files belong to the CLIs, which rewrite them on the next login.
+Both are written `0600` under your home directory, and the cache directory is `0700`, tightened on every poll if it was created with a wider mode. To erase everything the widget keeps, run
+
+```bash
+python3 package/contents/code/fetch_quota.py --clear-cache
+```
+
+which deletes the cached readings and the key they were scoped by, and then revoke the sessions from each vendor's account page; the token files belong to the CLIs, which rewrite them on the next login. Deleting the cache directory yourself has the same effect on the readings.
 
 The full boundary, asset, and threat map is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 

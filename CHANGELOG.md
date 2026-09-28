@@ -69,9 +69,29 @@ fails if a Breaking entry lands in this section without a matching next version.
   environment is read, so it works on a broken config.
 - `install.sh --uninstall` removes the installed widget and leaves the provider
   cache and the plasmoid settings in place.
+- `fetch_quota.py --clear-cache` erases everything the widget keeps: the cached
+  readings and the per-installation key the account digests are taken under.
+  The key goes with the entries because it outlives them, and an entry restored
+  from a backup is still readable under a key that stayed behind. It runs after
+  the config check and before any provider, like `--print-config`.
 
 ### Fixed
 
+- The account id the cache entries are scoped by was an unsalted 16-character
+  SHA-256 of a short, guessable vendor id, so a copy of the cache directory
+  gave up the WorkOS user id behind every entry in it. The digest is now taken
+  under a random per-installation key kept beside the entries, which changes
+  who can compute the digest and nothing about which account reads which
+  entry. Documented in the README.
+- An expired provider cache entry was deleted only when the account that wrote
+  it asked for it. Once another account was signed in, nothing read that file
+  again under the digest scoping it, so a 24-hour reading could sit on disk
+  indefinitely. The retention window is now checked first, so an expired entry
+  goes whenever it is next read.
+- Every line the fetcher wrote to stderr, and the `config_error` the panel
+  shows, spelled the home directory out, so the account name in the path
+  outlived the poll in the journal and on the card. They now spell it `~`.
+  `--print-config` is unchanged: its whole output is the resolved paths.
 - An unknown argument to the fetcher is now a usage error whatever the
   environment says. Before, the config was read first, so a typo run against a
   broken `QUOTA_WIDGET_*` printed the configuration payload and exited 0, and

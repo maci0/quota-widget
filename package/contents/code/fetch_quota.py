@@ -340,6 +340,11 @@ CLAUDE_USER_AGENT = "claude-code/2.1.251"
 CURSOR_SUMMARY_URL = "https://cursor.com/api/usage-summary"
 
 REFRESH_LOCK_NAME = "refresh.lock"
+# The key every account digest is taken under, kept beside the entries it
+# scopes and nowhere else. It is a secret only in the sense that a copy of the
+# cache directory is a copy of the key; there is no other copy to leak from.
+ACCOUNT_SALT_NAME = "account-salt"
+ACCOUNT_SALT_BYTES = 32
 # flock(LOCK_NB) reports a held lock through these errnos and nothing else, so
 # a wait can tell contention from a lock this platform cannot take at all.
 LOCK_BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN})
@@ -530,6 +535,10 @@ _CONFIG: Config | None = None
 # reaches a provider without that would otherwise have every provider thread
 # build and publish the module global at the same time.
 _CONFIG_LOCK = threading.Lock()
+# Same shape for the account-salt key: the four provider threads each digest
+# an account, and only one of them may create the key.
+_ACCOUNT_SALT: bytes | None = None
+_SALT_LOCK = threading.Lock()
 
 
 def _home(env: Mapping[str, str]) -> Path:
@@ -629,6 +638,37 @@ def emit(obj: JsonDict) -> None:
     raise SystemExit(0)
 
 
+def _redacted_homes() -> list[str]:
+    """The home directories a printed line must not spell out.
+
+    The configured home is read from the module global rather than through
+    config(), which is still mid-load on the path that reports a bad value and
+    would raise a second time inside the reporting.
+    """
+    homes: list[str] = []
+    with contextlib.suppress(RuntimeError):
+        homes.append(str(Path.home()))
+    loaded = _CONFIG
+    if loaded is not None:
+        homes.append(str(loaded.home))
+    return [home for home in homes if home not in ("", os.sep)]
+
+
+def _redact(text: str) -> str:
+    """A printed line with the home directory spelled `~`.
+
+    Every path a warning, a config error, or an exception text carries is
+    under the home directory, and that path's first component is the account
+    name. The journal keeps the line long after the poll wrote it, and the
+    panel shows a config error until the next poll, so the name outlives the
+    run and reaches whoever reads either. `~` still says which file failed,
+    which is the part an operator acts on.
+    """
+    for home in _redacted_homes():
+        text = text.replace(home + os.sep, "~" + os.sep).replace(home, "~")
+    return text
+
+
 def warn(message: str) -> None:
     """Report a condition the JSON payload cannot carry.
 
@@ -636,7 +676,7 @@ def warn(message: str) -> None:
     attention (a dropped credential write, a swallowed provider crash) goes to
     stderr and lands in the journal next to the plasmashell run that caused it.
     """
-    print(f"fetch_quota: {message}", file=sys.stderr)
+    print(f"fetch_quota: {_redact(message)}", file=sys.stderr)
 
 
 def iso_to_utc(value: str) -> dt.datetime | None:
@@ -829,6 +869,53 @@ def _write_rotated_tokens(
         warn(f"{provider} token rotated but {path} was not written: {exc}")
 
 
+def _salt_on_disk(path: Path) -> bytes | None:
+    store = _read_json_dict(path)
+    raw = store.get("salt") if store else None
+    if not isinstance(raw, str):
+        return None
+    try:
+        value = bytes.fromhex(raw)
+    except ValueError:
+        return None
+    return value if len(value) == ACCOUNT_SALT_BYTES else None
+
+
+def _load_or_create_salt() -> bytes:
+    folder = config().cache_dir
+    path = folder / ACCOUNT_SALT_NAME
+    on_disk = _salt_on_disk(path)
+    if on_disk is not None:
+        return on_disk
+    fresh = os.urandom(ACCOUNT_SALT_BYTES)
+    try:
+        _private_dir(folder)
+        _atomic_write_json(path, {"salt": fresh.hex()})
+    except OSError:
+        # A cache directory that cannot be written holds no entries to scope
+        # either, so a key that lives only in this process costs no cache hit
+        # and no scoping. It is still a key: the digest never leaves the run
+        # that took it, and the next poll with a writable cache reads the
+        # file's instead.
+        return fresh
+    # Two polls can reach this together. Whatever is on disk when we look is
+    # what the entries already written were taken under, so the file decides
+    # and the loser of the race adopts the winner's key.
+    return _salt_on_disk(path) or fresh
+
+
+def _account_salt() -> bytes:
+    """The per-installation key every account digest is taken under."""
+    global _ACCOUNT_SALT
+    salt = _ACCOUNT_SALT
+    if salt is not None:
+        return salt
+    with _SALT_LOCK:
+        if _ACCOUNT_SALT is None:
+            _ACCOUNT_SALT = _load_or_create_salt()
+        return _ACCOUNT_SALT
+
+
 def _digest(value: str | None) -> str | None:
     """Stable 16-hex id for one account, or None if the value names no account.
 
@@ -838,12 +925,21 @@ def _digest(value: str | None) -> str | None:
     (a JSON "\\ud800" escape decodes to a lone surrogate) reads as no id. A
     crash here would be caught as a provider failure and reported to the panel
     as a network error, costing the user the whole card over a digest.
+
+    The digest is taken under the per-installation key. Unsalted, it would be
+    only as private as the id space behind it: a vendor account id is a short
+    enumerable value, and 16 hex of SHA-256 over a guessable space is a
+    lookup rather than a hash, so a copy of this cache directory would give up
+    the WorkOS user id behind every entry in it. Scoping only ever compares
+    two digests taken under the same key, so the key changes nothing about
+    who reads what, and the panel compares them the same way.
     """
     if not isinstance(value, str) or not value:
         return None
     try:
         normalized = unicodedata.normalize(NORMALIZATION_FORM, value)
-        return hashlib.sha256(normalized.encode(JSON_ENCODING)).hexdigest()[:16]
+        keyed = _account_salt() + b"\x00" + normalized.encode(JSON_ENCODING)
+        return hashlib.sha256(keyed).hexdigest()[:16]
     except UnicodeEncodeError:
         return None
 
@@ -899,15 +995,19 @@ def _read_provider_cache(name: str, account: str | None) -> JsonDict | None:
         return None
     if not payload.get("ok"):
         return None
+    # The window is a retention rule, not a serving rule, so it is applied
+    # before the account check: an entry that is past it is deleted whoever
+    # asks for it. A provider whose account changed, or whose credential went
+    # away so no poll carries a digest at all, is exactly the entry that is
+    # never read again under the account that wrote it, and leaving it to sit
+    # on disk forever is how a 24 h reading outlives its 24 h window.
+    if now_ms() - int(ts) > config().cache_max_age_s * 1000:
+        _discard_provider_cache(path)
+        return None
     # An entry belongs to the account whose credential produced it. Reading
     # another account's plan and usage is worse than showing nothing, so an
     # unidentifiable caller reads nothing.
     if account is None or obj.get("account") != account:
-        return None
-    now = now_ms()
-    if now - int(ts) > config().cache_max_age_s * 1000:
-        # Past the retention window, so drop it rather than leave it on disk.
-        _discard_provider_cache(path)
         return None
     # The reading is as old as the write, not as fresh as this read.
     return {**payload, "fetched_ms": int(ts)}
@@ -2313,7 +2413,7 @@ def fetch_cursor() -> JsonDict:
 
 # ── main ────────────────────────────────────────────────────────────────────
 
-USAGE_LINE = "usage: fetch_quota.py [--print-config] [--help]"
+USAGE_LINE = "usage: fetch_quota.py [--print-config | --clear-cache] [--help]"
 
 # The env table above is the single list of knobs, so --help cannot drift from
 # what load_config accepts. A name wider than the column is not truncated: the
@@ -2329,6 +2429,7 @@ including a config error (the JSON then carries "error": "config").
 
 options:
   --print-config  print the resolved config (paths and numeric knobs) and exit
+  --clear-cache   delete every cached reading and the account key, then exit
   -h, --help      print this help and exit
 
 environment:
@@ -2364,12 +2465,42 @@ def _poll_stamp() -> int:
         return ms_from_seconds(time.time())
 
 
+def _clear_cache() -> JsonDict:
+    """Erase everything this fetcher keeps about an account, and name what went.
+
+    The provider entries hold the last reading each account produced, and the
+    account key holds the digest scope they were taken under, so both go: the
+    key outlives the entries it scopes, and an entry restored from a backup
+    would still be readable under a key that never left the machine. The
+    vendor token files are the CLIs' own and are not touched.
+
+    The refresh lock stays: it carries nothing, and unlinking a file another
+    poll has flocked would leave that poll holding a lock no later one can
+    see.
+    """
+    folder = config().cache_dir
+    removed: list[str] = []
+    if folder.is_dir():
+        for path in sorted(folder.iterdir()):
+            if not path.is_file() or path.name == REFRESH_LOCK_NAME:
+                continue
+            try:
+                path.unlink()
+            except OSError as exc:
+                warn(f"could not remove the {path.name} cache entry: {exc}")
+                continue
+            removed.append(path.name)
+    return {"cache_dir": str(folder), "removed": removed}
+
+
 def main(argv: list[str] | None = None) -> None:
     """Validate the environment, run every provider, print one JSON payload.
 
-    `--print-config` stops after the config check. Any other argument is a
-    usage error. The process always exits through emit(), so a run that
-    crashed on its way there still leaves the panel a payload it can read.
+    `--print-config` and `--clear-cache` stop after the config check, before
+    any provider runs: one prints the resolved config, the other erases the
+    cache. Any other argument is a usage error. The process always exits
+    through emit(), so a run that crashed on its way there still leaves the
+    panel a payload it can read.
     """
     _use_utf8_streams()
     args = sys.argv[1:] if argv is None else argv
@@ -2377,7 +2508,9 @@ def main(argv: list[str] | None = None) -> None:
         # Answered before load_config: help must work on a broken environment.
         print(HELP, end="")
         raise SystemExit(0)
-    if len(args) > 1 or (args and args[0] != "--print-config"):
+    if len(args) > 1 or (
+        args and args[0] not in ("--print-config", "--clear-cache")
+    ):
         # A usage error is the operator's, not the panel's, so it is reported
         # before load_config: a typo on a machine with a broken environment
         # would otherwise print the config payload and exit 0, and a script
@@ -2399,7 +2532,7 @@ def main(argv: list[str] | None = None) -> None:
         emit(
             {
                 **_failure("config"),
-                "config_error": str(exc),
+                "config_error": _redact(str(exc)),
                 "claude": _failure("config"),
                 "cursor": _failure("config"),
                 "grok": _failure("config"),
@@ -2407,8 +2540,10 @@ def main(argv: list[str] | None = None) -> None:
                 "fetched_ms": _poll_stamp(),
             }
         )
-    if args:
+    if args == ["--print-config"]:
         emit({"ok": True, "config": cfg.describe()})
+    if args == ["--clear-cache"]:
+        emit({"ok": True, **_clear_cache()})
 
     # A poll waits on network, not CPU: each provider is one or more HTTPS round
     # trips, so running them in turn made the panel wait the sum of every

@@ -153,6 +153,7 @@ uninstall() {
   fi
   rm -rf "$xdg_cache/plasmashell/qmlcache" 2>/dev/null || true
   echo "kept: $xdg_cache/quota-widget (last good readings)"
+  echo "      erase them with: python3 '$ROOT/package/contents/code/fetch_quota.py' --clear-cache"
   echo "      $PLASMOID_CONFIG"
 }
 
