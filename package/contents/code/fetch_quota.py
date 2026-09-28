@@ -476,6 +476,14 @@ CODEX_WEEK_MAX_S = 8 * SECONDS_PER_DAY
 CODEX_MONTH_MIN_S = 28 * SECONDS_PER_DAY
 CODEX_MONTH_MAX_S = 32 * SECONDS_PER_DAY
 
+# How many decimal places a money amount is counted in. Claude's spend block
+# names it (2 for cents, 0 for whole units) and the panel scales the minor
+# amount by 10^exponent, so a wire value outside this range would divide a real
+# charge by an unplaceable power of ten: Math.pow(10, 1e308) is Infinity in the
+# panel and renders the spend as 0.00. Anything unusable is read as cents.
+DEFAULT_SPEND_EXPONENT = 2
+MIN_SPEND_EXPONENT = 0
+MAX_SPEND_EXPONENT = 6
 # Longest vendor response body read into memory. Every reading is a few tens of
 # kilobytes of JSON, so this is generous by two orders of magnitude; it exists
 # because the alternative is a peer that names no length answering with an
@@ -900,9 +908,14 @@ def parse_retry_after(value: str | None) -> float | None:
         return None
     s = value.strip()
     try:
-        return max(0.0, float(s))
+        number = float(s)
     except ValueError:
         pass  # not delta-seconds; try HTTP-date next
+    else:
+        # float() reads "inf" and "nan", and a wait on either is a wait that
+        # never ends (time.sleep raises on an infinity) or no wait at all,
+        # neither of which is a number of seconds a header can name.
+        return max(0.0, number) if math.isfinite(number) else None
     try:
         when = email.utils.parsedate_to_datetime(s)
         if when.tzinfo is None:
@@ -1715,8 +1728,16 @@ def fetch_claude() -> JsonDict:
     spend_used = _as_dict(spend.get("used"))
     # The QML scales spend.used_minor by 10^exponent, so a wire value that is
     # not a number cannot be passed on as-is: an Infinity there scales every
-    # extra-usage amount to Infinity in the card.
+    # extra-usage amount to Infinity in the card. A whole number outside the
+    # decimal places an amount is counted in scales it just as wrongly, so it is
+    # read as cents rather than passed to a Math.pow no card can render.
     exponent = _finite_number(spend_used.get("exponent"))
+    if (
+        exponent is None
+        or not exponent.is_integer()
+        or not MIN_SPEND_EXPONENT <= exponent <= MAX_SPEND_EXPONENT
+    ):
+        exponent = float(DEFAULT_SPEND_EXPONENT)
 
     result = _reading(
         {
@@ -1739,7 +1760,7 @@ def fetch_claude() -> JsonDict:
                 "currency": _as_text(
                     spend_used.get("currency") or extra.get("currency")
                 ),
-                "exponent": 2.0 if exponent is None else exponent,
+                "exponent": exponent,
             },
         }
     )

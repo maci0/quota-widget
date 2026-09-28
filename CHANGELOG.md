@@ -137,6 +137,16 @@ fails if a Breaking entry lands in this section without a matching next version.
   the checkout, which sits under the home directory on every install path, so
   the account name in that path's first component reached the journal on every
   crash. The traceback is printed through the same redaction now.
+- A Claude `spend.used.exponent` outside the decimal places an amount is
+  counted in (0 to 6) was passed to the panel as the scale for the minor
+  amount. A wire value like `400` made the card divide the charge by
+  `Math.pow(10, 400)`, which is Infinity, so a real charge read as `0.00`, and a
+  negative one inflated it by a power of ten. The fetcher reads such a value as
+  cents, and the panel bounds it the same way for a reading cached by an older
+  fetcher.
+- A `Retry-After` of `inf`, `Infinity`, or `nan` was read as a number of
+  seconds to wait: an infinity is a wait that never ends, and a NaN compares
+  false against every bound. A header that names neither is no wait at all now.
 - A Grok token refresh raised `OverflowError` when the new expiry fell past the
   last instant the calendar holds, which is what a `QUOTA_WIDGET_NOW_MS` at the
   ceiling the fetcher accepts, or a lifetime far longer than the calendar, both

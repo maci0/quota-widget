@@ -82,6 +82,16 @@ PlasmoidItem {
     // amount; the locale still decides the symbol, its side, and the grouping.
     readonly property string defaultCurrency: "USD"
 
+    // How many decimal places spend.used_minor is counted in, mirroring
+    // DEFAULT_SPEND_EXPONENT and its bounds in
+    // package/contents/code/fetch_quota.py. A reading cached by an older
+    // fetcher can still carry a wire exponent, and Math.pow(10, 1e308) is
+    // Infinity: the charge would render as 0.00. Anything outside the range
+    // is read as cents.
+    readonly property int defaultSpendExponent: 2
+    readonly property int minSpendExponent: 0
+    readonly property int maxSpendExponent: 6
+
     // Provider marks. Claude and Codex ship a brand color; Cursor and Grok
     // are monochrome, so they get theme neutrals rather than invented hues.
     readonly property color claudeMark: "#D97757"
@@ -442,6 +452,20 @@ PlasmoidItem {
             minimumFractionDigits: n % 1 === 0 ? 0 : 2,
             maximumFractionDigits: 2
         })
+    }
+
+    // A "major unit" exponent for a minor-unit amount: how many decimal places
+    // the amount is counted in. A wire value that is not a whole number in
+    // range is not a scale, it is a number the card would divide by to
+    // nothing, so it reads as cents.
+    function spendExponent(value) {
+        if (value === undefined || value === null || value === "")
+            return root.defaultSpendExponent
+        const n = Number(value)
+        if (!isFinite(n) || n !== Math.floor(n)
+                || n < root.minSpendExponent || n > root.maxSpendExponent)
+            return root.defaultSpendExponent
+        return n
     }
 
     // The providers a poll answered for but that have no reading to show. The
@@ -902,9 +926,10 @@ PlasmoidItem {
                                 // (e.g. 67.63 SGD would be 6763 minor via spend)
                                 const spend = root.claude.spend
                                 if (spend && spend.used_minor != null) {
-                                    // exponent 0 means whole units, so only a
-                                    // missing one falls back to cents.
-                                    const exp = spend.exponent == null ? 2 : spend.exponent
+                                    // A missing or out-of-range exponent
+                                    // reads as cents; 0 is whole units and is
+                                    // kept.
+                                    const exp = root.spendExponent(spend.exponent)
                                     const major = spend.used_minor / Math.pow(10, exp)
                                     return qsTr("Extra usage: %1")
                                         .arg(moneyStr(major,

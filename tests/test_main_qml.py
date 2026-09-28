@@ -233,6 +233,16 @@ class MainQmlLocalizationTest(unittest.TestCase):
         self.assertIn("currency: isCurrencyCode(currency)", QML_SOURCE)
         self.assertEqual(QML_SOURCE.count('style: "currency"'), 1)
 
+    def test_spend_scale_is_bounded(self) -> None:
+        # spend.used_minor is divided by 10^exponent, so an exponent outside
+        # the decimal places an amount is counted in renders a real charge as
+        # 0.00 (Math.pow(10, 1e308) is Infinity) or inflates it 10^5-fold.
+        self.assertIn("function spendExponent(value)", QML_SOURCE)
+        self.assertIn("const exp = root.spendExponent(spend.exponent)", QML_SOURCE)
+        self.assertIn("readonly property int minSpendExponent: 0", QML_SOURCE)
+        self.assertIn("readonly property int maxSpendExponent: 6", QML_SOURCE)
+        self.assertNotIn("Math.pow(10, spend.exponent)", QML_SOURCE)
+
     def test_meter_fills_from_the_leading_edge(self) -> None:
         # Qt mirrors the left/right anchor lines in a right-to-left layout; a
         # physical edge would grow the meter from the wrong side.

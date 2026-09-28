@@ -264,6 +264,14 @@ class RetryAfterTest(unittest.TestCase):
         self.assertIsNone(fetch_quota.parse_retry_after(None))
         self.assertIsNone(fetch_quota.parse_retry_after("nope"))
 
+    def test_infinite_or_nan_delta_is_no_wait(self) -> None:
+        # float() reads both words, and a wait on an infinity never ends
+        # (time.sleep raises), while a NaN compares false against every
+        # bound and would read as a zero-second wait.
+        for raw in ("inf", "-inf", "Infinity", "nan", "NaN", "1e400"):
+            with self.subTest(header=raw):
+                self.assertIsNone(fetch_quota.parse_retry_after(raw))
+
     def test_parses_http_date_against_the_pinned_clock(self) -> None:
         when = fetch_quota.now_utc() + dt.timedelta(seconds=8)
         header = when.strftime("%a, %d %b %Y %H:%M:%S GMT")
@@ -783,6 +791,33 @@ class ClaudeRateLimitTest(unittest.TestCase):
         fake.hit(self, fetch_quota.CLAUDE_URL)
         self.assertTrue(out["ok"])
         self.assertIsNone(out["spend"]["used_minor"])
+
+    def _spend_exponent(self, exponent: object) -> float:
+        body = {
+            "five_hour": {"utilization": 4},
+            "spend": {"used": {"amount_minor": 6763, "exponent": exponent}},
+        }
+        fake = _http_returning(200, body)
+        with patch.object(fetch_quota, "fetch_http", fake):
+            out = fetch_quota.fetch_claude()
+        fake.hit(self, fetch_quota.CLAUDE_URL)
+        value = out["spend"]["exponent"]
+        assert isinstance(value, float)
+        return value
+
+    def test_spend_exponent_outside_the_amount_range_is_cents(self) -> None:
+        # The panel scales the minor amount by 10^exponent, so a wire value
+        # past the decimal places an amount is counted in renders a real
+        # charge as 0.00 (Math.pow(10, 1e308) is Infinity) or inflates it by
+        # 10^5 for a negative one.
+        for raw in (400, 1e308, -3, 2.5, "two", None, float("nan")):
+            with self.subTest(exponent=raw):
+                self.assertEqual(self._spend_exponent(raw), 2.0)
+
+    def test_spend_exponent_in_range_is_kept(self) -> None:
+        for raw, expected in ((0, 0.0), (2, 2.0), (4, 4.0), (6, 6.0)):
+            with self.subTest(exponent=raw):
+                self.assertEqual(self._spend_exponent(raw), expected)
 
 
 class CursorParseTest(unittest.TestCase):
