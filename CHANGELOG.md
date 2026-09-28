@@ -92,6 +92,28 @@ fails if a Breaking entry lands in this section without a matching next version.
   from a backup is still readable under a key that stayed behind. It runs after
   the config check and before any provider, like `--print-config`.
 
+### Changed
+
+- The countdown under the panel reading takes its unit from the catalog
+  instead of welding an English letter to a Latin digit. `2d 3h` read as
+  English in every locale and left a translator nothing to change; the count
+  now picks a unit word of its own (`day`/`days`, the same for hours and
+  minutes) and the pattern around them owns their order, so a language that
+  writes `2日 3時間` or reverses the pair can say so. English reads
+  "2 days 3 hours" and "5 minutes".
+- The Claude extra-usage amount is formatted as currency. It read
+  "67.63 SGD", a Latin number with the code pasted after it; the locale now
+  decides the symbol, its side, its spacing, and its digits. A payload that
+  names no currency keeps the bare number rather than claiming the default
+  one is right.
+- Text a translator has to be able to reorder is one catalog pattern rather
+  than a phrase assembled in QML: the `·` between a meter's numbers and its
+  reset time, the one between a plan name and its "cached" mark, and the
+  separator in a meter's spoken summary.
+- A vendor currency that is not an ISO 4217 code falls back to the default
+  currency instead of raising a `RangeError` out of `toLocaleString`, which
+  blanked the label that asked for it.
+
 ### Fixed
 
 - A Grok token refresh raised `OverflowError` when the new expiry fell past the

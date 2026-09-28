@@ -284,6 +284,13 @@ PlasmoidItem {
     // Counts go through numStr: .arg() would splice a JS number, so an Arabic
     // or Devanagari locale would read Latin digits next to a localized
     // percentage on the same row.
+    //
+    // The unit is a catalog entry of its own, not a letter welded to the
+    // number. "2d 3h" is English to every reader who does not speak it, and a
+    // translator who spells the unit out, writes it behind the count, or uses
+    // a different script has nothing left to change. The pattern below owns
+    // the order and the spacing of the four parts, so a language that writes
+    // "2日 3時間" can drop the spaces and move the unit to the front.
     function remainStr(resetMs) {
         if (!resetMs) return qsTr("n/a")
         const ms = Math.max(0, resetMs - nowMs)
@@ -291,10 +298,24 @@ PlasmoidItem {
         const d = Math.floor(totalMin / 1440)
         const h = Math.floor((totalMin % 1440) / 60)
         const m = totalMin % 60
-        if (d > 0) return qsTr("%1d %2h").arg(numStr(d, 0)).arg(numStr(h, 0))
-        if (h > 0) return qsTr("%1h %2m").arg(numStr(h, 0)).arg(numStr(m, 0))
-        return qsTr("%1 min").arg(numStr(m, 0))
+        if (d > 0)
+            return qsTr("%1 %2 %3 %4")
+                .arg(numStr(d, 0)).arg(dayUnit(d))
+                .arg(numStr(h, 0)).arg(hourUnit(h))
+        if (h > 0)
+            return qsTr("%1 %2 %3 %4")
+                .arg(numStr(h, 0)).arg(hourUnit(h))
+                .arg(numStr(m, 0)).arg(minuteUnit(m))
+        return qsTr("%1 %2").arg(numStr(m, 0)).arg(minuteUnit(m))
     }
+
+    // QML's qsTr() carries no plural argument, so the count picks the entry.
+    // A language with more than two forms (Polish has four, Russian three,
+    // Arabic six) gets one entry per form here, and the pattern above keeps
+    // them in that language's own order.
+    function dayUnit(n) { return n === 1 ? qsTr("day") : qsTr("days") }
+    function hourUnit(n) { return n === 1 ? qsTr("hour") : qsTr("hours") }
+    function minuteUnit(n) { return n === 1 ? qsTr("minute") : qsTr("minutes") }
 
     // A fixed "ddd h:mm AP" pattern is English: it names the weekday in
     // English, puts the meridiem after the hour, and orders date and time the
@@ -377,14 +398,31 @@ PlasmoidItem {
             const spent = moneyFromCents(p.used, p.currency)
             const cap = p.limit != null
                 ? moneyFromCents(p.limit, p.currency) : qsTr("no cap")
-            return qsTr("%1 / %2").arg(spent).arg(cap)
-                + (when ? (" · " + when) : "")
+            return appendReset(
+                qsTr("%1 / %2").arg(spent).arg(cap), when)
         }
         if (p.used != null && p.limit != null)
-            return qsTr("%1 / %2")
-                .arg(numStr(p.used, 0)).arg(numStr(p.limit, 0))
-                + (when ? (" · " + when) : "")
+            return appendReset(
+                qsTr("%1 / %2")
+                    .arg(numStr(p.used, 0)).arg(numStr(p.limit, 0)),
+                when)
         return when
+    }
+
+    // The reset time rides along with a meter's numbers, and the mark between
+    // them is part of a sentence the catalog has to own: a language that
+    // reverses the two, drops the mark, or writes it the other way round
+    // cannot do so behind a string glued together in QML.
+    function appendReset(value, when) {
+        if (!when) return value
+        return qsTr("%1 · %2").arg(value).arg(when)
+    }
+
+    // An ISO 4217 code is three ASCII letters, and that is all a currency
+    // style accepts: anything else from a vendor payload raises a RangeError
+    // out of toLocaleString and leaves the label that asked for it blank.
+    function isCurrencyCode(v) {
+        return typeof v === "string" && /^[A-Za-z]{3}$/.test(v)
     }
 
     // A "$" glued to an English-grouped number reads wrong in most of the
@@ -399,7 +437,8 @@ PlasmoidItem {
         if (isNaN(n)) return qsTr("n/a")
         return n.toLocaleString(Qt.locale().name, {
             style: "currency",
-            currency: currency || root.defaultCurrency,
+            currency: isCurrencyCode(currency)
+                ? currency.toUpperCase() : root.defaultCurrency,
             minimumFractionDigits: n % 1 === 0 ? 0 : 2,
             maximumFractionDigits: 2
         })
@@ -416,6 +455,16 @@ PlasmoidItem {
         if (codex && !codex.ok) names.push("Codex")
         if (grok && !grok.ok) names.push("Grok")
         return names
+    }
+
+    // An amount in major units and the currency it is in. The code is not
+    // pasted after the number here: it goes through the locale's own
+    // currency format, so the symbol, its side, its spacing, and the digits
+    // all follow the user. A payload that names no currency keeps the bare
+    // number rather than claiming the default one is right.
+    function moneyStr(amount, currency) {
+        if (!isCurrencyCode(currency)) return amountStr(amount)
+        return moneyFromCents(Number(amount) * 100, currency)
     }
 
     function tooltipBody() {
@@ -492,6 +541,14 @@ PlasmoidItem {
         const n = Number(u)
         if (isNaN(n)) return ""
         return percentStr(n / 100, 0)
+    }
+
+    // The parts of a meter's spoken summary, joined by a catalog separator.
+    // A comma written in QML is a comma in every locale, and a language that
+    // lists with a semicolon, a middle dot, or a full stop cannot say so.
+    function joinSpoken(parts) {
+        return parts.filter(s => s !== "").reduce(
+            (a, b) => qsTr("%1, %2").arg(a).arg(b))
     }
 
     function topByUtil(rows) {
@@ -766,8 +823,8 @@ PlasmoidItem {
                     visible: root.claude !== null
                     title: "Claude"
                     subtitle: (root.claude && root.claude.ok)
-                        ? ((root.claude.plan || qsTr("Signed in"))
-                            + staleSuffix(root.claude))
+                        ? withStaleMark(root.claude.plan || qsTr("Signed in"),
+                            root.claude)
                         : ((root.claude && root.claude.error)
                             ? errText(root.claude.error, qsTr("Sign in with Claude Code"))
                             : qsTr("Loading"))
@@ -849,12 +906,12 @@ PlasmoidItem {
                                     // missing one falls back to cents.
                                     const exp = spend.exponent == null ? 2 : spend.exponent
                                     const major = spend.used_minor / Math.pow(10, exp)
-                                    return qsTr("Extra usage: %1 %2")
-                                        .arg(numStr(major, 2, 2))
-                                        .arg(spend.currency || cur)
+                                    return qsTr("Extra usage: %1")
+                                        .arg(moneyStr(major,
+                                            spend.currency || cur))
                                 }
-                                return qsTr("Extra usage credits: %1 %2")
-                                    .arg(amountStr(used)).arg(cur)
+                                return qsTr("Extra usage credits: %1")
+                                    .arg(moneyStr(used, cur))
                             }
                             font.pointSize: Kirigami.Theme.smallFont.pointSize
                             Layout.fillWidth: true
@@ -869,8 +926,8 @@ PlasmoidItem {
                     visible: root.cursor !== null
                     title: "Cursor"
                     subtitle: (root.cursor && root.cursor.ok)
-                        ? ((root.cursor.plan || qsTr("Signed in"))
-                            + staleSuffix(root.cursor))
+                        ? withStaleMark(root.cursor.plan || qsTr("Signed in"),
+                            root.cursor)
                         : ((root.cursor && root.cursor.error)
                             ? errText(root.cursor.error, qsTr("Sign in to Cursor"))
                             : qsTr("Loading"))
@@ -929,8 +986,8 @@ PlasmoidItem {
                     visible: root.codex !== null
                     title: "Codex"
                     subtitle: (root.codex && root.codex.ok)
-                        ? ((root.codex.plan || qsTr("Signed in"))
-                            + staleSuffix(root.codex))
+                        ? withStaleMark(root.codex.plan || qsTr("Signed in"),
+                            root.codex)
                         : ((root.codex && root.codex.error)
                             ? errText(root.codex.error, qsTr("Sign in with `codex login`"))
                             : qsTr("Loading"))
@@ -1031,7 +1088,7 @@ PlasmoidItem {
                     visible: root.grok !== null
                     title: "Grok"
                     subtitle: (root.grok && root.grok.ok)
-                        ? (qsTr("Credit limits") + staleSuffix(root.grok))
+                        ? withStaleMark(qsTr("Credit limits"), root.grok)
                         : ((root.grok && root.grok.error)
                             ? errText(root.grok.error, qsTr("Sign in with `grok login`"))
                             : qsTr("Loading"))
@@ -1106,9 +1163,13 @@ PlasmoidItem {
         }
     }
 
-    // Shown on every card that kept an old reading through a transient failure.
-    function staleSuffix(p) {
-        return (p && p.ok && p.stale) ? " · " + qsTr("cached") : ""
+    // The "cached" mark on a card that kept an old reading through a
+    // transient failure. It and the plan name are one pattern, not a word
+    // appended to a finished string: a language that leads with the mark,
+    // reverses the two, or spells it out has to be able to.
+    function withStaleMark(text, p) {
+        if (!(p && p.ok && p.stale)) return text
+        return qsTr("%1 · %2").arg(text).arg(qsTr("cached"))
     }
 
     // What the "cached" mark means. "cached" on its own is a word about the
@@ -1200,11 +1261,11 @@ PlasmoidItem {
         // label, value, severity and reset time are not read twice.
         Accessible.role: Accessible.ProgressBar
         Accessible.name: row.label
-        Accessible.description: [
+        Accessible.description: joinSpoken([
             qsTr("%1, %2 usage").arg(pct(row.util)).arg(utilSeverity(row.util)),
             row.detail,
             row.subdetail
-        ].filter(s => s !== "").join(", ")
+        ])
 
         readonly property real frac: {
             if (row.util === undefined || row.util === null)

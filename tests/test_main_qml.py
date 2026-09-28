@@ -174,9 +174,64 @@ class MainQmlLocalizationTest(unittest.TestCase):
     def test_counts_in_durations_use_the_locale(self) -> None:
         # qsTr().arg() on a raw number splices a JS number, so an Arabic
         # locale would read Latin digits beside a localized percentage.
-        self.assertIn('qsTr("%1d %2h").arg(numStr(d, 0))', QML_SOURCE)
-        self.assertIn('qsTr("%1h %2m").arg(numStr(h, 0))', QML_SOURCE)
-        self.assertIn('qsTr("%1 min").arg(numStr(m, 0))', QML_SOURCE)
+        self.assertIn('qsTr("%1 %2 %3 %4")', QML_SOURCE)
+        self.assertIn('qsTr("%1 %2")', QML_SOURCE)
+        for count in ("d", "h", "m"):
+            self.assertIn(f"numStr({count}, 0)", QML_SOURCE)
+
+    def test_duration_units_are_words_a_translator_owns(self) -> None:
+        # "2d 3h" welds an English unit letter to a Latin digit: no catalog
+        # entry exists for it, so a locale that spells the unit out, writes it
+        # behind the count, or uses another script has nothing to change.
+        for welded in ('qsTr("%1d %2h")', 'qsTr("%1h %2m")', 'qsTr("%1 min")'):
+            self.assertNotIn(welded, QML_SOURCE)
+        for unit in ("dayUnit", "hourUnit", "minuteUnit"):
+            self.assertIn(f"function {unit}(n)", QML_SOURCE)
+
+    def test_a_count_picks_its_own_plural_form(self) -> None:
+        # QML's qsTr() takes no plural argument, so the singular and the
+        # plural have to be two entries the count chooses between. A language
+        # with more than two forms (Polish, Russian, Arabic) then has a
+        # string to translate rather than an English spelling to work around.
+        for unit, forms in (
+            ("dayUnit", ("day", "days")),
+            ("hourUnit", ("hour", "hours")),
+            ("minuteUnit", ("minute", "minutes")),
+        ):
+            self.assertIn(
+                f"function {unit}(n) {{ return n === 1 "
+                f'? qsTr("{forms[0]}") : qsTr("{forms[1]}") }}',
+                QML_SOURCE,
+            )
+
+    def test_composed_sentences_are_one_pattern(self) -> None:
+        # A translated phrase glued to a hardcoded " · " or joined on a
+        # literal ", " cannot be reordered: the catalog holds half a
+        # sentence. Every composition goes through a pattern whose
+        # placeholders a translator can move.
+        self.assertNotIn('" · "', QML_SOURCE)
+        self.assertNotIn('join(", ")', QML_SOURCE)
+        self.assertIn('qsTr("%1 · %2").arg(value).arg(when)', QML_SOURCE)
+        self.assertIn('qsTr("%1, %2").arg(a).arg(b)', QML_SOURCE)
+
+    def test_currency_codes_go_through_the_locale_formatter(self) -> None:
+        # "67.63 SGD" is a Latin number with a code pasted after it. The
+        # locale decides symbol, side, spacing, and digits, so an amount
+        # that names its currency is formatted as currency.
+        self.assertIn("function moneyStr(amount, currency)", QML_SOURCE)
+        self.assertIn(
+            "return moneyFromCents(Number(amount) * 100, currency)", QML_SOURCE
+        )
+        self.assertIn('qsTr("Extra usage: %1")', QML_SOURCE)
+        self.assertIn('qsTr("Extra usage credits: %1")', QML_SOURCE)
+
+    def test_a_vendor_currency_code_is_checked_before_it_is_formatted(self) -> None:
+        # A currency style raises a RangeError on anything that is not an
+        # ISO 4217 code, and the label that asked for it renders blank. The
+        # check sits at the one call site that reaches toLocaleString().
+        self.assertIn("function isCurrencyCode(v)", QML_SOURCE)
+        self.assertIn("currency: isCurrencyCode(currency)", QML_SOURCE)
+        self.assertEqual(QML_SOURCE.count('style: "currency"'), 1)
 
     def test_meter_fills_from_the_leading_edge(self) -> None:
         # Qt mirrors the left/right anchor lines in a right-to-left layout; a
@@ -274,7 +329,7 @@ class MainQmlAccessibilityTest(unittest.TestCase):
 
     def test_meters_expose_a_spoken_summary(self) -> None:
         self.assertIn("Accessible.role: Accessible.ProgressBar", QML_SOURCE)
-        self.assertIn("Accessible.description: [", QML_SOURCE)
+        self.assertIn("Accessible.description: joinSpoken([", QML_SOURCE)
 
     def test_panel_widget_is_keyboard_operable(self) -> None:
         self.assertIn("Keys.onSpacePressed: root.expanded = !root.expanded", QML_SOURCE)
@@ -399,8 +454,8 @@ class MainQmlAccessibilityTest(unittest.TestCase):
         for provider in ("claude", "cursor", "codex"):
             self.assertIn(
                 f"subtitle: (root.{provider} && root.{provider}.ok)\n"
-                f"                        ? ((root.{provider}.plan "
-                '|| qsTr("Signed in"))',
+                f"                        ? withStaleMark(root.{provider}.plan "
+                '|| qsTr("Signed in"),',
                 QML_SOURCE,
             )
 

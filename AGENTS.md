@@ -104,14 +104,27 @@ A poll answers where a screen reader is not looking, so a change in `errorMsg` i
 
 Every user-facing string in `main.qml` goes through `qsTr()` with `%1`-style
 placeholders, never concatenation, so a translator can reorder the sentence.
+A composition is a second pattern, not a separator welded to a phrase: the
+`·` between a meter's numbers and its reset time (`appendReset`), between a
+plan name and its "cached" mark (`withStaleMark`), and the separator in a
+meter's spoken summary (`joinSpoken`) are all `qsTr()` entries a translator
+owns. A unit is a word of its own, not a letter glued to a digit: `remainStr`
+takes it from `dayUnit` / `hourUnit` / `minuteUnit`, which pick a singular or
+a plural entry by count, because QML's `qsTr()` carries no plural argument and
+a language with four or six forms needs a string of its own for each.
 Dates and times render through `Qt.DefaultLocaleShortDate`, amounts through
 `Number.toLocaleString(Qt.locale().name, { style: "currency" })`, percentages
 through `percentStr()` (`style: "percent"`, so the sign and its spacing are the
 locale's), and counts through `numStr()`. Every value spliced with `.arg()` goes
-through one of those, since a raw number keeps Latin digits. A hardcoded `"$"`,
-a `"ddd h:mm AP"` format, a `qsTr("%1%")` suffix, or a bare `toLocaleString()`
-with no locale argument all render English numbering in every locale;
-`tests/test_main_qml.py` fails on each of them.
+through one of those, since a raw number keeps Latin digits. A currency code
+never follows a number as plain text: `moneyStr()` formats the amount, and a
+vendor value that is not an ISO 4217 code fails `isCurrencyCode()` and leaves
+the bare number, since a currency style raises a `RangeError` on anything else
+and a blanked label is worse than an unadorned amount. A hardcoded `"$"`, a
+currency code spliced in beside a formatted number, a `"ddd h:mm AP"` format, a
+`qsTr("%1%")` suffix, or a bare `toLocaleString()` with no locale argument all
+render English numbering in every locale; `tests/test_main_qml.py` fails on
+each of them.
 
 `anchors.left`, `anchors.right`, and `anchors.horizontalCenter` are logical
 edges in QML and mirror themselves in a right-to-left layout, so the meter fill
