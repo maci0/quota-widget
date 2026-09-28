@@ -59,6 +59,11 @@ PlasmoidItem {
     readonly property int markThickness: 3
     readonly property int barThickness: 8
 
+    // Minor-unit amounts reach the UI without a currency code (the Cursor
+    // usage API sends bare cents). Every number they came from is a USD
+    // amount; the locale still decides the symbol, its side, and the grouping.
+    readonly property string defaultCurrency: "USD"
+
     // Provider marks. Claude and Codex ship a brand color; Cursor and Grok
     // are monochrome, so they get theme neutrals rather than invented hues.
     readonly property color claudeMark: "#D97757"
@@ -83,7 +88,7 @@ PlasmoidItem {
     property bool userRefreshing: false
 
     Plasmoid.icon: "com.maci.quota-widget.svg"
-    toolTipMainText: "AI Quota"
+    toolTipMainText: qsTr("AI Quota")
     toolTipSubText: tooltipBody()
 
     preferredRepresentation: fullRepresentation
@@ -186,20 +191,47 @@ PlasmoidItem {
     }
 
     function remainStr(resetMs) {
-        if (!resetMs) return "n/a"
+        if (!resetMs) return qsTr("n/a")
         const ms = Math.max(0, resetMs - nowMs)
         const totalMin = Math.floor(ms / 60000)
         const d = Math.floor(totalMin / 1440)
         const h = Math.floor((totalMin % 1440) / 60)
         const m = totalMin % 60
-        if (d > 0) return d + "d " + h + "h"
-        if (h > 0) return h + "h " + m + "m"
-        return m + "m"
+        if (d > 0) return qsTr("%1d %2h").arg(d).arg(h)
+        if (h > 0) return qsTr("%1h %2m").arg(h).arg(m)
+        return qsTr("%1 min").arg(m)
+    }
+
+    // A fixed "ddd h:mm AP" pattern is English: it names the weekday in
+    // English, puts the meridiem after the hour, and orders date and time the
+    // American way. The locale's own short date-and-time does it correctly
+    // everywhere, in its own digits and script.
+    function localeDateTimeStr(ms) {
+        return Qt.formatDateTime(new Date(ms), Qt.DefaultLocaleShortDate)
     }
 
     function resetAtStr(resetMs) {
         if (!resetMs) return ""
-        return Qt.formatDateTime(new Date(resetMs), "ddd h:mm AP")
+        return localeDateTimeStr(resetMs)
+    }
+
+    // Decimal separator, digit grouping, and the digits themselves follow the
+    // user's locale, so a German reading gets "12,5" and a CJK or Arabic one
+    // gets its own digits.
+    function numStr(n, maxDigits, minDigits) {
+        const opts = { maximumFractionDigits: maxDigits }
+        if (minDigits)
+            opts.minimumFractionDigits = minDigits
+        return Number(n).toLocaleString(Qt.locale().name, opts)
+    }
+
+    // Vendor amounts arrive as strings of unknown precision. Group and
+    // decimal-separate them through the locale without inventing decimals
+    // the API never reported.
+    function amountStr(v) {
+        const n = Number(v)
+        if (v === "" || isNaN(n)) return String(v)
+        return numStr(n, 2)
     }
 
     function utilColor(u) {
@@ -212,42 +244,49 @@ PlasmoidItem {
     // Severity is a text channel, not only the meter color, so it survives
     // colorblindness and high-contrast themes.
     function utilSeverity(u) {
-        if (u === undefined || u === null) return "unknown"
+        if (u === undefined || u === null) return qsTr("unknown")
         const n = Number(u)
-        if (!isFinite(n)) return "unknown"
-        if (n >= root.utilCritAt) return "critical"
-        if (n >= root.utilWarnAt) return "high"
-        return "normal"
+        if (isNaN(n)) return qsTr("unknown")
+        if (n >= root.utilCritAt) return qsTr("critical")
+        if (n >= root.utilWarnAt) return qsTr("high")
+        return qsTr("normal")
     }
 
     function pct(u) {
-        if (u === undefined || u === null) return "n/a"
+        if (u === undefined || u === null) return qsTr("n/a")
         const n = Number(u)
-        if (!isFinite(n)) return "n/a"
-        return (Math.round(n * 10) / 10) + "%"
+        if (isNaN(n)) return qsTr("n/a")
+        return qsTr("%1%").arg(numStr(Math.round(n * 10) / 10, 1))
     }
 
     function periodSubdetail(p) {
         if (!p) return ""
         const when = p.resets_ms ? resetAtStr(p.resets_ms) : ""
         if (p.unit === "cents" && (p.used != null || p.limit != null)) {
-            const spent = moneyFromCents(p.used)
-            const cap = p.limit != null ? moneyFromCents(p.limit) : "no cap"
+            const spent = moneyFromCents(p.used, p.currency)
+            const cap = p.limit != null
+                ? moneyFromCents(p.limit, p.currency) : qsTr("no cap")
             return spent + " / " + cap + (when ? (" · " + when) : "")
         }
         if (p.used != null && p.limit != null)
-            return p.used + " / " + p.limit + (when ? (" · " + when) : "")
+            return numStr(p.used, 0) + " / " + numStr(p.limit, 0)
+                + (when ? (" · " + when) : "")
         return when
     }
 
-    function moneyFromCents(cents) {
-        if (cents === undefined || cents === null) return "n/a"
-        const c = Number(cents)
-        if (!isFinite(c)) return "n/a"
+    // A "$" glued to an English-grouped number reads wrong in most of the
+    // world: German wants "12,50 $", a locale that uses a narrow space wants
+    // one, and some scripts place the code before the digits. Letting the
+    // locale format the currency keeps all of that in one place.
+    function moneyFromCents(cents, currency) {
+        if (cents === undefined || cents === null) return qsTr("n/a")
         // Round to whole cents before scaling: a fraction of a cent would
         // otherwise reach toLocaleString as a float artifact.
-        const n = Math.round(c) / 100
-        return "$" + n.toLocaleString(undefined, {
+        const n = Math.round(Number(cents)) / 100
+        if (isNaN(n)) return qsTr("n/a")
+        return n.toLocaleString(Qt.locale().name, {
+            style: "currency",
+            currency: currency || root.defaultCurrency,
             minimumFractionDigits: n % 1 === 0 ? 0 : 2,
             maximumFractionDigits: 2
         })
@@ -256,22 +295,29 @@ PlasmoidItem {
     function tooltipBody() {
         const lines = []
         if (claude && claude.ok && claude.session)
-            lines.push("Claude session " + pct(claude.session.util)
-                + " · weekly " + (claude.weekly && claude.weekly[0]
-                    ? pct(claude.weekly[0].util) : "n/a"))
+            lines.push(qsTr("Claude session %1 · weekly %2")
+                .arg(pct(claude.session.util))
+                .arg(claude.weekly && claude.weekly[0]
+                    ? pct(claude.weekly[0].util) : qsTr("n/a")))
         if (cursor && cursor.ok && cursor.periods && cursor.periods.length)
-            lines.push("Cursor " + (cursor.plan || "usage")
-                + " " + pct(cursor.periods[0].util))
+            lines.push(qsTr("Cursor %1 %2")
+                .arg(cursor.plan || qsTr("usage"))
+                .arg(pct(cursor.periods[0].util)))
         if (codex && codex.ok && codex.windows && codex.windows.length)
-            lines.push("Codex " + (codex.windows[0].label || "usage")
-                + " " + pct(codex.windows[0].util))
+            lines.push(qsTr("Codex %1 %2")
+                .arg(codex.windows[0].label || qsTr("usage"))
+                .arg(pct(codex.windows[0].util)))
         if (grok && grok.ok && grok.periods) {
+            // The period label is vendor data in the vendor's casing, and the
+            // fallback below is a translated string: case-folding either one
+            // with toLowerCase() would mangle it under a Turkish locale.
             for (let i = 0; i < grok.periods.length; i++)
-                lines.push("Grok " + (grok.periods[i].label || "usage").toLowerCase()
-                    + " " + pct(grok.periods[i].util))
+                lines.push(qsTr("Grok %1 %2")
+                    .arg(grok.periods[i].label || qsTr("usage"))
+                    .arg(pct(grok.periods[i].util)))
         }
         if (lines.length === 0)
-            return errorMsg ? statusText() : "Loading"
+            return errorMsg ? statusText() : qsTr("Loading")
         return lines.join("\n")
     }
 
@@ -290,14 +336,15 @@ PlasmoidItem {
     }
 
     function statusText() {
-        return errText(errorMsg, "Sign in to Claude / Cursor / Codex / Grok")
+        return errText(errorMsg,
+            qsTr("Sign in to Claude / Cursor / Codex / Grok"))
     }
 
     function compactPct(u) {
         if (u === undefined || u === null) return ""
         const n = Number(u)
-        if (!isFinite(n)) return ""
-        return Math.round(n) + "%"
+        if (isNaN(n)) return ""
+        return qsTr("%1%").arg(numStr(Math.round(n), 0))
     }
 
     function topByUtil(rows) {
@@ -374,7 +421,7 @@ PlasmoidItem {
         focus: true
         activeFocusOnTab: true
         Accessible.role: Accessible.Button
-        Accessible.name: "AI Quota"
+        Accessible.name: qsTr("AI Quota")
         Accessible.description: root.tooltipBody()
         Keys.onSpacePressed: root.expanded = !root.expanded
         Keys.onReturnPressed: root.expanded = !root.expanded
@@ -443,7 +490,7 @@ PlasmoidItem {
                     var gp = root.grokTopPeriod()
                     if (gp)
                         return remainStr(gp.resets_ms)
-                    return "quota"
+                    return qsTr("quota")
                 }
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
                 font.features: { "tnum": 1 }
@@ -480,16 +527,16 @@ PlasmoidItem {
                     Layout.fillWidth: true
                     Kirigami.Heading {
                         level: 2
-                        text: "AI Quota"
+                        text: qsTr("AI Quota")
                         Layout.fillWidth: true
                     }
                     PlasmaComponents3.ToolButton {
                         icon.name: root.gaugeView ? "view-list-details" : "speedometer"
-                        text: root.gaugeView ? "List view" : "Gauge view"
+                        text: root.gaugeView ? qsTr("List view") : qsTr("Gauge view")
                         display: PlasmaComponents3.AbstractButton.IconOnly
                         onClicked: Plasmoid.configuration.gaugeView = !root.gaugeView
                         PlasmaComponents3.ToolTip.text: root.gaugeView
-                            ? "List view" : "Gauge view"
+                            ? qsTr("List view") : qsTr("Gauge view")
                         PlasmaComponents3.ToolTip.visible: hovered || visualFocus
                         PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
                     }
@@ -500,7 +547,7 @@ PlasmoidItem {
                     }
                     PlasmaComponents3.ToolButton {
                         icon.name: "view-refresh"
-                        text: "Refresh"
+                        text: qsTr("Refresh")
                         display: PlasmaComponents3.AbstractButton.IconOnly
                         // A poll started while one is running is dropped by
                         // exec.poll(); disable rather than swallow the click.
@@ -513,7 +560,7 @@ PlasmoidItem {
                             exec.poll()
                         }
                         PlasmaComponents3.ToolTip.text: root.fetching
-                            ? "Refreshing…" : "Refresh now"
+                            ? qsTr("Refreshing…") : qsTr("Refresh now")
                         PlasmaComponents3.ToolTip.visible: hovered || visualFocus
                         PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
                     }
@@ -552,7 +599,8 @@ PlasmoidItem {
                     subtitle: (root.claude && root.claude.ok && root.claude.plan)
                         ? (root.claude.plan + staleSuffix(root.claude))
                         : ((root.claude && root.claude.error)
-                            ? errText(root.claude.error, "Sign in with Claude Code") : "Loading")
+                            ? errText(root.claude.error, qsTr("Sign in with Claude Code"))
+                            : qsTr("Loading"))
                     accent: root.claudeMark
                     ok: root.claude && root.claude.ok
                     stale: !!(root.claude && root.claude.stale)
@@ -564,7 +612,7 @@ PlasmoidItem {
 
                         PlasmaComponents3.Label {
                             visible: !root.gaugeView
-                            text: "Plan usage limits"
+                            text: qsTr("Plan usage limits")
                             font.bold: true
                             Layout.fillWidth: true
                         }
@@ -577,11 +625,12 @@ PlasmoidItem {
                                 : Kirigami.Units.smallSpacing
 
                             UsageRow {
-                                label: "Current session"
+                                label: qsTr("Current session")
                                 util: root.claude && root.claude.session
                                     ? root.claude.session.util : null
                                 detail: root.claude && root.claude.session
-                                    ? ("Resets in " + remainStr(root.claude.session.resets_ms))
+                                    ? qsTr("Resets in %1")
+                                        .arg(remainStr(root.claude.session.resets_ms))
                                     : ""
                                 subdetail: root.claude && root.claude.session
                                     ? resetAtStr(root.claude.session.resets_ms) : ""
@@ -595,7 +644,7 @@ PlasmoidItem {
                             PlasmaComponents3.Label {
                                 visible: !root.gaugeView
                                 width: parent.width
-                                text: "Weekly limits"
+                                text: qsTr("Weekly limits")
                                 font.bold: true
                             }
 
@@ -604,10 +653,11 @@ PlasmoidItem {
                                     ? root.claude.weekly : []
                                 delegate: UsageRow {
                                     required property var modelData
-                                    label: modelData.label || "Weekly"
+                                    label: modelData.label || qsTr("Weekly")
                                     util: modelData.util
                                     detail: modelData.resets_ms
-                                        ? ("Resets in " + remainStr(modelData.resets_ms))
+                                        ? qsTr("Resets in %1")
+                                            .arg(remainStr(modelData.resets_ms))
                                         : ""
                                     subdetail: modelData.resets_ms
                                         ? resetAtStr(modelData.resets_ms) : ""
@@ -633,14 +683,12 @@ PlasmoidItem {
                                     // missing one falls back to cents.
                                     const exp = spend.exponent == null ? 2 : spend.exponent
                                     const major = spend.used_minor / Math.pow(10, exp)
-                                    return "Extra usage: "
-                                        + major.toLocaleString(undefined, {
-                                            minimumFractionDigits: 2,
-                                            maximumFractionDigits: 2
-                                        })
-                                        + " " + (spend.currency || cur)
+                                    return qsTr("Extra usage: %1 %2")
+                                        .arg(numStr(major, 2, 2))
+                                        .arg(spend.currency || cur)
                                 }
-                                return "Extra usage credits: " + used + " " + cur
+                                return qsTr("Extra usage credits: %1 %2")
+                                    .arg(amountStr(used)).arg(cur)
                             }
                             font.pointSize: Kirigami.Theme.smallFont.pointSize
                             Layout.fillWidth: true
@@ -657,7 +705,8 @@ PlasmoidItem {
                     subtitle: (root.cursor && root.cursor.ok && root.cursor.plan)
                         ? (root.cursor.plan + staleSuffix(root.cursor))
                         : ((root.cursor && root.cursor.error)
-                            ? errText(root.cursor.error, "Sign in to Cursor") : "Loading")
+                            ? errText(root.cursor.error, qsTr("Sign in to Cursor"))
+                            : qsTr("Loading"))
                     accent: root.cursorMark
                     ok: root.cursor && root.cursor.ok
                     stale: !!(root.cursor && root.cursor.stale)
@@ -669,7 +718,7 @@ PlasmoidItem {
 
                         PlasmaComponents3.Label {
                             visible: !!(root.cursor && root.cursor.unlimited)
-                            text: "Unlimited included usage"
+                            text: qsTr("Unlimited included usage")
                             Layout.fillWidth: true
                         }
 
@@ -687,11 +736,13 @@ PlasmoidItem {
                                     ? root.cursor.periods : []
                                 delegate: UsageRow {
                                     required property var modelData
-                                    label: (modelData.label || "Usage")
-                                        + (modelData.unit === "cents" ? " spend" : "")
+                                    label: modelData.unit === "cents"
+                                        ? qsTr("%1 spend").arg(modelData.label || qsTr("usage"))
+                                        : (modelData.label || qsTr("usage"))
                                     util: modelData.util
                                     detail: modelData.resets_ms
-                                        ? ("Resets in " + remainStr(modelData.resets_ms))
+                                        ? qsTr("Resets in %1")
+                                            .arg(remainStr(modelData.resets_ms))
                                         : ""
                                     subdetail: periodSubdetail(modelData)
                                 }
@@ -702,7 +753,7 @@ PlasmoidItem {
                             visible: root.cursor && root.cursor.ok
                                 && !(root.cursor.unlimited)
                                 && !(root.cursor.periods && root.cursor.periods.length)
-                            text: "No usage meters reported"
+                            text: qsTr("No usage meters reported")
                             Layout.fillWidth: true
                         }
                     }
@@ -716,7 +767,8 @@ PlasmoidItem {
                     subtitle: (root.codex && root.codex.ok && root.codex.plan)
                         ? (root.codex.plan + staleSuffix(root.codex))
                         : ((root.codex && root.codex.error)
-                            ? errText(root.codex.error, "Sign in with `codex login`") : "Loading")
+                            ? errText(root.codex.error, qsTr("Sign in with `codex login`"))
+                            : qsTr("Loading"))
                     accent: root.codexMark
                     ok: root.codex && root.codex.ok
                     stale: !!(root.codex && root.codex.stale)
@@ -728,14 +780,14 @@ PlasmoidItem {
 
                         PlasmaComponents3.Label {
                             visible: !root.gaugeView
-                            text: "Usage limits"
+                            text: qsTr("Usage limits")
                             font.bold: true
                             Layout.fillWidth: true
                         }
 
                         PlasmaComponents3.Label {
                             visible: root.codex && root.codex.limit_reached
-                            text: "Limit reached"
+                            text: qsTr("Limit reached")
                             color: Kirigami.Theme.negativeTextColor
                             font.bold: true
                             Layout.fillWidth: true
@@ -755,10 +807,11 @@ PlasmoidItem {
                                     ? root.codex.windows : []
                                 delegate: UsageRow {
                                     required property var modelData
-                                    label: modelData.label || "Usage"
+                                    label: modelData.label || qsTr("usage")
                                     util: modelData.util
                                     detail: modelData.resets_ms
-                                        ? ("Resets in " + remainStr(modelData.resets_ms))
+                                        ? qsTr("Resets in %1")
+                                            .arg(remainStr(modelData.resets_ms))
                                         : ""
                                     subdetail: modelData.resets_ms
                                         ? resetAtStr(modelData.resets_ms) : ""
@@ -769,7 +822,7 @@ PlasmoidItem {
                         PlasmaComponents3.Label {
                             visible: root.codex && root.codex.windows
                                 && root.codex.windows.length === 0
-                            text: "No usage meters reported"
+                            text: qsTr("No usage meters reported")
                             Layout.fillWidth: true
                         }
 
@@ -781,8 +834,9 @@ PlasmoidItem {
                             text: {
                                 const c = root.codex && root.codex.credits
                                 if (!c) return ""
-                                if (c.unlimited) return "Credits: unlimited"
-                                return "Credits balance: " + (c.balance || "0")
+                                if (c.unlimited) return qsTr("Credits: unlimited")
+                                return qsTr("Credits balance: %1")
+                                    .arg(amountStr(c.balance || 0))
                             }
                             font.pointSize: Kirigami.Theme.smallFont.pointSize
                             Layout.fillWidth: true
@@ -796,10 +850,12 @@ PlasmoidItem {
                             text: {
                                 const r = root.codex && root.codex.reset_credits
                                 if (!r) return ""
-                                return "Limit resets available: " + r.available
-                                    + (r.applicable > 0
-                                        ? (" (" + r.applicable + " usable now)")
-                                        : "")
+                                if (r.applicable > 0)
+                                    return qsTr("Limit resets available: %1 (%2 usable now)")
+                                        .arg(amountStr(r.available))
+                                        .arg(amountStr(r.applicable))
+                                return qsTr("Limit resets available: %1")
+                                    .arg(amountStr(r.available))
                             }
                             font.pointSize: Kirigami.Theme.smallFont.pointSize
                             Layout.fillWidth: true
@@ -813,9 +869,10 @@ PlasmoidItem {
                     visible: root.grok !== null
                     title: "Grok"
                     subtitle: (root.grok && root.grok.ok)
-                        ? ("Credit limits" + staleSuffix(root.grok))
+                        ? (qsTr("Credit limits") + staleSuffix(root.grok))
                         : ((root.grok && root.grok.error)
-                            ? errText(root.grok.error, "Sign in with `grok login`") : "Loading")
+                            ? errText(root.grok.error, qsTr("Sign in with `grok login`"))
+                            : qsTr("Loading"))
                     accent: root.grokMark
                     ok: root.grok && root.grok.ok
                     stale: !!(root.grok && root.grok.stale)
@@ -839,10 +896,12 @@ PlasmoidItem {
                                     ? root.grok.periods : []
                                 delegate: UsageRow {
                                     required property var modelData
-                                    label: (modelData.label || "Usage") + " limit"
+                                    label: qsTr("%1 limit")
+                                        .arg(modelData.label || qsTr("usage"))
                                     util: modelData.util
                                     detail: modelData.resets_ms
-                                        ? ("Resets in " + remainStr(modelData.resets_ms))
+                                        ? qsTr("Resets in %1")
+                                            .arg(remainStr(modelData.resets_ms))
                                         : ""
                                     subdetail: periodSubdetail(modelData)
                                 }
@@ -863,8 +922,10 @@ PlasmoidItem {
                             text: {
                                 const periods = root.grok && root.grok.periods
                                 return periods && periods.length > 0
-                                    ? ("On-demand cap: "
-                                        + moneyFromCents(periods[0].on_demand_cap))
+                                    ? qsTr("On-demand cap: %1")
+                                        .arg(moneyFromCents(
+                                            periods[0].on_demand_cap,
+                                            periods[0].currency))
                                     : ""
                             }
                             font.pointSize: Kirigami.Theme.smallFont.pointSize
@@ -875,8 +936,7 @@ PlasmoidItem {
 
                 PlasmaComponents3.Label {
                     text: root.fetchedMs
-                        ? ("Updated "
-                            + Qt.formatTime(new Date(root.fetchedMs), "h:mm AP"))
+                        ? qsTr("Updated %1").arg(localeDateTimeStr(root.fetchedMs))
                         : ""
                     font.pointSize: Kirigami.Theme.smallFont.pointSize
                     Layout.fillWidth: true
@@ -889,7 +949,7 @@ PlasmoidItem {
 
     // Shown on every card that kept an old reading through a transient failure.
     function staleSuffix(p) {
-        return (p && p.ok && p.stale) ? " · cached" : ""
+        return (p && p.ok && p.stale) ? " · " + qsTr("cached") : ""
     }
 
     // ── reusable bits ─────────────────────────────────────────────────────
@@ -956,7 +1016,7 @@ PlasmoidItem {
         Accessible.role: Accessible.ProgressBar
         Accessible.name: row.label
         Accessible.description: [
-            pct(row.util) + ", " + utilSeverity(row.util) + " usage",
+            qsTr("%1, %2 usage").arg(pct(row.util)).arg(utilSeverity(row.util)),
             row.detail,
             row.subdetail
         ].filter(s => s !== "").join(", ")
@@ -1017,6 +1077,9 @@ PlasmoidItem {
                 Accessible.ignored: true
             }
             Rectangle {
+                // anchors.left is a logical edge: Qt mirrors the left, right
+                // and horizontalCenter anchor lines in a right-to-left
+                // layout, so the meter fills from the leading edge there too.
                 anchors.left: parent.left
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom

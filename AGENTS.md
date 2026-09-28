@@ -44,6 +44,20 @@ as a build or test step.
 
 Provider marks: Claude and Codex use their published brand color. Cursor and Grok are monochrome brands, so they use `Kirigami.Theme` neutrals. Do not invent a hue for a vendor without one.
 
+## Locale
+
+Every user-facing string in `main.qml` goes through `qsTr()` with `%1`-style
+placeholders, never concatenation, so a translator can reorder the sentence.
+Dates and times render through `Qt.DefaultLocaleShortDate`, amounts through
+`Number.toLocaleString(Qt.locale().name, { style: "currency" })`, and
+percentages and counts through `numStr()`. A hardcoded `"$"`, a `"ddd h:mm AP"`
+format, or a bare `toLocaleString()` with no locale argument all render English
+numbering in every locale; `tests/test_main_qml.py` fails on each of them.
+
+`anchors.left`, `anchors.right`, and `anchors.horizontalCenter` are logical
+edges in QML and mirror themselves in a right-to-left layout, so the meter fill
+uses them as-is. Physical edge math does not.
+
 The applet icon is `package/contents/icons/com.maci.quota-widget.svg`, a 270 degree gauge arc matching the in-app meter. It is a dark rim under a light fill so it reads on both panel themes; keep that pairing if it is redrawn.
 
 ## Providers

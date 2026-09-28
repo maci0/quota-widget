@@ -14,6 +14,65 @@ DIMMED_LABEL: Final = re.compile(
 )
 
 
+UI_BINDING: Final = re.compile(
+    r"(?:^|\s)(?:text|subtitle|title|label|detail|Accessible\.name"
+    r"|Accessible\.description|ToolTip\.text|toolTip\w*Text)\s*:\s*(.*)$",
+    re.MULTILINE,
+)
+PROSE_LITERAL: Final = re.compile(r'"([^"\\]*)"')
+
+
+class MainQmlLocalizationTest(unittest.TestCase):
+    """Guards the locale contract the fetcher tests cannot see."""
+
+    @staticmethod
+    def _untranslated_bindings() -> list[str]:
+        # Drop every qsTr() call first, so what is left is text a translator
+        # would never see. Brand names ("Claude", "Cursor", "Codex", "Grok")
+        # and separators (" · ") carry no letters-plus-space, so they stay.
+        source = re.sub(r'qsTr\("[^"]*"\)', "", QML_SOURCE)
+        found: list[str] = []
+        for match in UI_BINDING.finditer(source):
+            for literal in PROSE_LITERAL.findall(match.group(1)):
+                stripped = literal.strip()
+                if " " in stripped and re.search(r"[A-Za-z]", stripped):
+                    found.append(stripped)
+        return found
+
+    def test_ui_text_is_marked_for_translation(self) -> None:
+        # A hardcoded label is a word a translator cannot reach, so the widget
+        # stays English in every locale.
+        self.assertEqual(self._untranslated_bindings(), [])
+
+    def test_dates_and_times_use_the_locale(self) -> None:
+        # "ddd h:mm AP" and friends are English patterns: they name the weekday
+        # in English, order the fields the American way, and force a 12-hour
+        # clock with a trailing meridiem.
+        for args in re.findall(
+            r"Qt\.format(?:Date|Time|DateTime)\(([^)]*)\)", QML_SOURCE
+        ):
+            self.assertNotIn('"', args, f"hardcoded date or time pattern: {args}")
+        self.assertIn("Qt.DefaultLocaleShortDate", QML_SOURCE)
+
+    def test_currency_is_formatted_by_the_locale(self) -> None:
+        # "$" in front of an English-grouped number is wrong in most of the
+        # world: symbol side, spacing, and decimal separator all differ.
+        self.assertNotIn('"$" +', QML_SOURCE)
+        self.assertIn('style: "currency"', QML_SOURCE)
+
+    def test_numbers_use_the_locale(self) -> None:
+        # toLocaleString() with no locale falls back to the C locale, so a
+        # German user reads "12.5" instead of "12,5".
+        self.assertNotIn("toLocaleString(undefined", QML_SOURCE)
+        self.assertIn("Qt.locale().name", QML_SOURCE)
+
+    def test_meter_fills_from_the_leading_edge(self) -> None:
+        # Qt mirrors the left/right anchor lines in a right-to-left layout; a
+        # physical edge would grow the meter from the wrong side.
+        self.assertNotIn("anchors.leftToRight", QML_SOURCE)
+        self.assertIn("anchors.left: parent.left", QML_SOURCE)
+
+
 class MainQmlAccessibilityTest(unittest.TestCase):
     """Guards the QML accessibility contract the fetcher tests cannot see."""
 
