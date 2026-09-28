@@ -35,11 +35,13 @@ import os
 import random
 import tempfile
 import unittest
-from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import fetch_quota
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 JsonDict = dict[str, Any]
 
@@ -237,8 +239,6 @@ def _rand_summary(rng: random.Random) -> Any:
     if rng.random() < 0.2:
         base["extra_unknown_key"] = _rand_json(rng)
     return base
-
-
 
 
 def _rand_cell(rng: random.Random) -> Any:
@@ -917,7 +917,6 @@ class TimestampFuzz(unittest.TestCase):
         self.assertIsNone(self._check("2026-05-02T14:11:55Z" * 50_000))
         self.assertIsNone(self._check("9" * 1_000_000))
         self.assertIsNone(self._check("\x00" * 1_000_000))
-
 
 
 class RetryAfterFuzz(unittest.TestCase):

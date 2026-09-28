@@ -16,10 +16,7 @@ reconstruction of the release history, not a record written at the time.
 
 ## [Unreleased]
 
-Next release: 2.0.0. `CONTRIBUTING.md` classes a change to the fetcher JSON or
-to a `main.xml` key that an older installed widget cannot read as a major, and
-this window holds two of those, under Breaking below. `tests/test_release.py`
-fails if a Breaking entry lands in this section without a matching next version.
+## [1.2.0] - 2026-09-28
 
 ### Breaking
 

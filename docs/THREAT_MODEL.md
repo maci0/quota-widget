@@ -1,7 +1,7 @@
 # Threat model
 
 Last reviewed: 2026-09-28, against `package/contents/code/fetch_quota.py` at
-`package/metadata.json` version 1.1.0.
+`package/metadata.json` version 1.2.0.
 
 Scope: the plasmoid as installed on a single user session. It runs as that
 user, holds that user's vendor credentials, and talks to four vendor APIs.
