@@ -537,7 +537,6 @@ def fetch_claude() -> JsonDict:
             )
 
     five = _as_dict(data.get("five_hour"))
-    # Also pull session percent from limits if present
     session_util = five.get("utilization")
     session_reset = iso_to_ms(five.get("resets_at"))
     if isinstance(limits, list):
@@ -820,23 +819,6 @@ def fetch_grok() -> JsonDict:
 # ── Codex ───────────────────────────────────────────────────────────────────
 
 
-def _jwt_exp_ms(token: str) -> int | None:
-    try:
-        parts = token.split(".")
-        if len(parts) < 2:
-            return None
-        pad = "=" * ((4 - len(parts[1]) % 4) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
-        if not isinstance(payload, dict):
-            return None
-        exp = payload.get("exp")
-        if exp is None:
-            return None
-        return int(exp) * 1000
-    except (ValueError, TypeError, KeyError):
-        return None
-
-
 def _jwt_claim(token: str, *path: str) -> Any:
     """Nested JWT payload value; claim types are not a closed set."""
     try:
@@ -855,6 +837,11 @@ def _jwt_claim(token: str, *path: str) -> Any:
         return cur
     except (ValueError, TypeError, KeyError):
         return None
+
+
+def _jwt_exp_ms(token: str) -> int | None:
+    exp = _jwt_claim(token, "exp")
+    return int(exp) * 1000 if isinstance(exp, (int, float)) else None
 
 
 def _codex_window_label(window_seconds: int | None, name: str) -> str:
@@ -1043,7 +1030,6 @@ def fetch_codex() -> JsonDict:
     # code_review_rate_limit may mirror the same shape
     cr = data.get("code_review_rate_limit")
     if isinstance(cr, dict):
-        # either nested windows or a single window-like object
         if "primary_window" in cr or "secondary_window" in cr:
             for key in ("primary_window", "secondary_window"):
                 w = _codex_window(cr.get(key), f"code_review_{key}")
@@ -1264,13 +1250,9 @@ def parse_cursor_summary(data: JsonDict, plan_hint: str | None = None) -> JsonDi
     unlimited = bool(data.get("isUnlimited"))
     periods: list[JsonDict] = []
 
-    iu = (
-        data.get("individualUsage")
-        if isinstance(data.get("individualUsage"), dict)
-        else {}
-    )
-    plan_u = iu.get("plan") if isinstance(iu, dict) else None
-    overall = iu.get("overall") if isinstance(iu, dict) else None
+    iu = _as_dict(data.get("individualUsage"))
+    plan_u = iu.get("plan")
+    overall = iu.get("overall")
 
     if not unlimited:
         included = (
@@ -1315,15 +1297,10 @@ def parse_cursor_summary(data: JsonDict, plan_hint: str | None = None) -> JsonDi
                     }
                 )
 
-    on_demand = _cursor_meter(
-        iu.get("onDemand") if isinstance(iu, dict) else None,
-        "On-demand",
-        "cents",
-        cycle_end,
-    )
-    team = data.get("teamUsage") if isinstance(data.get("teamUsage"), dict) else {}
+    on_demand = _cursor_meter(iu.get("onDemand"), "On-demand", "cents", cycle_end)
+    team = _as_dict(data.get("teamUsage"))
     team_od = _cursor_meter(
-        team.get("onDemand") if isinstance(team, dict) else None,
+        team.get("onDemand"),
         "Team on-demand" if on_demand else "On-demand",
         "cents",
         cycle_end,
@@ -1378,40 +1355,24 @@ def fetch_cursor() -> JsonDict:
 
 
 def main() -> None:
-    claude: JsonDict
-    cursor: JsonDict
-    grok: JsonDict
-    codex: JsonDict
-    try:
-        claude = fetch_claude()
-    except Exception:
-        # Plasmashell needs JSON every poll; one provider must not abort the rest.
-        claude = {"ok": False, "error": "net"}
-    try:
-        cursor = fetch_cursor()
-    except Exception:
-        cursor = {"ok": False, "error": "net"}
-    try:
-        grok = fetch_grok()
-    except Exception:
-        grok = {"ok": False, "error": "net"}
-    try:
-        codex = fetch_codex()
-    except Exception:
-        codex = {"ok": False, "error": "net"}
+    providers: dict[str, Callable[[], JsonDict]] = {
+        "claude": fetch_claude,
+        "cursor": fetch_cursor,
+        "grok": fetch_grok,
+        "codex": fetch_codex,
+    }
+    # Plasmashell needs JSON every poll; one provider must not abort the rest.
+    results: dict[str, JsonDict] = {}
+    for name, fetch in providers.items():
+        try:
+            results[name] = fetch()
+        except Exception:
+            results[name] = {"ok": False, "error": "net"}
 
     emit(
         {
-            "ok": bool(
-                claude.get("ok")
-                or cursor.get("ok")
-                or grok.get("ok")
-                or codex.get("ok")
-            ),
-            "claude": claude,
-            "cursor": cursor,
-            "grok": grok,
-            "codex": codex,
+            "ok": any(r.get("ok") for r in results.values()),
+            **results,
             "fetched_ms": now_ms(),
         }
     )

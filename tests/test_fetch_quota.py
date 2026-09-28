@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,15 @@ import print_smoke
 
 # Fixed clock for every test that cares about expiry or replay.
 PINNED_NOW_MS = 1_777_000_000_000
+
+HttpFake = Callable[..., tuple[int, object, object]]
+
+_RATE_LIMIT: dict[str, object] = {"error": {"type": "rate_limit_error"}}
+_NEW_TOKENS: dict[str, object] = {
+    "access_token": "new-access",
+    "refresh_token": "new-refresh",
+    "expires_in": 28800,
+}
 
 
 class CodexWindowTest(unittest.TestCase):
@@ -147,6 +157,20 @@ def _fake_jwt(sub: str) -> str:
     return f"{header}.{payload}.sig"
 
 
+def _http_returning(status: int, body: object, hdrs: object = None) -> HttpFake:
+    def fake_http(
+        url: str,
+        headers: dict[str, str],
+        *,
+        timeout: float = 12.0,
+        data: bytes | None = None,
+        method: str | None = None,
+    ) -> tuple[int, object, object]:
+        return status, body, hdrs
+
+    return fake_http
+
+
 class ClaudeRateLimitTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -203,34 +227,22 @@ class ClaudeRateLimitTest(unittest.TestCase):
             },
         )
 
-        def fake_http(
-            url: str,
-            headers: dict[str, str],
-            *,
-            timeout: float = 12.0,
-            data: bytes | None = None,
-            method: str | None = None,
-        ) -> tuple[int, object, object]:
-            return 429, {"error": {"type": "rate_limit_error"}}, {"Retry-After": "0"}
-
-        with patch.object(fetch_quota, "fetch_http", fake_http):
+        with patch.object(
+            fetch_quota,
+            "fetch_http",
+            _http_returning(429, _RATE_LIMIT, {"Retry-After": "0"}),
+        ):
             out = fetch_quota.fetch_claude()
         self.assertTrue(out["ok"])
         self.assertTrue(out["stale"])
         self.assertEqual(out["session"]["util"], 12)
 
     def test_429_without_cache_is_error(self) -> None:
-        def fake_http(
-            url: str,
-            headers: dict[str, str],
-            *,
-            timeout: float = 12.0,
-            data: bytes | None = None,
-            method: str | None = None,
-        ) -> tuple[int, object, object]:
-            return 429, {"error": {"type": "rate_limit_error"}}, {"Retry-After": "0"}
-
-        with patch.object(fetch_quota, "fetch_http", fake_http):
+        with patch.object(
+            fetch_quota,
+            "fetch_http",
+            _http_returning(429, _RATE_LIMIT, {"Retry-After": "0"}),
+        ):
             out = fetch_quota.fetch_claude()
         self.assertEqual(out, {"ok": False, "error": "http-429"})
 
@@ -277,11 +289,7 @@ class ClaudeRateLimitTest(unittest.TestCase):
             method: str | None = None,
         ) -> tuple[int, object]:
             self.assertIn("/oauth/token", url)
-            return 200, {
-                "access_token": "new-access",
-                "refresh_token": "new-refresh",
-                "expires_in": 28800,
-            }
+            return 200, _NEW_TOKENS
 
         seen_auth: list[str] = []
 
@@ -325,7 +333,7 @@ class ClaudeRateLimitTest(unittest.TestCase):
             data: bytes | None = None,
             method: str | None = None,
         ) -> tuple[int, object]:
-            return 429, {"error": {"type": "rate_limit_error"}}
+            return 429, _RATE_LIMIT
 
         def fake_http(
             url: str,
@@ -345,17 +353,8 @@ class ClaudeRateLimitTest(unittest.TestCase):
         self.assertEqual(out, {"ok": False, "error": "http-429"})
 
     def test_spend_used_as_number_does_not_crash(self) -> None:
-        def fake_http(
-            url: str,
-            headers: dict[str, str],
-            *,
-            timeout: float = 12.0,
-            data: bytes | None = None,
-            method: str | None = None,
-        ) -> tuple[int, object, object]:
-            return 200, {"five_hour": {"utilization": 4}, "spend": {"used": 12}}, None
-
-        with patch.object(fetch_quota, "fetch_http", fake_http):
+        body = {"five_hour": {"utilization": 4}, "spend": {"used": 12}}
+        with patch.object(fetch_quota, "fetch_http", _http_returning(200, body)):
             out = fetch_quota.fetch_claude()
         self.assertTrue(out["ok"])
         self.assertIsNone(out["spend"]["used_minor"])
