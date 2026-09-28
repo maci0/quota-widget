@@ -77,6 +77,7 @@ NOW_MS_ENV = "QUOTA_WIDGET_NOW_MS"
 ENV_HOME = "QUOTA_WIDGET_HOME"
 ENV_CACHE = "QUOTA_WIDGET_CACHE"
 ENV_CACHE_MAX_AGE_S = "QUOTA_WIDGET_CACHE_MAX_AGE_S"
+ENV_ACCOUNT_SALT = "QUOTA_WIDGET_ACCOUNT_SALT"
 ENV_HTTP_TIMEOUT = "QUOTA_WIDGET_HTTP_TIMEOUT"
 ENV_CLAUDE_CREDENTIALS = "QUOTA_WIDGET_CLAUDE_CREDENTIALS"
 ENV_CODEX_AUTH = "QUOTA_WIDGET_CODEX_AUTH"
@@ -93,6 +94,7 @@ ENV_DOCS: tuple[tuple[str, str], ...] = (
     (ENV_HOME, "base for credential and cache paths"),
     (ENV_CACHE, "provider cache dir"),
     (ENV_CACHE_MAX_AGE_S, "seconds a reading stays fresh (24 h, max 24 h)"),
+    (ENV_ACCOUNT_SALT, "hex account-salt key, for replays"),
     (ENV_HTTP_TIMEOUT, "per-request timeout, 0 < s <= 300"),
     (NOW_MS_ENV, "pin the clock (ms since epoch) for replays"),
     (ENV_CLAUDE_CREDENTIALS, "Claude credentials file"),
@@ -496,10 +498,13 @@ class Config:
     cache_dir: Path
     http_timeout_s: float
     cache_max_age_s: int
+    account_salt: bytes | None
 
     def describe(self) -> JsonDict:
-        """Active values for `--print-config`: paths and numeric knobs, and no
-        token is read to produce them."""
+        """Active values for `--print-config`: paths and knobs, and no
+        token is read to produce them. The account key is reported as pinned or
+        generated, never as the bytes: whether a run's key is one of its inputs
+        is a fact about the run, and the key itself is worth nothing printed."""
         return {
             "home": str(self.home),
             "claude_cred": str(self.claude_cred),
@@ -510,6 +515,7 @@ class Config:
             "cache_dir": str(self.cache_dir),
             "http_timeout_s": self.http_timeout_s,
             "cache_max_age_s": self.cache_max_age_s,
+            "account_salt": "pinned" if self.account_salt is not None else "generated",
         }
 
 
@@ -551,6 +557,36 @@ def _env_number(
     if not 0 < number <= maximum:
         raise ConfigError(f"{name} must be in (0, {maximum:g}], got {number:g}")
     return number
+
+
+def _env_salt(env: Mapping[str, str], name: str) -> bytes | None:
+    """The account-salt key this run is to use, or None to make its own.
+
+    A replay has to name the key as well as the clock. Left to draw a fresh
+    one, a run whose cache holds no key yet (a fresh install, a sandboxed
+    `QUOTA_WIDGET_CACHE`, a run after `--clear-cache`, a cache directory that
+    cannot be written) digests every account under bytes no second run draws,
+    so the same inputs produce a different `account` in every provider card
+    and the run cannot be reproduced from them.
+
+    Unset in production, where the key is 32 bytes of `os.urandom` kept beside
+    the entries it scopes. Set to a literal, the value is a test and smoke
+    input: it is used, never written, so nothing persists it past the run and
+    an unpinned poll keeps the random key it would have had.
+    """
+    value = _env_value(env, name)
+    if value is None:
+        return None
+    try:
+        key = bytes.fromhex(value)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be hex, got {value!r}") from exc
+    if len(key) != ACCOUNT_SALT_BYTES:
+        raise ConfigError(
+            f"{name} must be {ACCOUNT_SALT_BYTES * 2} hex characters "
+            f"({ACCOUNT_SALT_BYTES} bytes), got {len(value)}"
+        )
+    return key
 
 
 def _xdg_dir(env: Mapping[str, str], name: str, default: Path) -> Path:
@@ -666,6 +702,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         cache_dir=_env_path(values, ENV_CACHE, cache_base / "quota-widget"),
         http_timeout_s=timeout,
         cache_max_age_s=max_age,
+        account_salt=_env_salt(values, ENV_ACCOUNT_SALT),
     )
     return _CONFIG
 
@@ -991,6 +1028,13 @@ def _load_or_create_salt() -> bytes:
     on_disk = _salt_on_disk(path)
     if on_disk is not None:
         return on_disk
+    pinned = config().account_salt
+    if pinned is not None:
+        # A key the run names is an input to it, not a key of the machine, so
+        # it is used and not written. The file, when one exists, still wins:
+        # the entries on disk were taken under that key, and a poll that
+        # renamed them would orphan every one of them.
+        return pinned
     fresh = os.urandom(ACCOUNT_SALT_BYTES)
     try:
         _private_dir(folder)
@@ -2547,7 +2591,7 @@ JSON: diagnostics go to stderr. The exit code is 0 whenever JSON was printed,
 including a config error (the JSON then carries "error": "config").
 
 options:
-  --print-config  print the resolved config (paths and numeric knobs) and exit
+  --print-config  print the resolved config (paths, knobs, key source) and exit
   --clear-cache   delete every cached reading and the account key, then exit
   -h, --help      print this help and exit
 

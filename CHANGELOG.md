@@ -64,6 +64,15 @@ fails if a Breaking entry lands in this section without a matching next version.
 - `QUOTA_WIDGET_NOW_MS` pins the fetcher clock, so the same HTTP responses print
   byte-identical output on every run. Documented in the README, for tests and
   smoke runs.
+- `QUOTA_WIDGET_ACCOUNT_SALT` names the account-salt key a run digests under, as
+  64 hex characters. Without it a poll whose cache holds no key yet, which is a
+  first run, a sandboxed `QUOTA_WIDGET_CACHE`, a run after `--clear-cache`, and
+  a cache directory that cannot be written, drew a fresh random key and emitted
+  a different `account` digest in every card, so that poll was not reproducible
+  from its inputs. The named key is used and not written, an unset run still
+  keeps 32 bytes of `os.urandom` beside the entries it scopes, and a key already
+  in the cache directory still wins over a named one. Documented in the README,
+  for tests and smoke runs.
 - `docs/THREAT_MODEL.md`: entry points, trust boundaries, assets, and the
   threats that apply to each, with file references.
 - `--help` on the fetcher and on `print_smoke.py`, listing the flags, the

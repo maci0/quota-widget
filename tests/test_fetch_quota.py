@@ -12,6 +12,7 @@ import http.client
 import io
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -2421,6 +2422,38 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(described["cache_dir"], "/home/widget/.cache/quota-widget")
         self.assertNotIn("token", json.dumps(described).lower())
 
+    def test_describe_names_the_account_key_without_printing_it(self) -> None:
+        # Whether the key is an input to the run is worth answering; the key
+        # is not, and --print-config writes to the same stdout a caller logs.
+        generated = fetch_quota.load_config(
+            {"QUOTA_WIDGET_HOME": "/home/widget"}
+        ).describe()
+        pinned = fetch_quota.load_config(
+            {
+                "QUOTA_WIDGET_HOME": "/home/widget",
+                "QUOTA_WIDGET_ACCOUNT_SALT": "11" * 32,
+            }
+        ).describe()
+        self.assertEqual(generated["account_salt"], "generated")
+        self.assertEqual(pinned["account_salt"], "pinned")
+        self.assertNotIn("11" * 32, json.dumps(pinned))
+
+    def test_a_pinned_account_key_must_be_hex_of_the_right_length(self) -> None:
+        for value in ("zzzz", "11" * 16, "11" * 64):
+            with self.subTest(value=value):
+                with self.assertRaises(fetch_quota.ConfigError) as ctx:
+                    fetch_quota.load_config(
+                        {
+                            "QUOTA_WIDGET_HOME": "/home/widget",
+                            "QUOTA_WIDGET_ACCOUNT_SALT": value,
+                        }
+                    )
+                self.assertIn("QUOTA_WIDGET_ACCOUNT_SALT", str(ctx.exception))
+
+    def test_an_unpinned_account_key_is_left_to_the_fetcher(self) -> None:
+        cfg = fetch_quota.load_config({"QUOTA_WIDGET_HOME": "/home/widget"})
+        self.assertIsNone(cfg.account_salt)
+
     def test_poll_reports_the_effective_cache_window(self) -> None:
         # The panel ages a kept reading against this number, so an override has
         # to travel with the payload rather than live only in the fetcher.
@@ -2907,6 +2940,21 @@ class CodexExpiryClockTest(unittest.TestCase):
             self.assertTrue(fetch_quota._codex_token_expired({"access_token": stale}))
 
 
+# The credential file each provider of a ReplayTest poll reads: the key in
+# CREDENTIAL_ENV, the file name under the fixture's auth/ directory, and what
+# it holds. The tokens carry a sub claim, since that claim is what the account
+# digest is taken from.
+_REPLAY_CREDENTIALS = {
+    "CLAUDE_CRED": ("claude.json", {"claudeAiOauth": {"accessToken": _fake_jwt("s")}}),
+    "CODEX_AUTH": ("codex.json", {"tokens": {"access_token": _fake_jwt("s")}}),
+    "GROK_AUTH": (
+        "grok.json",
+        {"x": {"key": "tok", "oidc_client_id": "c", "refresh_token": "r"}},
+    ),
+    "CURSOR_AUTH_JSON": ("cursor.json", {"accessToken": _fake_jwt("user_01TEST")}),
+}
+
+
 class ReplayTest(unittest.TestCase):
     """One pinned clock value plus one fixed HTTP script must reproduce the
     poll byte-for-byte, cache writes included."""
@@ -2922,35 +2970,13 @@ class ReplayTest(unittest.TestCase):
 
         auth = self.root / "auth"
         auth.mkdir(exist_ok=True)
-        point_config(
-            self,
-            "claude_cred",
-            self._write(
-                auth / "claude.json", {"claudeAiOauth": {"accessToken": _fake_jwt("s")}}
-            ),
-        )
-        point_config(
-            self,
-            "codex_auth",
-            self._write(
-                auth / "codex.json", {"tokens": {"access_token": _fake_jwt("s")}}
-            ),
-        )
-        point_config(
-            self,
-            "grok_auth",
-            self._write(
-                auth / "grok.json",
-                {"x": {"key": "tok", "oidc_client_id": "c", "refresh_token": "r"}},
-            ),
-        )
-        point_config(
-            self,
-            "cursor_auth",
-            self._write(
-                auth / "cursor.json", {"accessToken": _fake_jwt("auth0|user_01TEST")}
-            ),
-        )
+        # The credentials go in the environment, not into the Config record:
+        # main() loads the config from the environment before any provider
+        # runs, so a path pointed only in the record is the default again by
+        # the time a provider reads it.
+        for name, (filename, store) in _REPLAY_CREDENTIALS.items():
+            os.environ[CREDENTIAL_ENV[name]] = str(self._write(auth / filename, store))
+            self.addCleanup(os.environ.pop, CREDENTIAL_ENV[name], None)
 
     def _write(self, path: Path, obj: object) -> Path:
         path.write_text(json.dumps(obj))
@@ -2965,11 +2991,10 @@ class ReplayTest(unittest.TestCase):
         data: bytes | None = None,
         method: str | None = None,
     ) -> tuple[int, object, object]:
-        if "anthropic" in url:
-            return 200, {"limits": [{"kind": "weekly_all", "percent": 12}]}, None
-        if "cursor.com" in url:
-            return 200, {"membershipType": "pro", "individualUsage": {}}, None
-        return 200, {"rate_limit": {"primary_window": {"used_percent": 5}}}, None
+        # Only Claude reads its answer through fetch_http; the other three
+        # providers go through fetch_json, so a body returned here would never
+        # reach them.
+        return 200, {"limits": [{"kind": "weekly_all", "percent": 12}]}, None
 
     def _fake_json(
         self,
@@ -2980,6 +3005,16 @@ class ReplayTest(unittest.TestCase):
         data: bytes | None = None,
         method: str | None = None,
     ) -> tuple[int, object]:
+        if "cursor.com" in url:
+            return 200, {
+                "membershipType": "pro",
+                "individualUsage": {"plan": {"used": 1, "limit": 2}},
+            }
+        if "chatgpt.com" in url:
+            return 200, {
+                "plan_type": "pro",
+                "rate_limit": {"primary_window": {"used_percent": 5}},
+            }
         if "grok.com" not in url:
             return 200, None
         cfg = (
@@ -3007,12 +3042,90 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(json.loads(first)["fetched_ms"], PINNED_NOW_MS)
 
+    def test_the_replay_covers_every_provider(self) -> None:
+        # A poll that answered nothing is byte-identical to itself, so the
+        # replay above only means something once each provider has run.
+        payload = json.loads(self._poll())
+        for provider in ("claude", "cursor", "grok", "codex"):
+            with self.subTest(provider=provider):
+                self.assertTrue(payload[provider]["ok"], payload[provider])
+
     def test_replay_does_not_depend_on_a_running_cache(self) -> None:
         first = self._poll()
         for cached in self.root.glob("*.json"):
             if cached.name.startswith(("claude", "cursor", "grok", "codex")):
                 cached.unlink()
         self.assertEqual(self._poll(), first)
+
+    def _set_config(self, **fields: Any) -> None:
+        """Repoint the active config for this test, then restore it."""
+        self.addCleanup(setattr, fetch_quota, "_CONFIG", fetch_quota._CONFIG)
+        fetch_quota._CONFIG = dataclasses.replace(fetch_quota.config(), **fields)
+
+    def _poll_on_a_fresh_install(self, salt: str | None = None) -> str:
+        """A poll whose cache holds no account key, which is what a first run,
+        a sandboxed cache, and a run after --clear-cache each are. main()
+        reloads the config from the environment, so the credentials this
+        the credentials are in the environment, so they survive the reload."""
+        cache = Path(tempfile.mkdtemp(dir=self.root))
+        self.addCleanup(shutil.rmtree, cache, ignore_errors=True)
+        self.addCleanup(
+            setattr, fetch_quota, "_ACCOUNT_SALT", fetch_quota._ACCOUNT_SALT
+        )
+        fetch_quota._ACCOUNT_SALT = None
+        env = {"QUOTA_WIDGET_CACHE": str(cache)}
+        if salt is not None:
+            env["QUOTA_WIDGET_ACCOUNT_SALT"] = salt
+        with config_env(**env):
+            return self._poll()
+
+    def test_a_pinned_key_replays_a_fresh_install(self) -> None:
+        first = self._poll_on_a_fresh_install("11" * 32)
+        second = self._poll_on_a_fresh_install("11" * 32)
+        self.assertEqual(first, second)
+
+    def test_without_a_pinned_key_the_account_digest_is_the_whole_difference(
+        self,
+    ) -> None:
+        # What the key leaks into a run: the digest each card carries and
+        # nothing else, so two first runs of one machine differ in exactly the
+        # fields a replay cannot reproduce.
+        first = json.loads(self._poll_on_a_fresh_install())
+        second = json.loads(self._poll_on_a_fresh_install())
+        for provider in ("claude", "cursor", "grok", "codex"):
+            with self.subTest(provider=provider):
+                self.assertNotEqual(
+                    first[provider]["account"], second[provider]["account"]
+                )
+
+    def test_a_pinned_key_is_used_and_not_kept(self) -> None:
+        cache = Path(tempfile.mkdtemp(dir=self.root))
+        self.addCleanup(shutil.rmtree, cache, ignore_errors=True)
+        self.addCleanup(
+            setattr, fetch_quota, "_ACCOUNT_SALT", fetch_quota._ACCOUNT_SALT
+        )
+        fetch_quota._ACCOUNT_SALT = None
+        self._set_config(cache_dir=cache, account_salt=bytes.fromhex("11" * 32))
+        self.assertEqual(fetch_quota._load_or_create_salt(), bytes.fromhex("11" * 32))
+        # A key the run named is one of its inputs. Writing it would leave a
+        # chosen key on the machine for every later poll to scope entries
+        # under, and an unset poll would then read them back.
+        self.assertFalse((cache / fetch_quota.ACCOUNT_SALT_NAME).exists())
+
+    def test_a_key_on_disk_wins_over_a_pinned_one(self) -> None:
+        # The entries in that directory were taken under the file's key, so a
+        # poll that renamed them would orphan every one of them.
+        cache = Path(tempfile.mkdtemp(dir=self.root))
+        self.addCleanup(shutil.rmtree, cache, ignore_errors=True)
+        (cache / fetch_quota.ACCOUNT_SALT_NAME).write_text(
+            json.dumps({"salt": "22" * 32})
+        )
+        self.addCleanup(
+            setattr, fetch_quota, "_ACCOUNT_SALT", fetch_quota._ACCOUNT_SALT
+        )
+        fetch_quota._ACCOUNT_SALT = None
+        self._set_config(cache_dir=cache, account_salt=bytes.fromhex("11" * 32))
+        self.assertEqual(fetch_quota._load_or_create_salt(), bytes.fromhex("22" * 32))
 
 
 def _jwt_with_exp(exp_s: int) -> str:

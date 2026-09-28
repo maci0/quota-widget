@@ -85,7 +85,7 @@ first command with a version message), Python 3.11+ (`uv` installs it), and
 [`shellcheck`](https://www.shellcheck.net/) for the `install.sh` leg of the gate.
 Everything else the gate needs comes from `pyproject.toml`.
 
-Two env vars make a run reproducible. `QUOTA_WIDGET_CACHE` relocates the payload cache, and `QUOTA_WIDGET_NOW_MS` pins the clock to a fixed epoch-milliseconds value, so the same HTTP responses produce byte-identical output on every run. Both are for tests and smoke runs; production leaves them unset.
+Three env vars make a run reproducible. `QUOTA_WIDGET_CACHE` relocates the payload cache, `QUOTA_WIDGET_NOW_MS` pins the clock to a fixed epoch-milliseconds value, and `QUOTA_WIDGET_ACCOUNT_SALT` names the key account digests are taken under, as 64 hex characters. With all three set, the same HTTP responses produce byte-identical output on every run, first run included. All three are for tests and smoke runs; production leaves them unset.
 
 Dev gate (`uv`):
 
@@ -149,6 +149,7 @@ reason on stderr; no provider runs with a half-applied config.
 | `QUOTA_WIDGET_GROK_AUTH` | `$HOME/.grok/auth.json` |
 | `QUOTA_WIDGET_CACHE` | `$XDG_CACHE_HOME/quota-widget` |
 | `QUOTA_WIDGET_CACHE_MAX_AGE_S` | `86400` (0 < value <= 86400, whole seconds) |
+| `QUOTA_WIDGET_ACCOUNT_SALT` | unset (64 hex characters; tests and smoke runs only) |
 | `QUOTA_WIDGET_HTTP_TIMEOUT` | `12.0` (0 < value <= 300, seconds) |
 | `QUOTA_WIDGET_NOW_MS` | unset (integer epoch milliseconds, from 0 to `253402300799999`; tests and smoke runs only) |
 
@@ -163,6 +164,14 @@ every other variable belong to the environment and are left alone.
 `QUOTA_WIDGET_CACHE_MAX_AGE_S` sets the window for both caches. Each poll
 reports the value it is using as `cache_max_age_s`, so the panel ages a kept
 reading against the same number instead of a constant of its own.
+
+`QUOTA_WIDGET_ACCOUNT_SALT` supplies the account-salt key instead of letting
+the run make one. Leave it unset in a session: the fetcher then draws 32 bytes
+from `os.urandom` and keeps them in `account-salt` next to the cache entries
+they scope. Set it and that key is used for the run and written nowhere, so a
+replay reproduces the `account` digest in every card, and the next unset poll
+keeps the random key it would have had. A key already in the cache directory
+wins over a named one, since the entries beside it were taken under it.
 
 Plasmashell does not read shell rc files, so a variable set in `.bashrc` never
 reaches the widget. Export it into the user session before starting Plasma:

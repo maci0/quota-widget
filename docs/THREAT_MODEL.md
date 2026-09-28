@@ -24,6 +24,7 @@ Owner and review cadence: not recorded in this repository.
 | 6 | Vendor API responses are parsed with no schema validation | vendor HTTPS to widget | Every field is read defensively (`_as_dict`, `fetch_quota.py:141`; `_as_text`, `fetch_quota.py:145`), numbers are coerced rather than trusted (`_finite_number`, `fetch_quota.py:286`), text that cannot be encoded is dropped where it arrives (`_utf8_encodable`, `fetch_quota.py:160`), and a response body is capped at `MAX_RESPONSE_BYTES` (`fetch_quota.py:427`, read at `fetch_quota.py:1278`). A response that changes shape still silently changes what the panel shows. |
 | 7 | Raw vendor-derived exception text and a full traceback reach the session journal | fetcher to journal | `warn` (`fetch_quota.py:701`) redacts the home directory through `_redact` (`fetch_quota.py:686`) before printing, and a config error is redacted the same way in the payload (`main`, `fetch_quota.py:2604`). Two gaps remain: redaction is a path rewrite, so vendor-controlled text that is not a path reaches the journal unchanged, and the crash traceback (`fetch_quota.py:2525`) is written with `traceback.print_exc()`, which never passes through `_redact`. |
 | 8 | Failure reporting is thin: a successful token rotation and a dropped one look alike from outside | all | Failures are journaled (URL, status, reason). Successes are not, so "was this token written" and "which run rotated it" cannot be answered after the fact. |
+| 9 | `QUOTA_WIDGET_ACCOUNT_SALT` names the key every account digest is taken under | environment | Validated as 64 hex characters (`_env_salt`, `fetch_quota.py:492`) and used without being written (`_load_or_create_salt`, `fetch_quota.py:921`). A process that sets it chooses the key, but a key already in the cache directory still wins, so it cannot re-scope entries another poll wrote there; it decides only what a run with no key on disk digests under. Documented as tests-only, not enforced as such. |
 
 Nothing here is rated critical: the process has no privilege of its own, holds
 no signing key, and can only read what its own user can already read.
@@ -37,6 +38,7 @@ no signing key, and can only read what its own user can already read.
 | Widget configuration file | `package/contents/config/main.xml`, read via `Plasmoid.configuration` and clamped in `package/contents/ui/main.qml:28` (`intSetting`) | User-editable JSON under `~/.config/plasmoids/...` |
 | Environment | `load_config`, `fetch_quota.py:586`; every `QUOTA_WIDGET_*` name listed at `fetch_quota.py:93` (`ENV_DOCS`) and in `README.md:153` | Inherited from the Plasma session, not from a shell rc file |
 | Pinned clock | `now_ms`, `fetch_quota.py:247`; validated in `load_config`, `fetch_quota.py:606` | `QUOTA_WIDGET_NOW_MS`, an integer that overrides every `now_ms()` read |
+| Pinned account key | `_load_or_create_salt`, `fetch_quota.py:1025`; validated at `fetch_quota.py:584` | `QUOTA_WIDGET_ACCOUNT_SALT`, 64 hex characters that stand in for the `account-salt` key when the cache directory holds none |
 | CLI arguments | `main`, `fetch_quota.py:2567` | `--help`/`-h`, `--print-config`, `--clear-cache`; anything else exits 2 before the config is read (`fetch_quota.py:2582`) |
 | Claude credentials | `fetch_claude`, `fetch_quota.py:1478`; path from `Config.claude_cred` | `~/.claude/.credentials.json`, written by Claude Code |
 | Codex credentials | `fetch_codex`, `fetch_quota.py:2042` | `~/.codex/auth.json` |
@@ -295,6 +297,9 @@ No other host is contacted. `api.openai.com` appears in a JWT claim path
 - **No signature or integrity check on the fetcher's stdout.**
 - **No enforcement that `QUOTA_WIDGET_NOW_MS` is unset in production.** It is
   documented as tests-only and validated as a bounded integer, nothing more.
+- **No enforcement that `QUOTA_WIDGET_ACCOUNT_SALT` is unset in production.**
+  Same shape: documented as tests-only, validated as 64 hex characters, and
+  never persisted, so it is scoped to the runs that set it.
 - **No ownership or mode check on the credential files the fetcher opens.** It
   reads whatever path it is given with the ambient user identity.
 
@@ -319,7 +324,10 @@ second party on the same machine or on the network path:
   under a key in that same directory, so a seeded entry also needs the key, and
   the entry must be inside the freshness window, so it shows for at most
   `DEFAULT_CACHE_MAX_AGE_S`. Pairing it with `QUOTA_WIDGET_NOW_MS` removes the
-  window from the equation for as long as the variable stays set.
+  window from the equation for as long as the variable stays set. Choosing the
+  key with `QUOTA_WIDGET_ACCOUNT_SALT` does not widen that: the seeded digest
+  still has to be built from the account id, so the check is as hard to pass as
+  it was.
 - **Vendor response shape change.** Not adversarial, but the same class: a
   renamed field degrades to a missing meter, and a hostile response with the
   same shape would be rendered the same way. A response that instead trips a
