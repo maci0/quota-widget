@@ -18,7 +18,7 @@ which the last step below needs. Everything else installs into `.venv` with the
 first command.
 
 ```bash
-uv sync --extra dev --frozen
+uv sync --extra dev --locked
 uv run black --check . && uv run ruff check . && uv run mypy && uv run pytest && shellcheck install.sh
 ```
 

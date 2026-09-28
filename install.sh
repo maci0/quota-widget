@@ -60,11 +60,8 @@ fi
 # A literal Id in dest_is_ours is a regex, so the dots need escaping.
 PKG_ID_RE="${PKG_ID//./\\.}"
 
-# The floor in pyproject.toml (`requires-python`): the fetcher uses dt.UTC, so
-# a 3.10 `python3` on PATH means plasmashell shows a broken data source with no
-# explanation of why. Refuse before linking rather than after a restart.
-MIN_PY_MAJOR=3
-MIN_PY_MINOR=11
+# The floor for the runtime `python3` is `requires-python` in pyproject.toml,
+# not a second literal here: a copy is a number nobody bumps.
 
 # XDG base dirs: a relative value is invalid, so the spec default stands.
 # https://specifications.freedesktop.org/basedir-spec/latest/
@@ -88,26 +85,45 @@ dest_is_ours() {
   grep -Eq "\"Id\"[[:space:]]*:[[:space:]]*\"$PKG_ID_RE\"" "$DEST/metadata.json"
 }
 
+min_python_floor() {
+  # The `>=` side of the `requires-python = ">=3.11"` declaration. A
+  # specifier this shape cannot express (an upper bound, `!=`, a bare
+  # version) matches nothing, and the empty result is refused below rather
+  # than read as floor zero.
+  sed -n 's/^requires-python = ">= *\([0-9][0-9.]*\)"\(.*\)$/\1/p' \
+    "$ROOT/pyproject.toml"
+}
+
 check_python() {
   if ! command -v python3 >/dev/null 2>&1; then
     echo "error: python3 not found on PATH; plasmashell runs the fetcher with it" >&2
     return 1
   fi
-  local ver major minor
-  ver="$(python3 -V 2>&1 | sed 's/^Python //')"
-  major="${ver%%.*}"
-  minor="${ver#*.}"
+  # Refuse before linking rather than after a plasmashell restart: below the
+  # floor the fetcher raises, and the panel shows a broken data source with no
+  # explanation of why.
+  local floor major minor ver have_major have_minor
+  floor="$(min_python_floor)"
+  if [[ -z "$floor" ]]; then
+    echo "error: no >= floor in requires-python of $ROOT/pyproject.toml" >&2
+    return 1
+  fi
+  major="${floor%%.*}"
+  minor="${floor#*.}"
   minor="${minor%%.*}"
-  case "$major$minor" in
+  ver="$(python3 -V 2>&1 | sed 's/^Python //')"
+  have_major="${ver%%.*}"
+  have_minor="${ver#*.}"
+  have_minor="${have_minor%%.*}"
+  case "$have_major$have_minor" in
     '' | *[!0-9]*) # unparsable banner: show it rather than guess
       echo "error: cannot read the python3 version from: $ver" >&2
       return 1
       ;;
   esac
-  if ((major < MIN_PY_MAJOR)) ||
-    { ((major == MIN_PY_MAJOR)) && ((minor < MIN_PY_MINOR)); }; then
-    echo "error: python3 $ver is below $MIN_PY_MAJOR.$MIN_PY_MINOR, which the" \
-      "fetcher needs" >&2
+  if ((have_major < major)) ||
+    { ((have_major == major)) && ((have_minor < minor)); }; then
+    echo "error: python3 $ver is below $major.$minor, which the fetcher needs" >&2
     return 1
   fi
 }

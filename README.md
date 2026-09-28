@@ -88,10 +88,11 @@ Two env vars make a run reproducible. `QUOTA_WIDGET_CACHE` relocates the payload
 Dev gate (`uv`):
 
 ```bash
-uv sync --extra dev --frozen
+uv sync --extra dev --locked
 ```
 
-`--frozen` is what CI uses, so a stale `uv.lock` fails here rather than after a push.
+`--locked` is what CI uses: it fails when `uv.lock` no longer matches
+`pyproject.toml`, so a stale lock is caught here rather than after a push.
 
 The full gate, same order as CI:
 

@@ -16,8 +16,15 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # A pinned image, not ubuntu-latest: the moving tag would change the
+    # system python and shellcheck under the gate without a commit.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # The gate reads dates, so the runner's zone and locale must not decide
+    # what a test sees. Both are set here rather than inherited.
+    env:
+      TZ: UTC
+      LC_ALL: C.UTF-8
     steps:
       # Third-party actions are pinned to the commit behind the tag, so a
       # moved tag cannot change what the gate runs. Dependabot opens the bump
@@ -32,7 +39,10 @@ jobs:
           # uv sync is the slowest step; the cache key is uv.lock.
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-      - run: uv sync --extra dev --frozen
+      # --locked, not --frozen: it asserts uv.lock still matches pyproject.toml,
+      # so a declared gate tool that never reached the lock fails here instead
+      # of running the previous one.
+      - run: uv sync --extra dev --locked
       - run: uv run black --check .
       - run: uv run ruff check .
       - run: uv run mypy

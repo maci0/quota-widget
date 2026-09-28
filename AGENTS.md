@@ -118,7 +118,7 @@ Nothing personal reaches a log, a cache, or the emitted JSON: no email or sessio
 ## Gate
 
 ```bash
-uv sync --extra dev --frozen
+uv sync --extra dev --locked
 uv run black --check .
 uv run ruff check .
 uv run mypy
