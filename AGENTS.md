@@ -10,7 +10,7 @@ KDE Plasma 6 plasmoid (`com.maci.quota-widget`). QML UI in `package/contents/ui/
 
 Plasmashell runs `python3 package/contents/code/fetch_quota.py`. That path is system Python on purpose: the widget has no venv at display time. Do not switch the QML command to `uv run`.
 
-Every wall-clock read goes through `now_ms()` / `now_utc()`; `QUOTA_WIDGET_NOW_MS` pins the clock so a poll replays byte-for-byte. Call `time.time()` or `datetime.now()` directly anywhere else in the fetcher and the replay guarantee is gone.
+Every wall-clock read goes through `now_ms()` / `now_utc()`; `QUOTA_WIDGET_NOW_MS` pins the clock so a poll replays byte-for-byte. Call `time.time()` or `datetime.now()` directly anywhere else in the fetcher and the replay guarantee is gone. A wait that ends on a deadline (the refresh lock, currently) reads `monotonic()` and pauses through `sleep()` instead: a pinned wall clock never advances, so a deadline taken through `now_ms()` would expire on the first poll and a raw `time.sleep` would cost real seconds. Nothing in the fetcher calls `time.monotonic` or `time.sleep` directly.
 
 A provider timestamp without an offset is UTC. Parse it with `iso_to_utc()`, never `datetime.fromisoformat(...).timestamp()`: that resolves a naive value in plasmashell's host zone, so the same reading lands hours off outside UTC and shifts again at every DST transition.
 

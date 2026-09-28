@@ -41,6 +41,12 @@ prints, so a fetcher and UI shipped together never break each other.
   3.11 (`dt.UTC`, the floor in `pyproject.toml`) the widget showed a broken
   data source with no reason given; the install now stops with the version it
   found.
+- The wait for the OAuth refresh lock reads its deadline and its poll interval
+  through the same seams the retry backoff already used, instead of calling
+  `time.monotonic` and `time.sleep` directly. A contended poll no longer spends
+  real seconds in the suite, and a replay of one is driven by an injected
+  clock. A deadline read through the pinned wall clock would have expired on
+  the first contended poll, since a pinned clock never advances.
 - A Cursor response whose `membershipType` is not a string, or whose
   `billingCycleEnd` is not a date string, raised out of the parser and blanked
   the card instead of reading as unknown.

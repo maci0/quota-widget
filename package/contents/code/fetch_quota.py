@@ -156,9 +156,20 @@ def _finite_number(value: object) -> float | None:
 
 
 def sleep(seconds: float) -> None:
-    """A seam the tests patch, so a Retry-After or retry backoff costs no wall
-    clock in the suite."""
+    """A seam the tests patch, so a Retry-After, a retry backoff, or a lock poll
+    costs no wall clock in the suite."""
     time.sleep(seconds)
+
+
+def monotonic() -> float:
+    """Elapsed seconds, on a clock no wall-clock pin can move.
+
+    A wait that ends when a deadline passes is measured here, not through
+    now_ms(): a pinned QUOTA_WIDGET_NOW_MS never advances, so a deadline read
+    through it would expire on the first contended poll. The seam also lets a
+    test drive the wait on a virtual clock instead of the real one.
+    """
+    return time.monotonic()
 
 
 CLAUDE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -686,15 +697,15 @@ def _refresh_lock() -> Iterator[None]:
         yield  # unwritable cache dir: refresh unguarded, not never
         return
     try:
-        deadline = time.monotonic() + REFRESH_LOCK_WAIT_S
+        deadline = monotonic() + REFRESH_LOCK_WAIT_S
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except OSError:
-                if time.monotonic() >= deadline:
+                if monotonic() >= deadline:
                     break
-                time.sleep(REFRESH_LOCK_POLL_S)
+                sleep(REFRESH_LOCK_POLL_S)
         try:
             yield
         finally:

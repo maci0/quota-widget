@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import contextlib
 import dataclasses
@@ -365,6 +366,49 @@ class ClockTest(unittest.TestCase):
         )
         self.assertIsNone(fetch_quota._read_provider_cache("grok", account))
         self.assertFalse(entry.exists())
+
+
+class TimeSeamTest(unittest.TestCase):
+    """A wait never reaches the real clock on its own.
+
+    Every deadline and every pause in the fetcher has to arrive through
+    monotonic() and sleep(), or a contended poll cannot be replayed and the
+    suite pays for it in wall time. The two seam bodies are the only places
+    allowed to name time.sleep or time.monotonic.
+    """
+
+    SEAM_BODIES = frozenset({"sleep", "monotonic"})
+
+    def test_no_call_site_bypasses_the_elapsed_time_seams(self) -> None:
+        tree = ast.parse(Path(fetch_quota.__file__).read_text(encoding="utf-8"))
+        functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        self.assertEqual(
+            {fn.name for fn in functions} & self.SEAM_BODIES, self.SEAM_BODIES
+        )
+
+        bypasses: list[int] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr not in self.SEAM_BODIES:
+                continue
+            value = node.value
+            if not (
+                isinstance(value, ast.Name)
+                and value.id == "time"
+                and isinstance(node.ctx, ast.Load)
+            ):
+                continue
+            enclosing = next(
+                (fn.name for fn in functions if node in ast.walk(fn)),
+                None,
+            )
+            if enclosing not in self.SEAM_BODIES:
+                bypasses.append(node.lineno)
+
+        self.assertEqual(bypasses, [])
 
 
 def _fake_jwt(sub: str) -> str:
@@ -2528,6 +2572,92 @@ class RefreshRunsOnceTest(unittest.TestCase):
         self.assertEqual(
             json.loads(auth.read_text())["tokens"]["refresh_token"], "new-refresh"
         )
+
+
+class RefreshLockWaitTest(unittest.TestCase):
+    """The wait for the refresh lock is driven by a seam, not by real time.
+
+    The lock is the one place two runs of the fetcher contend, so a replay of
+    a contended poll is only byte-for-byte if the poll interval and the
+    deadline both come from injectable clocks. A deadline read through the
+    pinned wall clock would never expire, and a sleep the suite cannot patch
+    would burn real seconds.
+    """
+
+    class FakeFcntl:
+        """A flock that reports the lock busy for a fixed number of tries."""
+
+        LOCK_EX = 1
+        LOCK_NB = 2
+        LOCK_UN = 4
+
+        def __init__(self, busy_tries: int) -> None:
+            self.busy_tries = busy_tries
+            self.tries = 0
+            self.released: list[int] = []
+
+        def flock(self, fd: int, operation: int) -> None:
+            if operation == self.LOCK_UN:
+                self.released.append(fd)
+                return
+            self.tries += 1
+            if self.tries <= self.busy_tries:
+                raise OSError("resource temporarily unavailable")
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        point_config(self, "cache_dir", Path(tmp.name) / "cache")
+        self.clock = [0.0]
+        self.slept: list[float] = []
+
+    def _monotonic(self) -> float:
+        return self.clock[0]
+
+    def _sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.clock[0] += seconds
+
+    def _acquire(self, fake: RefreshLockWaitTest.FakeFcntl) -> list[str]:
+        """Run the lock body once, returning what it recorded while held."""
+        held: list[str] = []
+        with (
+            patch.object(fetch_quota, "fcntl", fake),
+            patch.object(fetch_quota, "monotonic", self._monotonic),
+            patch.object(fetch_quota, "sleep", self._sleep),
+        ):
+            with fetch_quota._refresh_lock():
+                held.append("body")
+        return held
+
+    def test_polls_at_the_interval_until_the_lock_frees(self) -> None:
+        fake = self.FakeFcntl(busy_tries=3)
+
+        self.assertEqual(self._acquire(fake), ["body"])
+        self.assertEqual(fake.tries, 4)
+        self.assertEqual(self.slept, [fetch_quota.REFRESH_LOCK_POLL_S] * 3)
+        self.assertEqual(len(fake.released), 1)
+
+    def test_deadline_expires_on_elapsed_time_not_the_pinned_clock(self) -> None:
+        # A pinned wall clock never advances, so a deadline taken through
+        # now_ms() would spin here forever. The wait ends on the elapsed seam.
+        with config_env(**{fetch_quota.NOW_MS_ENV: str(PINNED_NOW_MS)}):
+            fake = self.FakeFcntl(busy_tries=10**6)
+
+            self.assertEqual(self._acquire(fake), ["body"])
+        expected = int(
+            fetch_quota.REFRESH_LOCK_WAIT_S / fetch_quota.REFRESH_LOCK_POLL_S
+        )
+        self.assertEqual(fake.tries, expected + 1)
+        self.assertEqual(self.clock[0], fetch_quota.REFRESH_LOCK_WAIT_S)
+
+    def test_a_lock_that_never_frees_still_refreshes(self) -> None:
+        fake = self.FakeFcntl(busy_tries=10**6)
+
+        with config_env(**{fetch_quota.NOW_MS_ENV: str(PINNED_NOW_MS)}):
+            self.assertEqual(self._acquire(fake), ["body"])
+        # Unguarded, not never: a holder that died must not block a poll.
+        self.assertEqual(self.clock[0], fetch_quota.REFRESH_LOCK_WAIT_S)
 
 
 if __name__ == "__main__":
