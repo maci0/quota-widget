@@ -40,6 +40,10 @@ PlasmoidItem {
         Plasmoid.configuration.utilCritAt, 90, 1, 100))
     // Mirrors DEFAULT_CACHE_MAX_AGE_S in package/contents/code/fetch_quota.py.
     readonly property int staleKeepMs: 24 * 60 * 60 * 1000
+    // Longest one fetcher run may hold the data source before the poll timer
+    // drops it: four providers, each with a bounded HTTP timeout, a
+    // Retry-After sleep, and a refresh-lock wait, plus process startup.
+    readonly property int pollTimeoutMs: 10 * 60 * 1000
 
     // ── tokens ───────────────────────────────────────────────────────────
     // Type scale, dimming steps, and meter geometry. Every view reads these
@@ -70,6 +74,7 @@ PlasmoidItem {
     property string configError: ""
     property double nowMs: Date.now()
     property double fetchedMs: 0
+    property double pollStartedMs: 0
     readonly property bool gaugeView: !!Plasmoid.configuration.gaugeView
     readonly property bool firstLoad: root.noData() && root.errorMsg === ""
     // A poll is in flight. exec.poll() drops a second one, so the header
@@ -92,6 +97,7 @@ PlasmoidItem {
         connectedSources: []
         onNewData: (sourceName, data) => {
             disconnectSource(sourceName)
+            root.pollStartedMs = 0
             root.fetching = false
             root.userRefreshing = false
             if (data["exit code"] !== 0 && data["exit code"] !== "0") {
@@ -122,9 +128,18 @@ PlasmoidItem {
             }
         }
         function poll() {
-            if (connectedSources.length)
+            if (connectedSources.length) {
+                // A run that outlived every timeout in the fetcher (a socket
+                // trickling bytes, say) would hold the source and stall every
+                // later poll; drop it and let the next tick start a fresh one.
+                if (root.nowMs - root.pollStartedMs > root.pollTimeoutMs) {
+                    disconnectSource(connectedSources[0])
+                    root.pollStartedMs = 0
+                }
                 return
+            }
             root.fetching = true
+            root.pollStartedMs = root.nowMs
             connectSource(root.cmd)
         }
     }

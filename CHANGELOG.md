@@ -53,6 +53,13 @@ prints, so a fetcher and UI shipped together never break each other.
 - The README no longer claims four network calls (there are also the OAuth token
   refreshes), a two-hour cache (the window is 24 hours), or that the account id
   is absent from the cache (it is stored as a digest).
+- A fetcher run that never returns no longer blocks every later poll: the
+  widget drops a run older than `pollTimeoutMs` and starts a fresh one.
+- A token or cache write that fails for any reason other than an OS error
+  (unserializable value, encoding error) no longer leaves a temp file in the
+  token store, and the write is UTF-8 rather than the locale encoding.
+- An HTTP error response is closed after its body is discarded, instead of
+  relying on the process exit to release the socket.
 
 ### Changed
 

@@ -126,9 +126,9 @@ def config_env(**env: str) -> Iterator[None]:
         fetch_quota.load_config()
 
 
-# Credential paths are configuration, not module constants; each test points one
-# through the environment variable the fetcher reads.
-_CONFIG_PATH_ENV = {
+# Credential paths live in the Config record; tests name the file by the
+# provider and point the environment variable behind it.
+CREDENTIAL_ENV = {
     "CLAUDE_CRED": "QUOTA_WIDGET_CLAUDE_CREDENTIALS",
     "CODEX_AUTH": "QUOTA_WIDGET_CODEX_AUTH",
     "GROK_AUTH": "QUOTA_WIDGET_GROK_AUTH",
@@ -137,22 +137,8 @@ _CONFIG_PATH_ENV = {
 }
 
 
-def point_credential(name: str, path: Path) -> Callable[[], None]:
-    """Point one provider's credential file at path; returns an undo callable
-    suited to TestCase.addCleanup."""
-    env = _CONFIG_PATH_ENV[name]
-    previous = os.environ.get(env)
-    os.environ[env] = str(path)
-    fetch_quota.load_config()
-
-    def restore() -> None:
-        if previous is None:
-            os.environ.pop(env, None)
-        else:
-            os.environ[env] = previous
-        fetch_quota.load_config()
-
-    return restore
+def credential_env(name: str, path: Path) -> Any:
+    return config_env(**{CREDENTIAL_ENV[name]: str(path)})
 
 
 class CodexWindowTest(unittest.TestCase):
@@ -1034,6 +1020,7 @@ class ErrorBodyTest(unittest.TestCase):
         body = b"account user_01ABC@example.com not found"
         out = io.StringIO()
         with (
+            credential_env("CLAUDE_CRED", cred),
             patch.object(urllib.request, "urlopen", side_effect=self._error(body)),
             contextlib.redirect_stdout(out),
             self.assertRaises(SystemExit),
@@ -1042,6 +1029,15 @@ class ErrorBodyTest(unittest.TestCase):
 
         self.assertNotIn("user_01ABC", out.getvalue())
         self.assertEqual(json.loads(out.getvalue())["claude"]["error"], "http-429")
+
+    def test_error_response_is_closed(self) -> None:
+        error = self._error(b"nope")
+        with patch.object(urllib.request, "urlopen", side_effect=error):
+            status, body, _hdrs = fetch_quota.fetch_http("https://example.test", {})
+
+        self.assertEqual(status, 429)
+        self.assertIsNone(body)
+        self.assertTrue(error.fp.closed)
 
 
 class DurableWriteTest(unittest.TestCase):
@@ -1078,6 +1074,22 @@ class DurableWriteTest(unittest.TestCase):
 
         self.assertEqual(json.loads(self.path.read_text()), {"tokens": "first"})
         self.assertEqual(list(self.path.parent.glob(".*.tmp")), [])
+
+    def test_unserializable_value_keeps_previous_file_and_leaves_no_temp(self) -> None:
+        fetch_quota._atomic_write_json(self.path, {"tokens": "first"})
+
+        with self.assertRaises(TypeError):
+            fetch_quota._atomic_write_json(self.path, {"tokens": object()})
+
+        self.assertEqual(json.loads(self.path.read_text()), {"tokens": "first"})
+        self.assertEqual(list(self.path.parent.glob(".*.tmp")), [])
+
+    def test_non_ascii_is_written_as_utf8(self) -> None:
+        fetch_quota._atomic_write_json(self.path, {"plan": "Ünïcode"})
+
+        self.assertEqual(
+            json.loads(self.path.read_text(encoding="utf-8")), {"plan": "Ünïcode"}
+        )
 
     def test_merge_write_keeps_fields_another_process_added(self) -> None:
         fetch_quota._atomic_write_json(self.path, {"tokens": "old", "other": 1})
@@ -1626,11 +1638,10 @@ class RefreshRunsOnceTest(unittest.TestCase):
         os.environ["QUOTA_WIDGET_CACHE"] = self.tmp.name
         self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
 
-    def _point(self, env: str, path: Path) -> None:
-        os.environ[env] = str(path)
-        self.addCleanup(lambda: os.environ.pop(env, None))
-        fetch_quota.load_config()
-        self.addCleanup(fetch_quota.load_config)
+    def _point(self, name: str, path: Path) -> None:
+        env = credential_env(name, path)
+        env.__enter__()
+        self.addCleanup(env.__exit__, None, None, None)
 
     def test_claude_second_poll_reuses_rotated_token(self) -> None:
         cred = Path(self.tmp.name) / "cred.json"

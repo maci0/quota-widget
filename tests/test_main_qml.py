@@ -78,5 +78,28 @@ class MainQmlAccessibilityTest(unittest.TestCase):
         self.assertNotIn('"Resets " + resetAtStr(', QML_SOURCE)
 
 
+class MainQmlPollingTest(unittest.TestCase):
+    """A poll holds a child process; it must always be released."""
+
+    def test_every_started_run_records_its_start(self) -> None:
+        self.assertIn(
+            "root.pollStartedMs = root.nowMs\n            connectSource", QML_SOURCE
+        )
+
+    def test_completed_run_releases_the_source(self) -> None:
+        self.assertIn(
+            "disconnectSource(sourceName)\n            root.pollStartedMs = 0",
+            QML_SOURCE,
+        )
+
+    def test_a_hung_run_is_dropped_so_polling_resumes(self) -> None:
+        # Without this, one stalled fetcher holds the source and no later poll
+        # ever starts.
+        self.assertIn(
+            "root.nowMs - root.pollStartedMs > root.pollTimeoutMs", QML_SOURCE
+        )
+        self.assertIn("disconnectSource(connectedSources[0])", QML_SOURCE)
+
+
 if __name__ == "__main__":
     unittest.main()

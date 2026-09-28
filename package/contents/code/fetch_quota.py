@@ -467,6 +467,9 @@ def _atomic_write_json(path: Path, obj: Any) -> None:
         prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent)
     )
     try:
+        # UTF-8, not the locale encoding: a non-ASCII plan label would fail
+        # mid-write on a C locale and take the whole poll with it. newline
+        # pins LF so the file reads the same on every platform.
         with os.fdopen(fd, "w", encoding=JSON_ENCODING, newline="\n") as f:
             json.dump(obj, f, indent=2)
             f.write("\n")
@@ -474,11 +477,11 @@ def _atomic_write_json(path: Path, obj: Any) -> None:
             os.fsync(f.fileno())
         os.chmod(tmp, FILE_MODE_PRIVATE)
         os.replace(tmp, path)
-    except OSError:
-        try:
+    except BaseException:
+        # Any failure, not only OSError: an encoding or serialization error
+        # would otherwise leave a temp file in the token store for every poll.
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass  # tmp already gone
         raise
     _fsync_dir(path.parent)
 
@@ -677,8 +680,10 @@ def fetch_http(
             # echoed back by the vendor. No caller reads it, so the body is
             # drained and discarded rather than returned or logged.
             hdrs = e.headers if e.headers is not None else Message()
+            # The error response owns a socket; reading it is not closing it.
             try:
-                e.read()
+                with contextlib.closing(e):
+                    e.read()
             except OSError as exc:
                 warn(
                     f"{url} returned {e.code} and its error body was unreadable: {exc}"

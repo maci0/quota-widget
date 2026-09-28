@@ -42,7 +42,7 @@ systemctl --user restart plasma-plasmashell.service
 
 ## Fetching
 
-`package/contents/code/fetch_quota.py` is polled every 2 minutes (change it in the widget settings, see below).
+`package/contents/code/fetch_quota.py` is polled every 2 minutes (change it in the widget settings, see below). Only one run is in flight at a time: the next poll waits for the previous one to finish, and a run still going after 10 minutes is dropped so polling resumes.
 
 | Provider | Endpoint | Credentials |
 | --- | --- | --- |

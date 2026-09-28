@@ -16,6 +16,10 @@ Every credential, cache, and state file is UTF-8 JSON, read through `fetch_quota
 
 Dev and CI use `uv` (`uv run pytest`, `uv run black`, `uv run ruff`, `uv run mypy`).
 
+## Polling
+
+The QML owns the fetcher process. One run at a time: `exec.poll()` returns early while a source is connected, `onNewData` disconnects it, and a run older than `pollTimeoutMs` (10 min, in the token block with the other timing values) is disconnected so a stalled fetch cannot wedge polling. Keep the release on every path that starts a run.
+
 ## Layout
 
 - `package/`: plasmoid (metadata, QML, fetcher, `contents/icons/com.maci.quota-widget.svg`)
