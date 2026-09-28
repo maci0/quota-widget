@@ -147,7 +147,16 @@ Two layers hold a last good reading: the fetcher writes `~/.cache/quota-widget/<
   one, in the fetcher (`_cache_holds_newer`) or in the panel (`mergeProv` and
   the `fetched_ms` guard in `onNewData`), so the run the poll dropped for
   outliving `pollTimeoutMs` cannot rewind the last good value when it answers
-  late.
+  late. In the fetcher that comparison and the write that follows it are one
+  critical section (`_entry_lock`, a `flock` on `<name>.json.lock`): two runs
+  that both read the older stamp before either renames, then write in the order
+  they reach the rename, leave the older reading on disk. The lock lives in
+  its own file because the entry is replaced by a rename, and a `flock` on the
+  old inode guards nothing. `_read_provider_cache` takes it for the same
+  reason: it computes the retention verdict from the entry it read and unlinks
+  on it, so a poll that renamed a fresh entry in between must not lose it. A
+  sidecar `.lock` file is not a reading, so `--clear-cache` leaves it, as it
+  leaves `refresh.lock`.
 - Entries are scoped to one account id (`_account_id`, hashed), so a second account signing in on the same machine never reads the first one's numbers. That id is text off the wire, so `_digest` normalizes it to `NORMALIZATION_FORM` (NFC) before hashing: an NFD spelling of the same account and its NFC twin are one scope, not two. The hash is keyed by the per-installation salt in `~/.cache/quota-widget/account-salt` (`_account_salt`), because an unsalted digest of a short, guessable vendor id is a lookup, not a hash. Scoping only ever compares two digests taken under the same key, so the salt never changes who reads what. The key is installed once and never replaced (`_install_salt` creates it with `O_EXCL`, so the create is the claim): two polls that reach it together cannot both write one, and the loser adopts the winner's key, which is the only key the entries already on disk were taken under. A run that mints its own instead strands every entry written by the run it raced with. The panel is scoped the same way: every provider payload carries that digest as `account`, success and failure alike, and `mergeProv` keeps a card only while the failing poll names the same digest. Without it the panel outlives the fetcher's rule and shows the previous account's plan to the next one signed in.
 - The salt is the one source of entropy in a poll, and it lands in the emitted `account` of every card, so a run that has to be reproduced names it: `QUOTA_WIDGET_ACCOUNT_SALT` (64 hex characters) is the key for that run and is written nowhere. Unset, the run draws `os.urandom` and persists it beside the entries it scopes, so the digest is stable from the second poll on and different on each first one. A key already in the cache directory wins over a named one. `ReplayTest` in `tests/test_fetch_quota.py` polls with a fresh cache, which is the first-run case, and pins the clock and the key.
 - The retention window is checked before the account match in `_read_provider_cache`, so an expired entry is deleted whoever asks. An entry whose account changed is otherwise never read again under the digest that scopes it, and would sit on disk past its window.

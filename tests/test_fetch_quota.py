@@ -1798,6 +1798,103 @@ class ProviderCacheTest(unittest.TestCase):
             second = path.read_bytes()
         self.assertEqual(first, second)
 
+    def test_a_write_waits_for_the_entry_lock(self) -> None:
+        # The "only move forward" rule is a comparison and a write with
+        # nothing between them. Two runs that both read the older stamp before
+        # either renames, then write in the order they reach the rename, leave
+        # the older reading on disk, so the write has to hold the lock across
+        # both halves.
+        path = Path(self.tmp.name) / "grok.json"
+        done = threading.Event()
+        errors: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                fetch_quota._write_provider_cache(
+                    "grok",
+                    {"ok": True, "plan": "Grok", "fetched_ms": PINNED_NOW_MS},
+                    self.account,
+                )
+            except BaseException as exc:  # noqa: BLE001 (surfaced below)
+                errors.append(exc)
+            finally:
+                done.set()
+
+        with config_env(QUOTA_WIDGET_NOW_MS=str(PINNED_NOW_MS)):
+            with fetch_quota._entry_lock(path):
+                worker = threading.Thread(target=write)
+                worker.start()
+                blocked = not done.wait(fetch_quota.ENTRY_LOCK_WAIT_S / 4)
+            self.assertTrue(blocked, "the write did not wait for the entry lock")
+            self.assertTrue(done.wait(fetch_quota.ENTRY_LOCK_WAIT_S * 2))
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            got = fetch_quota._read_provider_cache("grok", self.account)
+        assert got is not None
+        self.assertEqual(got["plan"], "Grok")
+
+    def test_a_read_waits_for_the_entry_lock(self) -> None:
+        # The retention verdict is computed from the entry the read saw, and
+        # an expired one is unlinked on that basis, so the read holds the lock
+        # too: a poll that renamed a fresh entry in between must not lose it
+        # to a verdict computed against the file it replaced.
+        path = Path(self.tmp.name) / "grok.json"
+        done = threading.Event()
+        read: list[fetch_quota.JsonDict | None] = []
+
+        def load() -> None:
+            read.append(fetch_quota._read_provider_cache("grok", self.account))
+            done.set()
+
+        with config_env(QUOTA_WIDGET_NOW_MS=str(PINNED_NOW_MS)):
+            fetch_quota._write_provider_cache(
+                "grok",
+                {"ok": True, "plan": "Grok", "fetched_ms": PINNED_NOW_MS},
+                self.account,
+            )
+            with fetch_quota._entry_lock(path):
+                worker = threading.Thread(target=load)
+                worker.start()
+                self.assertFalse(
+                    done.wait(fetch_quota.ENTRY_LOCK_WAIT_S / 4),
+                    "the read did not wait for the entry lock",
+                )
+            self.assertTrue(done.wait(fetch_quota.ENTRY_LOCK_WAIT_S * 2))
+            worker.join(timeout=5)
+        self.assertEqual(
+            read, [{"ok": True, "plan": "Grok", "fetched_ms": PINNED_NOW_MS}]
+        )
+
+    def test_two_racing_writers_never_rewind_the_entry(self) -> None:
+        # The interleaving the lock rules out, exercised rather than argued:
+        # one run's reading is older than the other's, and the entry must end
+        # on the newer one whichever reaches the rename last.
+        path = Path(self.tmp.name) / "grok.json"
+        rounds = 40
+        stamps = (PINNED_NOW_MS, PINNED_NOW_MS - 60_000)
+        start = threading.Barrier(len(stamps))
+
+        def write(stamp: int) -> None:
+            start.wait(timeout=5)
+            fetch_quota._write_provider_cache(
+                "grok",
+                {"ok": True, "plan": "Grok", "fetched_ms": stamp},
+                self.account,
+            )
+
+        with config_env(QUOTA_WIDGET_NOW_MS=str(PINNED_NOW_MS)):
+            for _ in range(rounds):
+
+                workers = [threading.Thread(target=write, args=(s,)) for s in stamps]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join(timeout=10)
+                    self.assertFalse(worker.is_alive())
+                entry = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(entry["cached_ms"], PINNED_NOW_MS)
+
     def test_a_second_account_replaces_the_entry(self) -> None:
         # The guard is scoped to one account: a different identity owns the
         # file, and the older reading it brings is its only one.
@@ -2527,7 +2624,11 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(sorted(payload["removed"]), ["account-salt", "grok.json"])
-        self.assertEqual(list(cache_dir.iterdir()), [])
+        # The advisory locks carry no reading and a poll may hold one, so they
+        # are the only thing left in the directory, and they stay empty.
+        left = sorted(p for p in cache_dir.iterdir())
+        self.assertEqual([p.name for p in left], ["grok.json.lock"])
+        self.assertEqual(left[0].stat().st_size, 0)
 
     def test_clear_cache_on_an_empty_cache_dir_is_not_an_error(self) -> None:
         tmp = tempfile.TemporaryDirectory()

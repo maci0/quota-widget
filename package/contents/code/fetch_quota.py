@@ -445,6 +445,13 @@ CACHE_DIR_MODE = 0o700
 FILE_MODE_PRIVATE = 0o600
 # Re-read-after-write retries before a token store is left to the racing writer.
 MERGE_WRITE_ATTEMPTS = 3
+# A cache entry's read-check-write is a file read and a rename, never a network
+# round trip, so a holder is gone in microseconds. The deadline only bounds a
+# holder that died mid-section, which then costs a later poll the same bypass
+# the refresh lock takes.
+ENTRY_LOCK_WAIT_S = 5.0
+ENTRY_LOCK_POLL_S = 0.02
+ENTRY_LOCK_SUFFIX = ".lock"
 # Meters kept from the structured `limits` array. The panel builds a gauge per
 # entry and keeps it until the next poll, so a list that grows with whatever
 # the API reports is memory the widget holds for the rest of the session.
@@ -1140,31 +1147,35 @@ def _reading(payload: JsonDict) -> JsonDict:
 
 def _read_provider_cache(name: str, account: str | None) -> JsonDict | None:
     path = config().cache_dir / f"{name}.json"
-    obj = _read_json_dict(path)
-    if obj is None:
-        return None
-    ts = _finite_number(obj.get("cached_ms"))
-    payload = obj.get("payload")
-    if ts is None or not isinstance(payload, dict):
-        return None
-    if not payload.get("ok"):
-        return None
-    # The window is a retention rule, not a serving rule, so it is applied
-    # before the account check: an entry that is past it is deleted whoever
-    # asks for it. A provider whose account changed, or whose credential went
-    # away so no poll carries a digest at all, is exactly the entry that is
-    # never read again under the account that wrote it, and leaving it to sit
-    # on disk forever is how a 24 h reading outlives its 24 h window.
-    if now_ms() - int(ts) > config().cache_max_age_s * 1000:
-        _discard_provider_cache(path)
-        return None
-    # An entry belongs to the account whose credential produced it. Reading
-    # another account's plan and usage is worse than showing nothing, so an
-    # unidentifiable caller reads nothing.
-    if account is None or obj.get("account") != account:
-        return None
-    # The reading is as old as the write, not as fresh as this read.
-    return {**payload, "fetched_ms": int(ts)}
+    with _entry_lock(path):
+        obj = _read_json_dict(path)
+        if obj is None:
+            return None
+        ts = _finite_number(obj.get("cached_ms"))
+        payload = obj.get("payload")
+        if ts is None or not isinstance(payload, dict):
+            return None
+        if not payload.get("ok"):
+            return None
+        # The window is a retention rule, not a serving rule, so it is applied
+        # before the account check: an entry that is past it is deleted whoever
+        # asks for it. A provider whose account changed, or whose credential went
+        # away so no poll carries a digest at all, is exactly the entry that is
+        # never read again under the account that wrote it, and leaving it to
+        # sit on disk forever is how a 24 h reading outlives its 24 h window.
+        # The unlink runs under the same lock as the write, so a poll that
+        # renamed a fresh entry in while this read was deciding does not lose
+        # the fresh one to a verdict computed against the old inode.
+        if now_ms() - int(ts) > config().cache_max_age_s * 1000:
+            _discard_provider_cache(path)
+            return None
+        # An entry belongs to the account whose credential produced it. Reading
+        # another account's plan and usage is worse than showing nothing, so an
+        # unidentifiable caller reads nothing.
+        if account is None or obj.get("account") != account:
+            return None
+        # The reading is as old as the write, not as fresh as this read.
+        return {**payload, "fetched_ms": int(ts)}
 
 
 def _cache_holds_newer(path: Path, taken_ms: int, account: str) -> bool:
@@ -1198,16 +1209,17 @@ def _write_provider_cache(name: str, payload: JsonDict, account: str | None) -> 
         # retention window.
         taken = _finite_number(payload.get("fetched_ms"))
         stamp = int(taken) if taken is not None else now_ms()
-        if _cache_holds_newer(path, stamp, account):
-            return
-        _atomic_write_json(
-            path,
-            {
-                "cached_ms": stamp,
-                "account": account,
-                "payload": payload,
-            },
-        )
+        with _entry_lock(path):
+            if _cache_holds_newer(path, stamp, account):
+                return
+            _atomic_write_json(
+                path,
+                {
+                    "cached_ms": stamp,
+                    "account": account,
+                    "payload": payload,
+                },
+            )
     except OSError as exc:
         # Cache is best-effort: a full disk must not fail the poll. It is also
         # the only fallback a later poll has when the vendor API fails, so the
@@ -1238,6 +1250,67 @@ def _fail_or_cached(name: str, account: str | None, status: int) -> JsonDict:
     return _http_error(status, account)
 
 
+def _is_lock_file(name: str) -> bool:
+    """True for the advisory locks beside the cache, which hold no reading.
+
+    refresh.lock and every <entry>.json.lock end in the same suffix, so one
+    test names the whole set.
+    """
+    return name.endswith(ENTRY_LOCK_SUFFIX)
+
+
+def _flock_wait(fd: int, wait_s: float, poll_s: float) -> bool:
+    """Take an exclusive flock on fd, or give up and say so.
+
+    Only "somebody else holds it" is worth waiting out. A filesystem that
+    cannot lock (a network mount, an overlay without ENOLCK support) raises for
+    every try, so polling that one burns the whole deadline on every call
+    instead of falling through to the unguarded work below.
+    """
+    if fcntl is None:
+        return False  # no flock on this platform: the body runs unguarded
+    deadline = monotonic() + wait_s
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError as exc:
+            if exc.errno not in LOCK_BUSY_ERRNOS:
+                return False
+            if monotonic() >= deadline:
+                return False
+            sleep(poll_s)
+
+
+@contextlib.contextmanager
+def _flock_file(path: Path, wait_s: float, poll_s: float) -> Iterator[bool]:
+    """Hold an exclusive flock on path for the body, yielding whether it is held.
+
+    flock is per open file description, so two threads in one process contend
+    here exactly as two processes do. A platform without fcntl, and a directory
+    that cannot be written, both yield False: the body runs unguarded, not
+    never. The lock lives in its own file because the entry it guards is
+    replaced by a rename, and a lock on the old inode guards nothing.
+    """
+    if fcntl is None:
+        yield False
+        return
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, FILE_MODE_PRIVATE)
+    except OSError:
+        yield False
+        return
+    try:
+        held = _flock_wait(fd, wait_s, poll_s)
+        try:
+            yield held
+        finally:
+            if held:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 @contextlib.contextmanager
 def _refresh_lock() -> Iterator[None]:
     """Serialize OAuth refreshes between concurrent runs of the fetcher.
@@ -1248,45 +1321,37 @@ def _refresh_lock() -> Iterator[None]:
     provider already retired. The lock spans the credential re-read too, so
     the second run sees the rotated state and skips the round trip.
     """
-    if fcntl is None:
-        yield  # no flock on this platform: refresh unguarded, not never
-        return
     try:
         folder = config().cache_dir
         _private_dir(folder)
-        fd = os.open(
-            str(folder / REFRESH_LOCK_NAME),
-            os.O_CREAT | os.O_RDWR,
-            FILE_MODE_PRIVATE,
-        )
+        lock_path: Path | None = folder / REFRESH_LOCK_NAME
     except OSError:
+        lock_path = None
+    if lock_path is None:
         yield  # unwritable cache dir: refresh unguarded, not never
         return
-    try:
-        deadline = monotonic() + REFRESH_LOCK_WAIT_S
-        held = False
-        while not held:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                held = True
-            except OSError as exc:
-                # Only "somebody else holds it" is worth waiting out. A
-                # filesystem that cannot lock (a network mount, an overlay
-                # without ENOLCK support) raises for every try, so polling that
-                # one burns the whole deadline on every refresh instead of
-                # falling through to the unguarded refresh below.
-                if exc.errno not in LOCK_BUSY_ERRNOS:
-                    break
-                if monotonic() >= deadline:
-                    break
-                sleep(REFRESH_LOCK_POLL_S)
-        try:
-            yield
-        finally:
-            if held:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
+    with _flock_file(lock_path, REFRESH_LOCK_WAIT_S, REFRESH_LOCK_POLL_S):
+        yield
+
+
+@contextlib.contextmanager
+def _entry_lock(entry: Path) -> Iterator[None]:
+    """Serialize the read-check-write on one provider cache entry.
+
+    The entry only ever moves forward, but that is a comparison and a write
+    with nothing between them: two runs that both read the older stamp before
+    either renames, then write in the order they happen to reach the rename,
+    leave the older reading on disk. The second widget instance, an install
+    smoke run beside a poll, or a poll whose answer the panel dropped for
+    outliving pollTimeoutMs are all two runs at once, and the last of them is
+    the one whose reading is stale.
+    """
+    with _flock_file(
+        entry.with_name(entry.name + ENTRY_LOCK_SUFFIX),
+        ENTRY_LOCK_WAIT_S,
+        ENTRY_LOCK_POLL_S,
+    ):
+        yield
 
 
 def _origin(url: str) -> tuple[str, str, int | None] | None:
@@ -2646,15 +2711,14 @@ def _clear_cache() -> JsonDict:
     would still be readable under a key that never left the machine. The
     vendor token files are the CLIs' own and are not touched.
 
-    The refresh lock stays: it carries nothing, and unlinking a file another
-    poll has flocked would leave that poll holding a lock no later one can
-    see.
+    The locks stay: they carry nothing, and unlinking a file another poll has
+    flocked would leave that poll holding a lock no later one can see.
     """
     folder = config().cache_dir
     removed: list[str] = []
     if folder.is_dir():
         for path in sorted(folder.iterdir()):
-            if not path.is_file() or path.name == REFRESH_LOCK_NAME:
+            if not path.is_file() or _is_lock_file(path.name):
                 continue
             try:
                 path.unlink()
