@@ -199,8 +199,11 @@ def _transient_failure(status: int) -> bool:
     """Whether a cached reading beats reporting this failure.
 
     Status 0 is a transport failure, not an HTTP status: the request never
-    reached the vendor. The panel already keeps its last good reading through
-    one, so a machine that is offline at the first poll of a session would
+    reached the vendor. REFUSED_STATUS is a request this fetcher would not
+    send, which is the same kind of news: the account, the credential, and the
+    vendor are all as they were, so the last good reading is still the best
+    answer. The panel already keeps its last good reading through a transport
+    failure, so a machine that is offline at the first poll of a session would
     otherwise show a blank card where the same reading is sitting on disk.
     A 401 or 403 is a decision by the vendor and is reported as one.
 
@@ -209,7 +212,7 @@ def _transient_failure(status: int) -> bool:
     next poll reads a real one. A kept reading beats a blank card, and the
     journal says which body was refused.
     """
-    return status in {0, 429, UNREADABLE_BODY_STATUS} or status >= 500
+    return status in {0, REFUSED_STATUS, UNREADABLE_BODY_STATUS, 429} or status >= 500
 
 
 def _failure(
@@ -239,12 +242,26 @@ def _http_error(status: int, account: str | None) -> JsonDict:
     if status == UNREADABLE_BODY_STATUS:
         label = BAD_BODY_ERROR
     else:
-        label = f"http-{status}" if status else "net"
+        label = _error_code(status)
     return _failure(
         label,
         account,
         transient=_transient_failure(status),
     )
+
+
+def _error_code(status: int) -> str:
+    """The panel-facing code for a status.
+
+    The two codes that are not a vendor's answer say so: a request that never
+    got a response is "net", and one this fetcher refused to send is "refused".
+    Both would otherwise be spelled "http-<status>", which claims the vendor
+    returned a status it never returned, and hands the panel a family it reads
+    as a decision about the account.
+    """
+    if status == REFUSED_STATUS:
+        return "refused"
+    return f"http-{status}" if status else "net"
 
 
 class ConfigError(ValueError):
@@ -541,6 +558,14 @@ GROK_OIDC_HOST = "auth.x.ai"
 # Request headers that carry the user's access token. urllib copies the whole
 # header set onto a redirect target, these two included.
 CREDENTIAL_HEADERS = frozenset({"authorization", "cookie"})
+
+# The status for a request the fetcher declined to send, as against the 0 that
+# names a request that never got a response. A refused redirect is neither: the
+# vendor did answer, with a 3xx, and the 3xx is not a verdict about the account,
+# so reporting it as one drops the last good reading over a decision the panel
+# made. No HTTP status is negative, and a 3xx is one the panel would render as an
+# unavailable provider rather than as the endpoint having moved.
+REFUSED_STATUS = -1
 
 # The usage multiplier a Claude rate-limit tier spells ("max_20x").
 TIER_MULTIPLIER = re.compile(r"(\d+)x")
@@ -1496,6 +1521,17 @@ def _origin(url: str) -> tuple[str, str, int | None] | None:
     return (parts.scheme.lower(), parts.hostname.lower(), parts.port)
 
 
+class _RefusedRedirect(urllib.error.HTTPError):
+    """A redirect that would have carried a credential off its origin.
+
+    An HTTPError because urllib raises and unwinds through this handler's own
+    machinery to abandon the request, and the transport reports the refusal as
+    a status like any other. Its own type is what fetch_http catches ahead of
+    the vendor's own HTTPError, so the refusal is not mistaken for the 3xx the
+    vendor sent.
+    """
+
+
 class _OriginBoundRedirect(urllib.request.HTTPRedirectHandler):
     """Refuse a redirect that would carry a credential to another origin.
 
@@ -1522,7 +1558,7 @@ class _OriginBoundRedirect(urllib.request.HTTPRedirectHandler):
             name.lower() in CREDENTIAL_HEADERS for name in req.headers
         )
         if carries_credential and _origin(req.full_url) != _origin(newurl):
-            raise urllib.error.HTTPError(newurl, code, msg, headers, fp)
+            raise _RefusedRedirect(newurl, code, msg, headers, fp)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -1577,6 +1613,12 @@ def fetch_http(
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     warn(f"{url} returned {resp.status} with a non-JSON body")
                     return UNREADABLE_BODY_STATUS, None, hdrs
+        except _RefusedRedirect:
+            # Ahead of the HTTPError clause below, which is a subclass of: the
+            # vendor's 3xx is a verdict about the endpoint and this is a verdict
+            # about the credential, and only this fetcher decides the second.
+            warn(f"{url} redirected off its origin; the request was not sent")
+            return REFUSED_STATUS, None, None
         except urllib.error.HTTPError as e:
             # The error body can carry account identifiers (email, user id)
             # echoed back by the vendor. No caller reads it, so the body is

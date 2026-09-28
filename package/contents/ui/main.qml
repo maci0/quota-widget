@@ -540,7 +540,7 @@ PlasmoidItem {
             return errorMsg ? statusText() : qsTr("Loading")
         const failed = failedNames()
         if (failed.length)
-            lines.push(qsTr("No reading for: %1").arg(joinNames(failed)))
+            lines.push(qsTr("No reading for: %1").arg(joinLocalized(failed)))
         return lines.join("\n")
     }
 
@@ -552,6 +552,12 @@ PlasmoidItem {
         if (code === "no-token" || code === "http-401" || code === "http-403")
             return signIn
         if (code === "net") return qsTr("Network error")
+        // A request the fetcher declined to send, because a redirect would have
+        // carried the credential to another host. Nothing about the account or
+        // the vendor changed, so the card a poll held is kept; this is only
+        // reached with no reading to keep, and the fix is a newer widget rather
+        // than a retry, since the refusal is the fetcher's own and repeats.
+        if (code === "refused") return qsTr("Provider endpoint moved")
         // "exec" is a run that never produced a payload: python3 missing, the
         // fetcher unreadable, a crash on the way in. The network is not what
         // failed, so the panel must not say it did.
@@ -590,11 +596,11 @@ PlasmoidItem {
         return percentStr(n / 100, 0)
     }
 
-    // The parts of a meter's spoken summary, and the providers a panel reading
-    // has no number for, joined by a catalog separator. A comma written in QML
-    // is a comma in every locale, and a language that lists with a semicolon,
-    // a middle dot, or a full stop cannot say so.
-    function joinList(parts) {
+    // A list of names or phrases joined by a catalog separator. A comma
+    // written in QML is a comma in every locale, and a language that lists with
+    // a semicolon, a middle dot, or a full stop cannot say so. Both callers
+    // need the same thing and the same pattern, so they share one.
+    function joinLocalized(parts) {
         return parts.filter(s => s !== "").reduce(
             (a, b) => qsTr("%1, %2").arg(a).arg(b))
     }
@@ -1344,7 +1350,7 @@ PlasmoidItem {
         // label, value, severity and reset time are not read twice.
         Accessible.role: Accessible.ProgressBar
         Accessible.name: row.label
-        Accessible.description: joinList([
+        Accessible.description: joinLocalized([
             qsTr("%1, %2 usage").arg(pct(row.util)).arg(utilSeverity(row.util)),
             row.detail,
             row.subdetail

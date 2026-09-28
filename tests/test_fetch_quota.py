@@ -3146,6 +3146,12 @@ class TransientFailureTest(unittest.TestCase):
         # A request that never landed is the case the panel already keeps a
         # reading through, so the on-disk entry has to be served too.
         self.assertTrue(fetch_quota._transient_failure(0))
+        # A request this fetcher declined to send is the same kind of news: no
+        # verdict on the account, so the reading on disk still describes it.
+        self.assertTrue(fetch_quota._transient_failure(fetch_quota.REFUSED_STATUS))
+        # The 3xx the vendor actually answered with is not that, and is not a
+        # decision about the account either, so it must not read as final.
+        self.assertFalse(fetch_quota._transient_failure(302))
 
 
 class FailurePayloadTest(unittest.TestCase):
@@ -3195,6 +3201,15 @@ class FailurePayloadTest(unittest.TestCase):
 
     def test_a_server_error_holds_the_card(self) -> None:
         self.assertIs(self._fetch(503)["transient"], True)
+
+    def test_a_refused_redirect_holds_the_card(self) -> None:
+        # The fetcher refused to send the request, so the account, the
+        # credential, and the vendor are all as they were. Reported as a vendor
+        # 3xx it was final, and the panel replaced a good reading with nothing.
+        out = self._fetch(fetch_quota.REFUSED_STATUS)
+        self.assertEqual(
+            _scoped(out), {"ok": False, "error": "refused", "transient": True}
+        )
 
     def test_a_config_error_is_final(self) -> None:
         # Nothing ran, so every provider is final: the panel replaces each card
@@ -4245,6 +4260,32 @@ class OriginBoundRedirectTest(unittest.TestCase):
         self.assertEqual(
             getattr(new, "full_url", None), "https://cdn.anthropic.com/doc"
         )
+
+    def test_a_refusal_is_reported_as_its_own_status(self) -> None:
+        # The handler raises an HTTPError to abandon the request, and the
+        # transport's own HTTPError clause would have returned the 3xx as a
+        # vendor verdict. The refusal carries its own type for exactly that.
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._redirect(
+                "https://api.anthropic.com/api/oauth/usage",
+                "https://attacker.test/collect",
+                {"Authorization": "Bearer tok"},
+            )
+        refusal = ctx.exception
+        with (
+            patch.object(urllib.request, "urlopen", side_effect=refusal),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status, body, hdrs = fetch_quota.fetch_http(
+                "https://api.anthropic.com/api/oauth/usage",
+                {"Authorization": "Bearer tok"},
+            )
+
+        self.assertEqual(status, fetch_quota.REFUSED_STATUS)
+        self.assertNotEqual(status, 302)
+        self.assertIsNone(body)
+        self.assertIsNone(hdrs)
+        self.assertEqual(fetch_quota._error_code(fetch_quota.REFUSED_STATUS), "refused")
 
     def test_the_installed_opener_carries_the_handler(self) -> None:
         # urlopen() uses a global opener it builds itself; the refusal only

@@ -113,12 +113,15 @@ Every user-facing string in `main.qml` goes through `qsTr()` with `%1`-style
 placeholders, never concatenation, so a translator can reorder the sentence.
 A composition is a second pattern, not a separator welded to a phrase: the
 `·` between a meter's numbers and its reset time (`appendReset`), between a
-plan name and its "cached" mark (`withStaleMark`), and the separator in a
-meter's spoken summary (`joinSpoken`) are all `qsTr()` entries a translator
-owns. A unit is a word of its own, not a letter glued to a digit: `remainStr`
-takes it from `dayUnit` / `hourUnit` / `minuteUnit`, which pick a singular or
-a plural entry by count, because QML's `qsTr()` carries no plural argument and
-a language with four or six forms needs a string of its own for each.
+plan name and its "cached" mark (`withStaleMark`), and the separator between
+the parts of a list (`joinLocalized`, which joins a meter's spoken summary and
+the panel's list of providers with no reading) are all `qsTr()` entries a
+translator owns. A list is joined through that one helper, never through
+`join(", ")`. A unit is a word of its own, not a letter glued to a digit:
+`remainStr` takes it from `dayUnit` / `hourUnit` / `minuteUnit`, which pick a
+singular or a plural entry by count, because QML's `qsTr()` carries no plural
+argument and a language with four or six forms needs a string of its own for
+each.
 Dates and times render through `Qt.DefaultLocaleShortDate`, amounts through
 `Number.toLocaleString(Qt.locale().name, { style: "currency" })`, percentages
 through `percentStr()` (`style: "percent"`, so the sign and its spacing are the
@@ -169,6 +172,7 @@ Two layers hold a last good reading: the fetcher writes `~/.cache/quota-widget/<
 - The retention window is checked before the account match in `_read_provider_cache`, so an expired entry is deleted whoever asks. An entry whose account changed is otherwise never read again under the digest that scopes it, and would sit on disk past its window.
 - `--clear-cache` erases the entries and the salt: the key outlives what it scopes, and an entry restored from a backup is still readable under a key that stayed behind. It runs after `load_config` and before any provider, like `--print-config`.
 - The fetcher serves an entry on a rate limit, a 5xx, and a transport failure alike (`_transient_failure`); the panel treats the same three as transient. A 401 or 403 is a vendor decision and is reported as one. That classification travels in the payload as `transient` (`_failure` builds every failed provider with it), so the panel reads the rule instead of re-deriving it from the error code; adding a code without the flag would read as final and blank a card on a blip. `exec` is the panel's own condition, the one failure the fetcher never got to classify. A body the fetcher refused to read (over the cap, empty, not JSON) is a fourth transient condition, `UNREADABLE_BODY_STATUS` on the wire and `bad-body` in the payload: the vendor answered, so passing its own 200 on would report a reading that was never measured under a status no HTTP client sends, and a 5xx-range code would read as a vendor outage.
+- Two codes are the fetcher's own, not a vendor's answer, and `_error_code` is where that is spelled: `net` (status 0) for a request that never got a response, and `refused` (`REFUSED_STATUS`) for one it would not send. Every other code is `http-<status>` and is a status the vendor returned. `refused` is the origin-bound redirect handler: it raises an `HTTPError` to abandon the request, so it carries its own type and `fetch_http` catches it ahead of the vendor's, or the `3xx` would reach the payload as a verdict about the account. A refusal changes nothing about the account or the vendor, so it is transient.
 - Claude is the one provider that refreshes before its usage call, so a 401 there is the vendor rejecting a token minted seconds earlier. It is a sign-out and is reported as one, cache or no cache: the entry is scoped by the same `sub`, so serving it would keep a revoked session looking healthy for the whole retention window. Only a 429 on the refresh itself makes the reading stand in (`rate_limited`), since that 401 is the expired access token and not the session.
 - Every entry carries `PAYLOAD_SCHEMA`. The panel reads a replayed payload field by field, so one written under another value is deleted unread; raise it when a provider payload changes shape, or an upgrade serves the previous one.
 

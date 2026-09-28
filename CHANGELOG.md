@@ -56,6 +56,15 @@ fails if a Breaking entry lands in this section without a matching next version.
   it carries `transient` like a `5xx` or a dropped connection, and `errText()`
   renders it as "Unreadable response, retrying". A consumer matching the other
   codes (`no-token`, `net`, `http-<code>`) is unaffected.
+- A redirect the fetcher refused to follow, because it would have carried the
+  credential to another host, is reported as `refused`. Before, the refusal
+  raised an `HTTPError`, so the transport returned the redirect status as
+  though the vendor had judged the account, and a `3xx` is final: the panel
+  replaced a good reading with a blank card and `errText()` read it as an
+  unavailable provider. The account, the credential, and the vendor are all
+  unchanged by a refusal, so it is now transient and the card is held. A
+  consumer matching a failure on `http-<status>` matches `refused` instead; a
+  `3xx` was never a verdict any vendor returned for an account.
 
 ### Added
 

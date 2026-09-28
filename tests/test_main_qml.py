@@ -215,7 +215,7 @@ class MainQmlLocalizationTest(unittest.TestCase):
         self.assertIn('qsTr("%1, %2").arg(a).arg(b)', QML_SOURCE)
         # The failed-provider line lists vendor marks, and the separator around
         # them is as much the locale's as the sentence around the line is.
-        self.assertIn('qsTr("No reading for: %1").arg(joinNames(failed))', QML_SOURCE)
+        self.assertIn('qsTr("No reading for: %1").arg(joinLocalized(failed))', QML_SOURCE)
         self.assertIn("function joinNames(names)", QML_SOURCE)
 
     def test_currency_codes_go_through_the_locale_formatter(self) -> None:
@@ -343,7 +343,7 @@ class MainQmlAccessibilityTest(unittest.TestCase):
 
     def test_meters_expose_a_spoken_summary(self) -> None:
         self.assertIn("Accessible.role: Accessible.ProgressBar", QML_SOURCE)
-        self.assertIn("Accessible.description: joinList([", QML_SOURCE)
+        self.assertIn("Accessible.description: joinLocalized([", QML_SOURCE)
 
     def test_panel_widget_is_keyboard_operable(self) -> None:
         self.assertIn("Keys.onSpacePressed: root.expanded = !root.expanded", QML_SOURCE)
@@ -708,6 +708,13 @@ class MainQmlStatusWordingTest(unittest.TestCase):
         self.assertIn('code === "bad-body"', self._err_text())
         self.assertIn('qsTr("Unreadable response, retrying")', self._err_text())
 
+    def test_a_refused_request_is_not_reported_as_a_vendor_status(self) -> None:
+        # The fetcher declines a redirect that would carry the credential to
+        # another host. It raises an HTTPError, so without its own code the
+        # payload said "http-302" and this read it as a provider down; the
+        # refusal is the fetcher's own, it repeats, and no reading is served.
+        self.assertIn('code === "refused"', self._err_text())
+
     def test_the_panel_names_the_providers_it_has_no_reading_for(self) -> None:
         # The tooltip listed only the providers that answered, so a failed one
         # disappeared from the panel summary without a trace while the popup
@@ -715,6 +722,7 @@ class MainQmlStatusWordingTest(unittest.TestCase):
         self.assertIn("function failedNames()", QML_SOURCE)
         tooltip = QML_SOURCE.split("function tooltipBody(", 1)[1].split("\n    }", 1)[0]
         self.assertIn("failedNames()", tooltip)
+        self.assertIn("joinLocalized(failed)", tooltip)
         self.assertIn('qsTr("No reading for: %1")', tooltip)
 
     def test_the_panel_marks_a_reading_it_is_only_caching(self) -> None:
