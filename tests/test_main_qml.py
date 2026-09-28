@@ -2,15 +2,47 @@ from __future__ import annotations
 
 import re
 import unittest
+from collections.abc import Iterator
 from typing import Final
 
 from project_paths import project_root
 
 QML_PATH: Final = project_root() / "package" / "contents" / "ui" / "main.qml"
 QML_SOURCE: Final = QML_PATH.read_text()
-DIMMED_LABEL: Final = re.compile(
-    r"PlasmaComponents3\.Label \{[^}]*?opacity: 0\.[0-7]\d*"
-)
+LABEL_OPEN: Final = "PlasmaComponents3.Label {"
+DIMMED_OPACITY: Final = re.compile(r"opacity:\s*0\.[0-7]\d*")
+
+
+def label_blocks(source: str) -> Iterator[str]:
+    """The body of every PlasmaComponents3.Label, braces balanced.
+
+    A pattern that stops at the first `}` never sees the rest of a label whose
+    text is a block, and a dimmed one among those would pass unnoticed.
+    """
+    start = source.find(LABEL_OPEN)
+    while start != -1:
+        body = start + len(LABEL_OPEN)
+        depth = 1
+        index = body
+        while index < len(source) and depth:
+            if source[index] == "{":
+                depth += 1
+            elif source[index] == "}":
+                depth -= 1
+            index += 1
+        if depth:
+            return
+        yield source[body : index - 1]
+        start = source.find(LABEL_OPEN, index)
+
+
+def dimmed_labels(source: str) -> list[str]:
+    found = []
+    for block in label_blocks(source):
+        match = DIMMED_OPACITY.search(block)
+        if match is not None:
+            found.append(match.group(0))
+    return found
 
 
 PROSE_LITERAL: Final = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
@@ -157,7 +189,28 @@ class MainQmlAccessibilityTest(unittest.TestCase):
     def test_no_dimmed_labels(self) -> None:
         # Fading a label with opacity drops it below the 4.5:1 text contrast
         # floor on light themes (WCAG 1.4.3).
-        self.assertEqual(DIMMED_LABEL.findall(QML_SOURCE), [])
+        self.assertEqual(dimmed_labels(QML_SOURCE), [])
+
+    def test_the_dimmed_label_scan_reaches_a_label_with_a_block_body(self) -> None:
+        # The scan balances braces, so a label whose text is a block is read to
+        # its own end and not silently skipped the way a `[^}]` pattern skips it.
+        blocks = list(label_blocks(QML_SOURCE))
+        self.assertEqual(
+            len(blocks), QML_SOURCE.count(LABEL_OPEN), "a label body ran to no end"
+        )
+        self.assertTrue(
+            any("{" in block for block in blocks), "no label carries a block body"
+        )
+        dimmed = dimmed_labels(
+            "PlasmaComponents3.Label {\n"
+            "    text: {\n"
+            '        if (x) { return "a" }\n'
+            '        return "b"\n'
+            "    }\n"
+            "    opacity: 0.4\n"
+            "}\n"
+        )
+        self.assertEqual(dimmed, ["opacity: 0.4"])
 
     def test_meters_expose_a_spoken_summary(self) -> None:
         self.assertIn("Accessible.role: Accessible.ProgressBar", QML_SOURCE)

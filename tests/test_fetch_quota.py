@@ -29,8 +29,6 @@ import fetch_quota
 # Fixed clock for every test that cares about expiry or replay.
 PINNED_NOW_MS = 1_777_000_000_000
 
-HttpFake = Callable[..., tuple[int, object, object]]
-
 _RATE_LIMIT: dict[str, object] = {"error": {"type": "rate_limit_error"}}
 _NEW_TOKENS: dict[str, object] = {
     "access_token": "new-access",
@@ -197,8 +195,11 @@ class CodexCodeReviewWindowTest(unittest.TestCase):
         self.addCleanup(env.__exit__, None, None, None)
 
     def _fetch(self, body: JsonDict) -> JsonDict:
-        with patch.object(fetch_quota, "fetch_json", _http_returning_pair(200, body)):
-            return fetch_quota.fetch_codex()
+        fake = _http_returning_pair(200, body)
+        with patch.object(fetch_quota, "fetch_json", fake):
+            out = fetch_quota.fetch_codex()
+        fake.hit(self, fetch_quota.CODEX_USAGE_URL)
+        return out
 
     def test_nested_windows_are_prefixed(self) -> None:
         out = self._fetch(
@@ -422,8 +423,25 @@ def _scoped(payload: JsonDict) -> JsonDict:
     return {k: v for k, v in payload.items() if k != "account"}
 
 
-def _http_returning(status: int, body: object, hdrs: object = None) -> HttpFake:
-    def fake_http(
+class _RecordingHttp:
+    """Serves one canned response to every request and records the URLs it was
+    asked for. A fake that answers any URL cannot tell a test that the fetcher
+    reached the vendor's usage endpoint from one where it reached something
+    else, so the calls land in `urls` and a test checks the endpoint."""
+
+    def __init__(self, status: int, body: object, hdrs: object = None) -> None:
+        self.status = status
+        self.body = body
+        self.hdrs = hdrs
+        self.urls: list[str] = []
+
+    def hit(self, case: unittest.TestCase, url: str) -> None:
+        case.assertIn(url, self.urls, f"never called {url}, only {self.urls}")
+
+
+class FakeHttp(_RecordingHttp):
+    def __call__(
+        self,
         url: str,
         headers: dict[str, str],
         *,
@@ -431,13 +449,17 @@ def _http_returning(status: int, body: object, hdrs: object = None) -> HttpFake:
         data: bytes | None = None,
         method: str | None = None,
     ) -> tuple[int, object, object]:
-        return status, body, hdrs
+        self.urls.append(url)
+        return self.status, self.body, self.hdrs
 
-    return fake_http
+
+def _http_returning(status: int, body: object, hdrs: object = None) -> FakeHttp:
+    return FakeHttp(status, body, hdrs)
 
 
-def _http_returning_pair(status: int, body: object) -> object:
-    def fake_json(
+class FakeJson(_RecordingHttp):
+    def __call__(
+        self,
         url: str,
         headers: dict[str, str],
         *,
@@ -445,9 +467,12 @@ def _http_returning_pair(status: int, body: object) -> object:
         data: bytes | None = None,
         method: str | None = None,
     ) -> tuple[int, object]:
-        return status, body
+        self.urls.append(url)
+        return self.status, self.body
 
-    return fake_json
+
+def _http_returning_pair(status: int, body: object) -> FakeJson:
+    return FakeJson(status, body)
 
 
 class ClaudeRateLimitTest(unittest.TestCase):
@@ -506,12 +531,10 @@ class ClaudeRateLimitTest(unittest.TestCase):
             fetch_quota._account_id(self.access_token),
         )
 
-        with patch.object(
-            fetch_quota,
-            "fetch_http",
-            _http_returning(429, _RATE_LIMIT, {"Retry-After": "0"}),
-        ):
+        fake = _http_returning(429, _RATE_LIMIT, {"Retry-After": "0"})
+        with patch.object(fetch_quota, "fetch_http", fake):
             out = fetch_quota.fetch_claude()
+        fake.hit(self, fetch_quota.CLAUDE_URL)
         self.assertTrue(out["ok"])
         self.assertTrue(out["stale"])
         self.assertEqual(out["session"]["util"], 12)
@@ -568,12 +591,10 @@ class ClaudeRateLimitTest(unittest.TestCase):
             fetch_quota._account_id(_fake_jwt("user_01OTHER")),
         )
 
-        with patch.object(
-            fetch_quota,
-            "fetch_http",
-            _http_returning(429, _RATE_LIMIT, {"Retry-After": "0"}),
-        ):
+        fake = _http_returning(429, _RATE_LIMIT, {"Retry-After": "0"})
+        with patch.object(fetch_quota, "fetch_http", fake):
             out = fetch_quota.fetch_claude()
+        fake.hit(self, fetch_quota.CLAUDE_URL)
         self.assertEqual(_scoped(out), {"ok": False, "error": "http-429"})
 
     def test_credential_without_account_id_writes_no_cache(self) -> None:
@@ -582,22 +603,18 @@ class ClaudeRateLimitTest(unittest.TestCase):
         payload["claudeAiOauth"]["accessToken"] = "opaque-token"
         cred_path.write_text(json.dumps(payload))
 
-        with patch.object(
-            fetch_quota,
-            "fetch_http",
-            _http_returning(200, {"five_hour": {"utilization": 5}}),
-        ):
+        fake = _http_returning(200, {"five_hour": {"utilization": 5}})
+        with patch.object(fetch_quota, "fetch_http", fake):
             out = fetch_quota.fetch_claude()
+        fake.hit(self, fetch_quota.CLAUDE_URL)
         self.assertTrue(out["ok"])
         self.assertFalse((Path(self.tmp.name) / "claude.json").exists())
 
     def test_429_without_cache_is_error(self) -> None:
-        with patch.object(
-            fetch_quota,
-            "fetch_http",
-            _http_returning(429, _RATE_LIMIT, {"Retry-After": "0"}),
-        ):
+        fake = _http_returning(429, _RATE_LIMIT, {"Retry-After": "0"})
+        with patch.object(fetch_quota, "fetch_http", fake):
             out = fetch_quota.fetch_claude()
+        fake.hit(self, fetch_quota.CLAUDE_URL)
         self.assertEqual(_scoped(out), {"ok": False, "error": "http-429"})
 
     def test_short_retry_after_retries_once(self) -> None:
@@ -679,17 +696,15 @@ class ClaudeRateLimitTest(unittest.TestCase):
         payload["claudeAiOauth"]["expiresAt"] = 1
         cred_path.write_text(json.dumps(payload))
 
+        usage = _http_returning(401, {"error": {"type": "authentication_error"}})
         with (
             patch.object(
                 fetch_quota, "fetch_json", _http_returning_pair(429, _RATE_LIMIT)
             ),
-            patch.object(
-                fetch_quota,
-                "fetch_http",
-                _http_returning(401, {"error": {"type": "authentication_error"}}),
-            ),
+            patch.object(fetch_quota, "fetch_http", usage),
         ):
             out = fetch_quota.fetch_claude()
+        usage.hit(self, fetch_quota.CLAUDE_URL)
         self.assertEqual(_scoped(out), {"ok": False, "error": "http-429"})
 
     def test_rejected_refresh_after_401_reports_signed_out(self) -> None:
@@ -731,8 +746,10 @@ class ClaudeRateLimitTest(unittest.TestCase):
 
     def test_spend_used_as_number_does_not_crash(self) -> None:
         body = {"five_hour": {"utilization": 4}, "spend": {"used": 12}}
-        with patch.object(fetch_quota, "fetch_http", _http_returning(200, body)):
+        fake = _http_returning(200, body)
+        with patch.object(fetch_quota, "fetch_http", fake):
             out = fetch_quota.fetch_claude()
+        fake.hit(self, fetch_quota.CLAUDE_URL)
         self.assertTrue(out["ok"])
         self.assertIsNone(out["spend"]["used_minor"])
 
@@ -903,8 +920,11 @@ class ClaudeLimitsArrayTest(unittest.TestCase):
         self.addCleanup(env.__exit__, None, None, None)
 
     def _fetch(self, body: JsonDict) -> JsonDict:
-        with patch.object(fetch_quota, "fetch_http", _http_returning(200, body)):
-            return fetch_quota.fetch_claude()
+        fake = _http_returning(200, body)
+        with patch.object(fetch_quota, "fetch_http", fake):
+            out = fetch_quota.fetch_claude()
+        fake.hit(self, fetch_quota.CLAUDE_URL)
+        return out
 
     def test_weekly_and_session_meters_come_from_one_list(self) -> None:
         out = self._fetch(
@@ -2561,17 +2581,15 @@ class RefreshRunsOnceTest(unittest.TestCase):
                 "expires_in": 28800,
             }
 
+        usage = _http_returning(200, {"five_hour": {"utilization": 4}})
         with (
             patch.object(fetch_quota, "fetch_json", fake_json),
-            patch.object(
-                fetch_quota,
-                "fetch_http",
-                _http_returning(200, {"five_hour": {"utilization": 4}}),
-            ),
+            patch.object(fetch_quota, "fetch_http", usage),
         ):
             first = fetch_quota.fetch_claude()
             second = fetch_quota.fetch_claude()
 
+        usage.hit(self, fetch_quota.CLAUDE_URL)
         self.assertTrue(first["ok"])
         self.assertTrue(second["ok"])
         self.assertEqual(posts, ["old-refresh"])
@@ -2622,13 +2640,10 @@ class RefreshRunsOnceTest(unittest.TestCase):
         def run() -> None:
             results.append(fetch_quota.fetch_claude())
 
+        usage = _http_returning(200, {"five_hour": {"utilization": 4}})
         with (
             patch.object(fetch_quota, "fetch_json", fake_json),
-            patch.object(
-                fetch_quota,
-                "fetch_http",
-                _http_returning(200, {"five_hour": {"utilization": 4}}),
-            ),
+            patch.object(fetch_quota, "fetch_http", usage),
         ):
             first = threading.Thread(target=run)
             first.start()
@@ -2642,6 +2657,7 @@ class RefreshRunsOnceTest(unittest.TestCase):
         self.assertEqual(posts, ["old-refresh"])
         self.assertEqual(len(results), 2)
         self.assertTrue(all(r["ok"] for r in results))
+        self.assertEqual(len(usage.urls), 2, usage.urls)
         saved = json.loads(cred.read_text())["claudeAiOauth"]
         self.assertEqual(saved["refreshToken"], "new-refresh")
 
