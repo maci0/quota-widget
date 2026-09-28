@@ -249,6 +249,24 @@ def _xdg_dir(env: Mapping[str, str], name: str, default: Path) -> Path:
     return path if path.is_absolute() else default
 
 
+def _env_seconds(env: Mapping[str, str], name: str, default: int, maximum: int) -> int:
+    """Whole seconds. A fraction would truncate to 0 and silently disable the
+    cache the caller asked to shorten, so it is rejected instead."""
+    raw = env.get(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not value:
+        raise ConfigError(f"{name} is set but empty")
+    try:
+        seconds = int(value)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be whole seconds, got {value!r}") from exc
+    if not 0 < seconds <= maximum:
+        raise ConfigError(f"{name} must be in (0, {maximum}], got {seconds}")
+    return seconds
+
+
 def _cursor_config_root(env: Mapping[str, str], home: Path) -> Path:
     if sys.platform == "darwin":
         return home / "Library" / "Application Support"
@@ -279,8 +297,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     timeout = _env_number(
         values, "QUOTA_WIDGET_HTTP_TIMEOUT", DEFAULT_HTTP_TIMEOUT_S, MAX_HTTP_TIMEOUT_S
     )
-    max_age = _env_number(
-        values, "QUOTA_WIDGET_CACHE_MAX_AGE_S", float(DEFAULT_CACHE_MAX_AGE_S), 86400.0
+    max_age = _env_seconds(
+        values, "QUOTA_WIDGET_CACHE_MAX_AGE_S", DEFAULT_CACHE_MAX_AGE_S, 86400
     )
     global _CONFIG
     _CONFIG = Config(
@@ -306,7 +324,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         ),
         cache_dir=_env_path(values, "QUOTA_WIDGET_CACHE", cache_base / "quota-widget"),
         http_timeout_s=timeout,
-        cache_max_age_s=int(max_age),
+        cache_max_age_s=max_age,
     )
     return _CONFIG
 
@@ -1085,7 +1103,9 @@ def fetch_grok() -> JsonDict:
 
     account = _account_id(state["entry"].get("key"), auth_key)
     if not periods:
-        status = st_week or st_month or 0
+        # Neither call yielded a meter; report the failure, not the call that
+        # happened to answer 200 with a payload that had no period in it.
+        status = next((s for s in (st_week, st_month) if s != 200), 0)
         if status == 401:
             return {"ok": False, "error": "http-401"}
         if _http_retryable(status):
@@ -1201,8 +1221,7 @@ def _codex_token_expired(tokens: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool
     exp_ms = _jwt_exp_ms(access)
     if exp_ms is None:
         return False  # opaque token: the usage call is the only truth
-    now_ms = int(dt.datetime.now(dt.UTC).timestamp() * 1000)
-    return exp_ms <= now_ms + skew_ms
+    return exp_ms <= now_ms() + skew_ms
 
 
 def _refresh_codex(auth: JsonDict) -> JsonDict | None:

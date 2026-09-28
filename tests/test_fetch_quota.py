@@ -204,6 +204,18 @@ class ClockTest(unittest.TestCase):
             fetch_quota.now_ms()
         self.assertIn(fetch_quota.NOW_MS_ENV, str(ctx.exception))
 
+    def test_codex_expiry_reads_the_pinned_clock(self) -> None:
+        # Expires 30 s after the pinned instant: expired on the pinned clock,
+        # still valid on the real one whenever the two disagree.
+        exp_s = (PINNED_NOW_MS + 30_000) // 1000
+        tokens = {"access_token": _jwt_with_exp(exp_s)}
+        self.assertTrue(fetch_quota._codex_token_expired(tokens))
+
+    def test_codex_expiry_skew_counts_from_the_pinned_clock(self) -> None:
+        exp_s = (PINNED_NOW_MS + fetch_quota.TOKEN_SKEW_S * 1000 + 1000) // 1000
+        tokens = {"access_token": _jwt_with_exp(exp_s)}
+        self.assertFalse(fetch_quota._codex_token_expired(tokens))
+
     def test_cache_expires_exactly_at_the_max_age(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -340,7 +352,7 @@ class ClaudeRateLimitTest(unittest.TestCase):
         self.assertEqual(out, {"ok": False, "error": "http-429"})
 
     def test_credential_without_account_id_writes_no_cache(self) -> None:
-        cred_path = fetch_quota.CLAUDE_CRED
+        cred_path = fetch_quota.config().claude_cred
         payload = json.loads(cred_path.read_text())
         payload["claudeAiOauth"]["accessToken"] = "opaque-token"
         cred_path.write_text(json.dumps(payload))
@@ -668,6 +680,49 @@ class GrokPeriodTest(unittest.TestCase):
         self.assertEqual(parsed["util"], 12.5)
 
 
+class GrokNoPeriodTest(unittest.TestCase):
+    """A 200 with no meter in it must not be reported as the failure."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        auth = Path(tmp.name) / "grok.json"
+        auth.write_text(json.dumps({"cli::c": {"key": "tok"}}))
+        self.env = config_env(
+            QUOTA_WIDGET_CACHE=tmp.name, QUOTA_WIDGET_GROK_AUTH=str(auth)
+        )
+        self.env.__enter__()
+        self.addCleanup(self.env.__exit__, None, None, None)
+
+    def _fetch(self, week: int, week_body: object, month: int) -> JsonDict:
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            if "format=credits" in url:
+                return week, week_body
+            return month, {"config": {"used": 1, "monthlyLimit": 0}}
+
+        with patch.object(fetch_quota, "fetch_json", fake_json):
+            return fetch_quota.fetch_grok()
+
+    def test_ok_call_with_no_period_reports_the_failing_status(self) -> None:
+        out = self._fetch(200, {"config": {"used": 5}}, 503)
+        self.assertEqual(out, {"ok": False, "error": "http-503"})
+
+    def test_signed_out_reports_401(self) -> None:
+        out = self._fetch(401, None, 200)
+        self.assertEqual(out, {"ok": False, "error": "http-401"})
+
+    def test_offline_reports_net(self) -> None:
+        out = self._fetch(0, None, 0)
+        self.assertEqual(out, {"ok": False, "error": "net"})
+
+
 class JwtGuardTest(unittest.TestCase):
     def test_array_payload_is_ignored(self) -> None:
         payload = base64.urlsafe_b64encode(b"[1,2]").rstrip(b"=").decode()
@@ -963,6 +1018,11 @@ class ConfigTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(fetch_quota.ConfigError):
                 fetch_quota.load_config({"QUOTA_WIDGET_HTTP_TIMEOUT": bad})
 
+    def test_cache_max_age_must_be_whole_seconds_in_range(self) -> None:
+        for bad in ("twelve", "0", "-1", "86401", "0.5"):
+            with self.subTest(bad=bad), self.assertRaises(fetch_quota.ConfigError):
+                fetch_quota.load_config({"QUOTA_WIDGET_CACHE_MAX_AGE_S": bad})
+
     def test_describe_exposes_paths_only(self) -> None:
         described = fetch_quota.load_config(
             {"QUOTA_WIDGET_HOME": "/home/widget"}
@@ -1210,7 +1270,7 @@ class ReplayTest(unittest.TestCase):
             contextlib.redirect_stdout(out),
             self.assertRaises(SystemExit),
         ):
-            fetch_quota.main()
+            fetch_quota.main([])
         return out.getvalue()
 
     def test_same_inputs_replay_byte_for_byte(self) -> None:
@@ -1250,10 +1310,11 @@ class RefreshRunsOnceTest(unittest.TestCase):
         os.environ["QUOTA_WIDGET_CACHE"] = self.tmp.name
         self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
 
-    def _point(self, name: str, path: Path) -> None:
-        original = getattr(fetch_quota, name)
-        setattr(fetch_quota, name, path)
-        self.addCleanup(lambda: setattr(fetch_quota, name, original))
+    def _point(self, env: str, path: Path) -> None:
+        os.environ[env] = str(path)
+        self.addCleanup(lambda: os.environ.pop(env, None))
+        fetch_quota.load_config()
+        self.addCleanup(fetch_quota.load_config)
 
     def test_claude_second_poll_reuses_rotated_token(self) -> None:
         cred = Path(self.tmp.name) / "cred.json"

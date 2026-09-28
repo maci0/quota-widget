@@ -32,9 +32,7 @@ class MainQmlAccessibilityTest(unittest.TestCase):
         self.assertIn("Accessible.description: [", QML_SOURCE)
 
     def test_panel_widget_is_keyboard_operable(self) -> None:
-        self.assertIn(
-            "Keys.onSpacePressed: root.expanded = !root.expanded", QML_SOURCE
-        )
+        self.assertIn("Keys.onSpacePressed: root.expanded = !root.expanded", QML_SOURCE)
         self.assertIn(
             "Keys.onReturnPressed: root.expanded = !root.expanded", QML_SOURCE
         )

@@ -53,7 +53,7 @@ systemctl --user restart plasma-plasmashell.service
 
 Tokens leave the machine only for those HTTPS calls. Grok, Codex, and Claude OAuth tokens are refreshed in place when near expiry. Every provider rotates the refresh token it hands out, so refreshes run under an advisory lock in `~/.cache/quota-widget` and re-read the credential file once they hold it: a second poll (a second widget instance, a manual run, the install smoke test) reuses the token the first run already wrote instead of rotating it a second time and invalidating it.
 
-Claude's usage API 429s unknown User-Agents. The fetcher sends Claude Code's User-Agent on that request, waits only for a short `Retry-After`, and reuses `~/.cache/quota-widget` when a usage call still 429s or 5xxs. Grok, Codex, and Cursor use that cache too. Each entry is stamped with the account that produced it and is read only by that account, for at most 2 hours; a credential that yields no account id caches nothing. An expired Claude token whose refresh is also 429 is shown as rate-limited, not signed-out.
+Claude's usage API 429s unknown User-Agents. The fetcher sends Claude Code's User-Agent on that request, waits only for a short `Retry-After`, and reuses `~/.cache/quota-widget` when a usage call still 429s or 5xxs. Grok, Codex, and Cursor use that cache too. Each entry is stamped with the account that produced it and is read only by that account, for at most 24 hours; a credential that yields no account id caches nothing. An expired Claude token whose refresh is also 429 is shown as rate-limited, not signed-out.
 
 Smoke-test without Plasma:
 
@@ -126,7 +126,7 @@ reason on stderr; no provider runs with a half-applied config.
 | `QUOTA_WIDGET_CODEX_AUTH` | `$HOME/.codex/auth.json` |
 | `QUOTA_WIDGET_GROK_AUTH` | `$HOME/.grok/auth.json` |
 | `QUOTA_WIDGET_CACHE` | `$XDG_CACHE_HOME/quota-widget` |
-| `QUOTA_WIDGET_CACHE_MAX_AGE_S` | `86400` (0 < value, seconds) |
+| `QUOTA_WIDGET_CACHE_MAX_AGE_S` | `86400` (0 < value <= 86400, whole seconds) |
 | `QUOTA_WIDGET_HTTP_TIMEOUT` | `12.0` (0 < value <= 300, seconds) |
 
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` set to a relative path are ignored, per
