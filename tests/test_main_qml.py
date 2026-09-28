@@ -277,6 +277,21 @@ class MainQmlPollingTest(unittest.TestCase):
         self.assertIn("root.fetching = false", block)
         self.assertIn("root.userRefreshing = false", block)
 
+    def test_a_kept_reading_is_copied_before_it_is_marked_stale(self) -> None:
+        # mergeProv returned the object the property already held, so the card
+        # kept rendering it as live: assigning the same object to a var
+        # property raises no change signal for the `stale` bindings to follow.
+        self.assertIn("return Object.assign({}, oldv, { stale: true })", QML_SOURCE)
+        self.assertNotIn("oldv.stale = true", QML_SOURCE)
+
+    def test_only_the_same_accounts_reading_is_kept(self) -> None:
+        # The fetcher scopes its cache by account digest and carries that digest
+        # in every payload. The panel kept its own copy across an account switch
+        # instead, so a failed first poll showed the previous account's plan and
+        # usage for as long as the window allowed.
+        merge = QML_SOURCE.split("function mergeProv(", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("oldv.account && oldv.account === newv.account", merge)
+
 
 class MainQmlStaleWindowTest(unittest.TestCase):
     """The keep-while-failing window is the fetcher's setting, not a second

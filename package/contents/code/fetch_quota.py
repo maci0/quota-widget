@@ -151,14 +151,28 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding=JSON_ENCODING)
 
 
-def _http_retryable(status: int) -> bool:
-    return status in (429, 503) or status >= 500
+def _transient_failure(status: int) -> bool:
+    """Whether a cached reading beats reporting this failure.
+
+    Status 0 is a transport failure, not an HTTP status: the request never
+    reached the vendor. The panel already keeps its last good reading through
+    one, so a machine that is offline at the first poll of a session would
+    otherwise show a blank card where the same reading is sitting on disk.
+    A 401 or 403 is a decision by the vendor and is reported as one.
+    """
+    return status == 0 or status in (429, 503) or status >= 500
 
 
-def _http_error(status: int) -> JsonDict:
+def _http_error(status: int, account: str | None) -> JsonDict:
     """Failure payload for a provider call. Status 0 is the fetcher's own code
-    for a request that never got a response, and reads as "net" to the panel."""
-    return {"ok": False, "error": f"http-{status}" if status else "net"}
+    for a request that never got a response, and reads as "net" to the panel.
+    A failure names the account it was made for like a success does, so the
+    panel keeps the card scoped to the account that is still signed in."""
+    return {
+        "ok": False,
+        "error": f"http-{status}" if status else "net",
+        "account": account,
+    }
 
 
 class ConfigError(ValueError):
@@ -1150,14 +1164,14 @@ def fetch_claude() -> JsonDict:
         # rejected is: only the card subtitle tells those apart, and a user
         # whose session was revoked has to be told to log in again.
         if rate_limited:
-            return {"ok": False, "error": "http-429"}
-        return {"ok": False, "error": "http-401"}
+            return {"ok": False, "error": "http-429", "account": account}
+        return {"ok": False, "error": "http-401", "account": account}
     if status != 200 or not isinstance(data, dict):
-        if _http_retryable(status):
+        if _transient_failure(status):
             cached = _stale_cache("claude", account)
             if cached:
                 return cached
-        return _http_error(status)
+        return _http_error(status, account)
 
     plan = plan_label(oauth.get("subscriptionType"), oauth.get("rateLimitTier"))
     weekly = _claude_weekly(data)
@@ -1174,6 +1188,7 @@ def fetch_claude() -> JsonDict:
     result = _reading(
         {
             "ok": True,
+            "account": account,
             "plan": plan,
             "session": {
                 "util": session_util,
@@ -1471,14 +1486,16 @@ def fetch_grok() -> JsonDict:
         # happened to answer 200 with a payload that had no period in it.
         status = next((s for s in (st_week, st_month) if s != 200), 0)
         if status == 401:
-            return {"ok": False, "error": "http-401"}
-        if _http_retryable(status):
+            return {"ok": False, "error": "http-401", "account": account}
+        if _transient_failure(status):
             cached = _stale_cache("grok", account)
             if cached:
                 return cached
-        return _http_error(status)
+        return _http_error(status, account)
 
-    result = _reading({"ok": True, "plan": "Grok", "periods": periods})
+    result = _reading(
+        {"ok": True, "account": account, "plan": "Grok", "periods": periods}
+    )
     _write_provider_cache("grok", result, account)
     return result
 
@@ -1681,11 +1698,11 @@ def fetch_codex() -> JsonDict:
 
     account = _account_id(access, str(account_id) if account_id else None)
     if status != 200 or not isinstance(data, dict):
-        if _http_retryable(status):
+        if _transient_failure(status):
             cached = _stale_cache("codex", account)
             if cached:
                 return cached
-        return _http_error(status)
+        return _http_error(status, account)
 
     plan_type = data.get("plan_type") or "Codex"
     plan = str(plan_type).replace("_", " ").title()
@@ -1718,6 +1735,7 @@ def fetch_codex() -> JsonDict:
     result = _reading(
         {
             "ok": True,
+            "account": account,
             "plan": plan,
             "allowed": bool(rate.get("allowed")),
             "limit_reached": bool(rate.get("limit_reached")),
@@ -2033,16 +2051,18 @@ def fetch_cursor() -> JsonDict:
         # Report the status the vendor sent. A 403 is an edge rejection of the
         # request, not a signed-out session, and labelling it 401 sends the
         # user to re-authenticate for nothing.
-        return {"ok": False, "error": f"http-{status}"}
-    if _http_retryable(status):
+        return {"ok": False, "error": f"http-{status}", "account": account}
+    if _transient_failure(status):
         cached = _stale_cache("cursor", account)
         if cached:
             return cached
-        return _http_error(status)
+        return _http_error(status, account)
     if status != 200 or not isinstance(data, dict):
-        return _http_error(status)
+        return _http_error(status, account)
 
-    result = _reading(parse_cursor_summary(data, auth.get("plan")))
+    summary = parse_cursor_summary(data, auth.get("plan"))
+    summary["account"] = account
+    result = _reading(summary)
     _write_provider_cache("cursor", result, account)
     return result
 

@@ -45,7 +45,7 @@ no signing key, and can only read what its own user can already read.
 | OAuth token endpoints | `fetch_quota.py:166` (two Claude hosts), `fetch_quota.py:175` (OpenAI), and the Grok endpoint discovered at `fetch_quota.py:1080` | JSON bodies, plus `Retry-After` headers parsed at `parse_retry_after`, `fetch_quota.py:475` |
 | CLI arguments | `main`, `fetch_quota.py:1885` | Only `--print-config` is accepted; any other argument exits 2 |
 | Poll interval | `package/contents/ui/main.qml:35`, clamped to 30..3600 s | Widget setting |
-| Stale window in the UI | `package/contents/ui/main.qml:43` (`staleKeepMs`) | Fixed, mirrors `DEFAULT_CACHE_MAX_AGE_S` |
+| Stale window in the UI | `package/contents/ui/main.qml:48` (`staleKeepMs`) | Fixed, mirrors `DEFAULT_CACHE_MAX_AGE_S` |
 
 ### Outbound requests
 
@@ -104,7 +104,7 @@ Seven distinct hosts can receive a request, not four:
 | --- | --- | --- |
 | Claude, Codex, Grok OAuth access and refresh tokens | `~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.grok/auth.json` | Account takeover and billable spend on three vendor accounts; refresh-token reuse also signs the user out of the CLI |
 | Cursor session token | Cursor `state.vscdb` and `~/.config/cursor/auth.json` | Read-only access to the Cursor account's usage; the token is not refreshed by the widget |
-| Account identity | JWT `sub`, WorkOS user id, `ChatGPT-Account-Id` header | These are sent to the vendor as request context and hashed into the cache key; they never leave in the emitted JSON |
+| Account identity | JWT `sub`, WorkOS user id, `ChatGPT-Account-Id` header | These are sent to the vendor as request context and hashed into the cache key. Only the 16-character digest reaches the emitted JSON, as the `account` field the panel scopes a kept reading by; the value itself never does |
 | Journal contents | Plasma journal, `.scratch/smoke.err` | Whatever a `warn` line or a traceback carried; the journal is not deleted by the widget and is readable after the session ends |
 | Usage and spend figures | `~/.cache/quota-widget/*.json`, panel | Low value alone: plan name, utilization percentages, reset times, credit balances |
 | Panel correctness | `package/contents/ui/main.qml` | A wrong or stale number is shown as live, which is a decision the user acts on |
@@ -230,7 +230,8 @@ Seven distinct hosts can receive a request, not four:
 | Environment numbers bounded at load | `_env_number`, `fetch_quota.py:277`; `_env_seconds`, `fetch_quota.py:307` | A hostile or typo'd timeout or retention value |
 | Refresh serialized per cache directory | `_refresh_lock`, `fetch_quota.py:661` | Double refresh-token rotation |
 | Read-modify-write with re-read verification | `_merge_write_json`, `fetch_quota.py:536` | Clobbering a concurrent CLI refresh |
-| Provider cache scoped to a hashed account id | `_account_id`, `fetch_quota.py:572`; `_read_provider_cache`, `fetch_quota.py:599` | One account's numbers being shown to another on a shared machine |
+| Provider cache scoped to a hashed account id | `_account_id`, `fetch_quota.py:667`; `_read_provider_cache`, `fetch_quota.py:694` | One account's numbers being shown to another on a shared machine |
+| Panel reading kept only for the same account | `mergeProv`, `package/contents/ui/main.qml:199` | The panel keeping a card across an account switch, which the fetcher's scoped cache refuses to do |
 | Cache expiry deletes the file on read | `fetch_quota.py:619` | Retention beyond the stated window |
 | Failed HTTP bodies drained and discarded | `fetch_http`, `fetch_quota.py:743` | Account identifiers echoed in an error reaching the panel or a file |
 | One provider's failure cannot abort the others | `_safe_fetch`, `fetch_quota.py:1862` | Availability of the whole panel |
@@ -264,8 +265,11 @@ second party on the same machine or on the network path:
   extension, a malicious npm postinstall, or another agent run as the user
   obtains four live vendor sessions from one JSON file.
 - **A shared machine with two accounts.** Mitigated by the account-scoped cache
-  (`fetch_quota.py:572`); a credential that yields no account id caches
-  nothing, so the failure mode is "no reading" rather than "wrong reading".
+  (`fetch_quota.py:667`) and by the panel, which keeps its own copy of a
+  reading only while the failing poll names the same account digest
+  (`mergeProv`, `package/contents/ui/main.qml:199`); a credential that yields
+  no account id caches nothing, so the failure mode is "no reading" rather than
+  "wrong reading".
 - **A poisoned environment.** A `QUOTA_WIDGET_CACHE` pointed at a directory the
   attacker controls lets them pre-seed a payload. The account id must still
   match, and the entry must be inside the freshness window, so a seeded entry

@@ -217,6 +217,11 @@ PlasmoidItem {
     // A kept reading is aged by its own fetched_ms, the instant the fetcher took
     // it, so replaying a cached payload cannot keep it alive past
     // DEFAULT_CACHE_MAX_AGE_S the way an arrival clock would.
+    // Only the same account's reading is kept: `account` is the digest the
+    // fetcher scopes its own cache by, and a poll that names a different one
+    // (or none, because the credential went away) is another account's failure,
+    // not this account's. Keeping it there would show one account's plan and
+    // usage to the next one signed in on the same machine.
     function mergeProv(oldv, newv) {
         if (!newv) return oldv
         if (newv.ok) return newv
@@ -224,9 +229,12 @@ PlasmoidItem {
         const transient = e === "net" || e === "exec"
             || e.indexOf("429") >= 0 || e.indexOf("http-5") === 0
         if (transient && oldv && oldv.ok && oldv.fetched_ms
+                && oldv.account && oldv.account === newv.account
                 && root.nowMs - oldv.fetched_ms <= root.staleKeepMs) {
-            oldv.stale = true
-            return oldv
+            // A copy, not the kept reading itself: assigning the same object
+            // back to the property raises no change signal, so a card that
+            // binds on `stale` would keep rendering the fresh reading.
+            return Object.assign({}, oldv, { stale: true })
         }
         return newv
     }
