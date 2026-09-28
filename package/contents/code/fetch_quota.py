@@ -129,8 +129,10 @@ JSON_ENCODING = "utf-8"
 # this and hash to the same account scope; left raw they are two accounts.
 NORMALIZATION_FORM: Literal["NFC"] = "NFC"
 
-# Bounds of the datetime range now_utc() can represent, in epoch-ms. A pinned
-# clock outside them is a config error, not a poll-time crash.
+# Bottom and top of the datetime range now_utc() can represent, in epoch-ms. A
+# pinned clock outside it is a config error, not a poll-time crash. The bottom
+# is the epoch, which the "before the epoch" check above already refuses, so in
+# the range test only the top bound can fire.
 MIN_PINNED_MS = -62_135_596_800_000  # 0001-01-01T00:00:00Z
 MAX_PINNED_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z
 
@@ -1263,8 +1265,9 @@ def fetch_http(
     offline panel is diagnosable without rerunning the fetcher by hand; it
     never reaches stdout, which the panel parses as the only payload.
     """
-    # Every caller passes an https vendor constant, so no scheme check is
-    # needed here; the URL is not user or network input.
+    # Every caller passes either an https vendor constant or a token endpoint
+    # _is_grok_token_url has already checked, so the scheme is settled before
+    # here and the URL is never user input.
     req = urllib.request.Request(  # noqa: S310
         url, data=data, headers=headers, method=method
     )
@@ -1594,7 +1597,7 @@ def _load_grok_auth() -> tuple[str, JsonDict] | None:
         return None
     if not isinstance(store, dict) or not store:
         return None
-    # Prefer the entry whose token lives longest
+    # Prefer the entry whose token lives longest, by the instant it expires.
     best_key: str | None = None
     best_entry: JsonDict | None = None
     best_exp: dt.datetime | None = None
@@ -1774,7 +1777,8 @@ def _parse_grok_period(cfg: JsonDict) -> JsonDict:
         used = limit = None
         end_ms = iso_to_ms(period.get("end") or cfg.get("billingPeriodEnd"))
     else:
-        # Legacy monthly shape: $ used of $ limit (values in cents).
+        # Legacy monthly shape: $ used of $ limit (dollars on the wire, which
+        # _money_val turns into the cents the payload carries).
         used = _money_val(cfg.get("used"))
         limit = _money_val(_first_present(cfg, "monthlyLimit", "monthly_limit"))
         # A limit of zero or less is no limit; dividing by it would blow up or
@@ -2043,9 +2047,10 @@ def fetch_codex() -> JsonDict:
     """One Codex reading, or a failure the panel can label.
 
     `error` is "no-token" when the auth file holds no usable access token, and
-    otherwise the status _http_error names; the "http-401" a rejected refresh
-    returns names no account, because there is no surviving token to scope one
-    by. A transient status serves the cached reading instead, marked "stale".
+    otherwise the status _http_error names. The "http-401" a rejected refresh
+    returns names an account too: the digest is taken from the token the call
+    was made with, before the call, and the `sub` claim survives rotation. A
+    transient status serves the cached reading instead, marked "stale".
     """
     if not config().codex_auth.is_file():
         return _failure("no-token")
@@ -2310,7 +2315,11 @@ def _read_cursor_state_db(path: Path) -> tuple[str, str] | None:
 
 
 def _load_cursor_auth() -> dict[str, str] | None:
-    """Return {token, plan} from the cursor-agent auth.json, or the IDE DB."""
+    """Return {token, sub, plan} from the cursor-agent auth.json, or the IDE DB.
+
+    An entry whose token names no account carries no `sub` and is skipped, so
+    the next source is read rather than scoped to a blank account.
+    """
     cfg = config()
     candidates: list[tuple[Path, Callable[[Path], tuple[str, str] | None]]] = [
         (cfg.cursor_auth, _read_cursor_auth_json),
@@ -2487,8 +2496,9 @@ def fetch_cursor() -> JsonDict:
 USAGE_LINE = "usage: fetch_quota.py [--print-config | --clear-cache] [--help]"
 
 # The env table above is the single list of knobs, so --help cannot drift from
-# what load_config accepts. A name wider than the column is not truncated: the
-# longest is the left column and the help is monospace-ish prose, not a table.
+# what load_config accepts. The column is padded, not truncated, and is wide
+# enough for the longest name, so no name is cut; the help is monospace-ish
+# prose, not a table.
 ENV_HELP = "\n".join(f"  {name:<30} {help_text}" for name, help_text in ENV_DOCS)
 
 HELP = f"""{USAGE_LINE}
@@ -2569,9 +2579,9 @@ def main(argv: list[str] | None = None) -> None:
 
     `--print-config` and `--clear-cache` stop after the config check, before
     any provider runs: one prints the resolved config, the other erases the
-    cache. Any other argument is a usage error. The process always exits
-    through emit(), so a run that crashed on its way there still leaves the
-    panel a payload it can read.
+    cache. Any other argument is a usage error. Every run that got as far as a
+    provider exits through emit(), so one that crashed on its way there still
+    leaves the panel a payload it can read.
     """
     _use_utf8_streams()
     args = sys.argv[1:] if argv is None else argv

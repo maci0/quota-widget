@@ -59,7 +59,7 @@ systemctl --user restart plasma-plasmashell.service
 | Codex | `GET https://chatgpt.com/backend-api/wham/usage` | Codex ChatGPT OAuth |
 | Grok | `GET https://cli-chat-proxy.grok.com/v1/billing` | Grok OIDC |
 
-Tokens leave the machine only for those HTTPS calls, and for the OAuth token endpoints used to refresh them: `https://platform.claude.com/v1/oauth/token` (with `https://console.anthropic.com/v1/oauth/token` as fallback), `https://auth.openai.com/oauth/token`, and the token endpoint Grok's `https://auth.x.ai/.well-known/openid-configuration` document names. Grok, Codex, and Claude OAuth tokens are refreshed in place when near expiry. Every provider rotates the refresh token it hands out, so refreshes run under an advisory lock in `~/.cache/quota-widget` and re-read the credential file once they hold it: a second poll (a second widget instance, a manual run, the install smoke test) reuses the token the first run already wrote instead of rotating it a second time and invalidating it.
+Tokens leave the machine only for those HTTPS calls, and for the OAuth token endpoints used to refresh them: `https://platform.claude.com/v1/oauth/token` (with `https://console.anthropic.com/v1/oauth/token` as fallback), `https://auth.openai.com/oauth/token`, and the token endpoint Grok's `https://auth.x.ai/.well-known/openid-configuration` document names. Grok, Codex, and Claude OAuth tokens are refreshed in place when near expiry. Each of those three rotates the refresh token it hands out (Cursor has no refresh path, only a session token), so refreshes run under an advisory lock in `~/.cache/quota-widget` and re-read the credential file once they hold it: a second poll (a second widget instance, a manual run, the install smoke test) reuses the token the first run already wrote instead of rotating it a second time and invalidating it.
 
 Claude's usage API 429s unknown User-Agents. The fetcher sends Claude Code's User-Agent on that request, waits only for a short `Retry-After`, and reuses `~/.cache/quota-widget` when a usage call still 429s, 5xxs, or never reaches the vendor. Grok, Codex, and Cursor use that cache too. Each entry is stamped with a digest of the account that produced it and is read only by that account, for at most 24 hours; a credential that yields no account id caches nothing. The cache is served when a usage call is rate-limited, fails with a 5xx, or never reaches the vendor at all. An expired Claude token whose refresh is also 429 is shown as rate-limited, not signed-out. A poll that runs long is dropped by the panel but can still answer after the poll that replaced it, and an entry is never replaced by a reading taken earlier: the cache and the cards only move forward, so a late run cannot rewind them.
 
@@ -150,7 +150,7 @@ reason on stderr; no provider runs with a half-applied config.
 | `QUOTA_WIDGET_CACHE` | `$XDG_CACHE_HOME/quota-widget` |
 | `QUOTA_WIDGET_CACHE_MAX_AGE_S` | `86400` (0 < value <= 86400, whole seconds) |
 | `QUOTA_WIDGET_HTTP_TIMEOUT` | `12.0` (0 < value <= 300, seconds) |
-| `QUOTA_WIDGET_NOW_MS` | unset (integer epoch milliseconds in datetime range; tests and smoke runs only) |
+| `QUOTA_WIDGET_NOW_MS` | unset (integer epoch milliseconds, from 0 to `253402300799999`; tests and smoke runs only) |
 
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` set to a relative path are ignored, per
 the [base directory spec](https://specifications.freedesktop.org/basedir-spec/latest/).
@@ -196,7 +196,7 @@ Token writes go through a temp file that is flushed and renamed, then the direct
 
 ## Data and privacy
 
-The widget is local-only. It has no telemetry, no analytics, no crash reporting, and no network calls other than the four usage endpoints and the OAuth token refreshes named in the fetching section above. It never sends a request to a server it does not already name there.
+The widget is local-only. It has no telemetry, no analytics, no crash reporting, and no network calls other than the four usage endpoints, the OAuth token refreshes, and Grok's OIDC discovery document, all named in the fetching section above. It never sends a request to a server it does not already name there.
 
 What the fetcher reads from your account is what a usage bar needs: plan name, period percentages, reset times, and credit balances. Account identifiers (the WorkOS user id in the Cursor session, the ChatGPT account id header) are used to authorize a request. The raw value is never written to the cache, the emitted JSON, or any log; the cache stores a 16-character digest of it taken under a per-installation key kept beside the cache entries, which is what scopes an entry to one account, and that digest (never the value) travels in each provider payload as `account` so the panel scopes the reading it keeps through a failed poll the same way. A poll whose account digest differs from the one a card is holding drops it instead of showing another account's numbers. The card shows a status such as `http-429` and nothing more. Every failed provider also carries `transient`, the fetcher's own classification of whether a cached reading beats reporting the failure, which is what the panel acts on when it decides to hold a card; the cause behind a failed call goes to stderr, which is the journal under Plasma, and that line carries the URL and the error, never a response body: the body of a failed HTTP response is drained and discarded rather than captured. Every line the fetcher prints spells a path under your home directory as `~`, so the account name in it does not outlive the poll in the journal or on the card. A provider that crashes instead of returning writes its exception text and a traceback to the same stream, and that text is built from whatever the vendor sent, so the journal is not a place to paste a value you care about. `QUOTA_WIDGET_NOW_MS` pins the fetcher's clock, and is for tests and one-off runs only; leave it unset in a normal session. `install.sh` writes one run's output to `.scratch/smoke.json` and the failure detail to `.scratch/smoke.err` in the checkout, both gitignored.
 
@@ -205,7 +205,7 @@ Retention:
 | Data | Where | How long |
 | --- | --- | --- |
 | Usage payload cache | `~/.cache/quota-widget/*.json` | At most 24 hours (`DEFAULT_CACHE_MAX_AGE_S`, overridable with `QUOTA_WIDGET_CACHE_MAX_AGE_S`); an expired file is deleted when it is next read, whichever account asks |
-| Account digest key | `~/.cache/quota-widget/account-salt` | Created on the first poll and never replaced, so every reading on the machine is scoped by one key; removed by `--clear-cache` |
+| Account digest key | `~/.cache/quota-widget/account-salt` | Created on the first poll that reaches an account digest, so a machine with no CLI signed in has none yet, and never replaced, so every reading on the machine is scoped by one key; removed by `--clear-cache` |
 | OAuth tokens | vendor token files above | Rotated by the vendor's own expiry, written back only on refresh |
 
 Both are written `0600` under your home directory, and the cache directory is `0700`, tightened on every poll if it was created with a wider mode. To erase everything the widget keeps, run

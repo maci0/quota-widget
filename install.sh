@@ -78,7 +78,7 @@ SCRATCH="$ROOT/.scratch"
 
 # DEST may hold a copy put there by Plasma Discover, by a distro package, or
 # unpacked by hand. Removing a directory this script did not create loses
-# whatever the user keeps in it, so both install and uninstall ask first.
+# whatever the user keeps in it, so both install and uninstall stop instead.
 dest_is_ours() {
   [[ -L "$DEST" ]] && return 0
   [[ -f "$DEST/metadata.json" ]] || return 1

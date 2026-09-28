@@ -100,7 +100,8 @@ PlasmoidItem {
     readonly property bool gaugeView: !!Plasmoid.configuration.gaugeView
     readonly property bool firstLoad: root.noData() && root.errorMsg === ""
     // A poll is in flight. exec.poll() drops a second one, so the header
-    // disables refresh and shows the spinner while the run is out.
+    // disables refresh while any run is out; the spinner is narrower than
+    // that, and marks only a run the reader started.
     property bool fetching: false
     property bool userRefreshing: false
 
@@ -227,8 +228,9 @@ PlasmoidItem {
     // but never with an older one: a run the poll dropped for running long can
     // still answer, and merging it would rewind a card to a past reading.
     // A kept reading is aged by its own fetched_ms, the instant the fetcher took
-    // it, so replaying a cached payload cannot keep it alive past
-    // DEFAULT_CACHE_MAX_AGE_S the way an arrival clock would.
+    // it, so replaying a cached payload cannot keep it alive past staleKeepMs,
+    // the panel's copy of the fetcher's DEFAULT_CACHE_MAX_AGE_S or of the
+    // cache_max_age_s a poll reported, the way an arrival clock would.
     // Only the same account's reading is kept: `account` is the digest the
     // fetcher scopes its own cache by, and a poll that names a different one
     // (or none, because the credential went away) is another account's failure,
@@ -1185,7 +1187,7 @@ PlasmoidItem {
         implicitWidth: root.gaugeView ? gaugeSize : (parent ? parent.width : gaugeSize)
         Layout.alignment: root.gaugeView ? Qt.AlignHCenter : Qt.AlignLeft
 
-        // list (bars)
+        // bars
         RowLayout {
             visible: !root.gaugeView
             Layout.fillWidth: true
@@ -1250,7 +1252,7 @@ PlasmoidItem {
             }
         }
 
-        // gauge
+        // gauges
         Item {
             visible: root.gaugeView
             Layout.alignment: Qt.AlignHCenter

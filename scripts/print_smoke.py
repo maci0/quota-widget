@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print a one-line summary of a fetch_quota.py JSON dump."""
+"""Print a one-line-per-provider summary of a fetch_quota.py JSON dump."""
 
 from __future__ import annotations
 
