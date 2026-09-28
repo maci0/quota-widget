@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 import unittest
-from collections.abc import Iterator
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from project_paths import project_root
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 QML_PATH: Final = project_root() / "package" / "contents" / "ui" / "main.qml"
 QML_SOURCE: Final = QML_PATH.read_text()

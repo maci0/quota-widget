@@ -48,15 +48,17 @@ from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from email.message import Message
-from http.client import HTTPMessage
+from functools import lru_cache
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Literal, TypeAlias
 from urllib.request import pathname2url
 
+if TYPE_CHECKING:
+    from http.client import HTTPMessage
+    from types import ModuleType
+
 # flock is POSIX-only; on Windows the refresh lock degrades to no lock, which
 # costs a possible double refresh, not a broken poll.
-if TYPE_CHECKING:
-    from types import ModuleType
 
 fcntl: ModuleType | None
 try:
@@ -400,6 +402,9 @@ GROK_OIDC_HOST = "auth.x.ai"
 # header set onto a redirect target, these two included.
 CREDENTIAL_HEADERS = frozenset({"authorization", "cookie"})
 
+# The usage multiplier a Claude rate-limit tier spells ("max_20x").
+TIER_MULTIPLIER = re.compile(r"(\d+)x")
+
 
 # ── configuration ───────────────────────────────────────────────────────────
 # Every knob is an environment variable read once at startup and validated
@@ -697,7 +702,7 @@ def plan_label(subscription: str | None, tier: str | None) -> str:
     sub = (subscription or "").lower()
     tier = (tier or "").lower()
 
-    m = re.search(r"(\d+)x", tier)
+    m = TIER_MULTIPLIER.search(tier)
     mult = m.group(1) if m else None
 
     if "max" in sub or "max" in tier:
@@ -1721,6 +1726,16 @@ def fetch_grok() -> JsonDict:
 # ── Codex ───────────────────────────────────────────────────────────────────
 
 
+# One poll reads three claims off the same Codex access token (expiry, account
+# id, `sub`) and two off a Cursor one, and each read was a base64 pass plus a
+# JSON parse of a kilobyte or two. The memo makes each token decode once. A
+# poll is a fresh process every two minutes, so the bound only has to cover
+# the tokens of one run, and the result is shared: the sole reader below never
+# mutates it.
+JWT_MEMO_SIZE = 8
+
+
+@lru_cache(maxsize=JWT_MEMO_SIZE)
 def _jwt_payload(token: str) -> JsonDict | None:
     try:
         parts = token.split(".")
