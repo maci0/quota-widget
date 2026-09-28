@@ -159,6 +159,16 @@ PlasmoidItem {
         onTriggered: root.nowMs = Date.now()
     }
 
+    // A poll is a child process, and the other two exits (onNewData, the
+    // poll-timeout drop) are the only ones that ran. Removing the widget
+    // destroys this object while a run is still out: nothing else ever sees
+    // that run finish, so the fetcher would outlive the QML that started it.
+    Component.onDestruction: {
+        const held = exec.connectedSources
+        for (let i = 0; i < held.length; i++)
+            exec.disconnectSource(held[i])
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────
     function noData() {
         return !root.claude && !root.cursor && !root.grok && !root.codex

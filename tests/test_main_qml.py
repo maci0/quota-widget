@@ -159,6 +159,13 @@ class MainQmlPollingTest(unittest.TestCase):
         )
         self.assertIn("disconnectSource(connectedSources[0])", QML_SOURCE)
 
+    def test_a_run_in_flight_is_released_when_the_widget_goes_away(self) -> None:
+        # Removing the widget destroys the QML while a run is still out, and
+        # that run never reports back: the fetcher process has to be stopped
+        # here or it outlives the object that started it.
+        self.assertIn("Component.onDestruction:", QML_SOURCE)
+        self.assertIn("exec.disconnectSource(held[i])", QML_SOURCE)
+
 
 if __name__ == "__main__":
     unittest.main()

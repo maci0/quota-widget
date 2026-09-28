@@ -900,6 +900,15 @@ class ClaudeLimitsArrayTest(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual([w["util"] for w in out["weekly"]], [12.0])
 
+    def test_a_long_list_is_capped_at_what_the_panel_can_show(self) -> None:
+        # The array is vendor data, so its length is not ours to trust: every
+        # entry is a meter the panel keeps until the next poll.
+        out = self._fetch(
+            {"limits": [{"kind": f"weekly_{i}", "percent": i} for i in range(500)]}
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(out["weekly"]), fetch_quota.MAX_WEEKLY_LIMITS)
+
 
 class CursorStateDbTest(unittest.TestCase):
     """The IDE credential path. A user without cursor-agent's auth.json has a
@@ -912,8 +921,9 @@ class CursorStateDbTest(unittest.TestCase):
         self.db = Path(self.tmp.name) / "state.vscdb"
 
     def _write_db(self, rows: dict[str, object], table: str = "ItemTable") -> None:
-        con = sqlite3.connect(self.db)
-        with con:
+        # closing, not a bare close() at the end: a statement that raises would
+        # otherwise leave the connection holding a descriptor open.
+        with contextlib.closing(sqlite3.connect(self.db)) as con, con:
             # A throwaway fixture: the durability the real vscdb needs would
             # cost an fsync per test and buys this suite nothing.
             con.execute("PRAGMA journal_mode = MEMORY")
@@ -924,10 +934,9 @@ class CursorStateDbTest(unittest.TestCase):
             # The table name is a literal the test itself passes; the values are
             # bound, so there is no injection surface here.
             con.executemany(
-                f"INSERT INTO {table} (key, value) VALUES (?, ?)",  # noqa: S608
+                f"INSERT INTO {table} (key, value) VALUES (?, ?)",  # noqa: S608 (fixture)
                 list(rows.items()),
             )
-        con.close()
 
     def test_reads_token_and_membership_from_the_db(self) -> None:
         self._write_db(

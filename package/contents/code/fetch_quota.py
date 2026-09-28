@@ -209,6 +209,10 @@ CACHE_DIR_MODE = 0o700
 FILE_MODE_PRIVATE = 0o600
 # Re-read-after-write retries before a token store is left to the racing writer.
 MERGE_WRITE_ATTEMPTS = 3
+# Meters kept from the structured `limits` array. The panel builds a gauge per
+# entry and keeps it until the next poll, so a list that grows with whatever
+# the API reports is memory the widget holds for the rest of the session.
+MAX_WEEKLY_LIMITS = 12
 TOKEN_SKEW_S = 120
 TOKEN_SKEW_MS = TOKEN_SKEW_S * 1000
 RETRY_AFTER_MIN_S = 0.5
@@ -874,6 +878,8 @@ def _claude_weekly(data: JsonDict) -> list[JsonDict]:
                     "kind": kind,
                 }
             )
+            if len(weekly) >= MAX_WEEKLY_LIMITS:
+                break
         return weekly
     for key, label in (
         ("seven_day", "All models"),
