@@ -36,6 +36,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -185,6 +186,10 @@ TOKEN_SKEW_S = 120
 TOKEN_SKEW_MS = TOKEN_SKEW_S * 1000
 RETRY_AFTER_MIN_S = 0.5
 RETRY_AFTER_MAX_S = 10.0
+# A dropped connection is usually one blip. One retry on the idempotent reads
+# (GET) covers it; a token POST is never retried, a repeated refresh can retire
+# the refresh token.
+NETWORK_RETRY_BACKOFF_S = 0.5
 # Unix seconds vs milliseconds: values above this are treated as ms.
 MS_EPOCH_CUTOFF = 10_000_000_000
 ERROR_BODY_PREVIEW = 200
@@ -328,6 +333,16 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     max_age = _env_seconds(
         values, "QUOTA_WIDGET_CACHE_MAX_AGE_S", DEFAULT_CACHE_MAX_AGE_S, 86400
     )
+    # A malformed clock override would otherwise raise from now_ms() in the
+    # middle of the poll, after the panel has already been told nothing.
+    if NOW_MS_ENV in values:
+        try:
+            int(str(values[NOW_MS_ENV]).strip())
+        except ValueError as exc:
+            raise ConfigError(
+                f"{NOW_MS_ENV} must be an integer epoch-ms value, "
+                f"got {values[NOW_MS_ENV]!r}"
+            ) from exc
     global _CONFIG
     _CONFIG = Config(
         home=home,
@@ -367,6 +382,16 @@ def config() -> Config:
 def emit(obj: JsonDict) -> None:
     print(json.dumps(obj, separators=(",", ":")))
     raise SystemExit(0)
+
+
+def warn(message: str) -> None:
+    """Report a condition the JSON payload cannot carry.
+
+    stdout is the panel's only channel, so anything that needs an operator's
+    attention (a dropped credential write, a swallowed provider crash) goes to
+    stderr and lands in the journal next to the plasmashell run that caused it.
+    """
+    print(f"fetch_quota: {message}", file=sys.stderr)
 
 
 def iso_to_ms(value: str | None) -> int | None:
@@ -626,30 +651,47 @@ def fetch_http(
     data: bytes | None = None,
     method: str | None = None,
 ) -> tuple[int, object, Message | None]:
-    """Return (status, decoded JSON or None, response headers)."""
+    """Return (status, decoded JSON or None, response headers).
+
+    A transport failure is status 0. The cause reaches the journal, so an
+    offline panel is diagnosable without rerunning the fetcher by hand; it
+    never reaches stdout, which the panel parses as the only payload.
+    """
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     req_timeout = config().http_timeout_s if timeout is None else timeout
-    try:
-        with urllib.request.urlopen(req, timeout=req_timeout) as resp:
-            body = resp.read()
-            hdrs = resp.headers
-            if not body:
-                return resp.status, None, hdrs
-            try:
-                return resp.status, json.loads(body.decode("utf-8")), hdrs
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                return resp.status, None, hdrs
-    except urllib.error.HTTPError as e:
-        # The error body can carry account identifiers (email, user id) echoed
-        # back by the vendor. No caller reads it, so the body is not retained.
-        hdrs = e.headers if e.headers is not None else Message()
+    attempts = 1 if data is not None or method not in (None, "GET") else 2
+    for attempt in range(attempts):
         try:
-            e.read()
-        except OSError:
-            pass  # body unreadable; the status is all the callers use
-        return e.code, None, hdrs
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return 0, None, None
+            with urllib.request.urlopen(req, timeout=req_timeout) as resp:
+                body = resp.read()
+                hdrs = resp.headers
+                if not body:
+                    return resp.status, None, hdrs
+                try:
+                    return resp.status, json.loads(body.decode("utf-8")), hdrs
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    warn(f"{url} returned {resp.status} with a non-JSON body")
+                    return resp.status, None, hdrs
+        except urllib.error.HTTPError as e:
+            # The error body can carry account identifiers (email, user id)
+            # echoed back by the vendor. No caller reads it, so the body is
+            # drained and discarded rather than returned or logged.
+            hdrs = e.headers if e.headers is not None else Message()
+            try:
+                e.read()
+            except OSError as exc:
+                warn(
+                    f"{url} returned {e.code} and its error body was unreadable: {exc}"
+                )
+            return e.code, None, hdrs
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            if attempt + 1 < attempts:
+                sleep(NETWORK_RETRY_BACKOFF_S)
+                continue
+            warn(f"{url} failed after {attempts} attempt(s): {reason!r}")
+            return 0, None, None
+    raise AssertionError("unreachable: the loop returns or sleeps on every path")
 
 
 def fetch_json(
@@ -731,8 +773,12 @@ def _refresh_claude(cred: JsonDict) -> JsonDict | None:
 
         try:
             _merge_write_json(config().claude_cred, put_oauth, new_cred)
-        except OSError:
-            pass  # still return in-memory tokens so this poll can proceed
+        except OSError as exc:
+            # The poll still runs on the in-memory token, but the file on disk
+            # keeps a token the provider has already retired, so the next poll
+            # refreshes again and the CLI signs the user out.
+            path = config().claude_cred
+            warn(f"claude token rotated but {path} was not written: {exc}")
         return new_cred
 
 
@@ -1001,8 +1047,8 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
 
         try:
             _merge_write_json(config().grok_auth, put_entry, {auth_key: new_entry})
-        except OSError:
-            pass  # return the live token; writing auth.json failed
+        except OSError as exc:
+            warn(f"grok token rotated but {config().grok_auth} was not written: {exc}")
 
         return new_entry
 
@@ -1313,8 +1359,10 @@ def _refresh_codex(auth: JsonDict) -> JsonDict | None:
 
         try:
             _merge_write_json(config().codex_auth, put_tokens, new_auth)
-        except OSError:
-            pass  # return live tokens; writing auth.json failed
+        except OSError as exc:
+            warn(
+                f"codex token rotated but {config().codex_auth} was not written: {exc}"
+            )
         return new_auth
 
 
@@ -1694,11 +1742,16 @@ def fetch_cursor() -> JsonDict:
 # ── main ────────────────────────────────────────────────────────────────────
 
 
-def _safe_fetch(fetch: Callable[[], JsonDict]) -> JsonDict:
+def _safe_fetch(name: str, fetch: Callable[[], JsonDict]) -> JsonDict:
     try:
         return fetch()
-    except Exception:
+    except Exception as exc:
         # Plasmashell needs JSON every poll; one provider must not abort the rest.
+        # The panel reads "net" as transient and keeps its last good card, but
+        # the cause belongs in the journal: a bug here otherwise looks exactly
+        # like a dropped connection on the display.
+        warn(f"provider {name} raised {type(exc).__name__}: {exc}")
+        traceback.print_exc()
         return {"ok": False, "error": "net"}
 
 
@@ -1709,7 +1762,10 @@ def main(argv: list[str] | None = None) -> None:
     except ConfigError as exc:
         # No provider runs on a bad value; the panel shows "config" and the
         # detail lands on stderr for anyone running the fetcher by hand.
-        print(f"fetch_quota: {exc}", file=sys.stderr)
+        # fetched_ms is left out on purpose: a bad clock override is one of the
+        # values that can fail here, and the panel falls back to its own clock
+        # when the field is absent.
+        warn(str(exc))
         emit(
             {
                 "ok": False,
@@ -1719,7 +1775,6 @@ def main(argv: list[str] | None = None) -> None:
                 "cursor": {"ok": False, "error": "config"},
                 "grok": {"ok": False, "error": "config"},
                 "codex": {"ok": False, "error": "config"},
-                "fetched_ms": now_ms(),
             }
         )
     if args == ["--print-config"]:
@@ -1735,7 +1790,7 @@ def main(argv: list[str] | None = None) -> None:
         "codex": fetch_codex,
     }
     results: dict[str, JsonDict] = {
-        name: _safe_fetch(fetch) for name, fetch in providers.items()
+        name: _safe_fetch(name, fetch) for name, fetch in providers.items()
     }
 
     emit(

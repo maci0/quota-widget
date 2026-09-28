@@ -34,6 +34,21 @@ prints, so a fetcher and UI shipped together never break each other.
 - The documented dev gate and smoke path run as written: `uv run pytest` finds
   `scripts/` on the path, and `print_smoke.py` reports a missing or malformed
   dump instead of a traceback.
+- A dropped connection is retried once on a usage read, and the URL with the
+  underlying error reaches the journal. A token refresh is never retried.
+- A provider that raises is reported with its traceback on stderr instead of
+  being passed off as a network error.
+- An OAuth token that rotates but cannot be written back to disk is reported.
+  Left silent, the next poll refreshed again and could sign the user out of the
+  vendor CLI.
+- `QUOTA_WIDGET_NOW_MS` is validated at startup: a malformed value aborts with
+  `error: "config"` instead of raising mid-poll, and the Codex expiry check
+  reads the pinned clock.
+
+### Changed
+
+- The `error: "config"` payload no longer carries `fetched_ms`, since the clock
+  override can be the value that failed. The panel falls back to its own clock.
 
 ## [1.1.0] - 2026-09-28
 

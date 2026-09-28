@@ -128,6 +128,7 @@ reason on stderr; no provider runs with a half-applied config.
 | `QUOTA_WIDGET_CACHE` | `$XDG_CACHE_HOME/quota-widget` |
 | `QUOTA_WIDGET_CACHE_MAX_AGE_S` | `86400` (0 < value <= 86400, whole seconds) |
 | `QUOTA_WIDGET_HTTP_TIMEOUT` | `12.0` (0 < value <= 300, seconds) |
+| `QUOTA_WIDGET_NOW_MS` | unset (integer epoch milliseconds; tests and smoke runs only) |
 
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` set to a relative path are ignored, per
 the [base directory spec](https://specifications.freedesktop.org/basedir-spec/latest/).

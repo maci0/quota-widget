@@ -126,6 +126,35 @@ def config_env(**env: str) -> Iterator[None]:
         fetch_quota.load_config()
 
 
+# Credential paths are configuration, not module constants; each test points one
+# through the environment variable the fetcher reads.
+_CONFIG_PATH_ENV = {
+    "CLAUDE_CRED": "QUOTA_WIDGET_CLAUDE_CREDENTIALS",
+    "CODEX_AUTH": "QUOTA_WIDGET_CODEX_AUTH",
+    "GROK_AUTH": "QUOTA_WIDGET_GROK_AUTH",
+    "CURSOR_AUTH_JSON": "QUOTA_WIDGET_CURSOR_AUTH",
+    "CURSOR_STATE_DB": "QUOTA_WIDGET_CURSOR_STATE_DB",
+}
+
+
+def point_credential(name: str, path: Path) -> Callable[[], None]:
+    """Point one provider's credential file at path; returns an undo callable
+    suited to TestCase.addCleanup."""
+    env = _CONFIG_PATH_ENV[name]
+    previous = os.environ.get(env)
+    os.environ[env] = str(path)
+    fetch_quota.load_config()
+
+    def restore() -> None:
+        if previous is None:
+            os.environ.pop(env, None)
+        else:
+            os.environ[env] = previous
+        fetch_quota.load_config()
+
+    return restore
+
+
 class CodexWindowTest(unittest.TestCase):
     def test_parses_weekly_utilization(self) -> None:
         window = fetch_quota._codex_window(
@@ -1197,6 +1226,21 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(payload["error"], "config")
         self.assertEqual(payload["claude"]["error"], "config")
 
+    def test_bad_clock_override_is_a_config_error(self) -> None:
+        stderr = io.StringIO()
+        with (
+            patch.dict(os.environ, {fetch_quota.NOW_MS_ENV: "yesterday"}),
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                fetch_quota.main([])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn(fetch_quota.NOW_MS_ENV, stderr.getvalue())
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["error"], "config")
+        self.assertIn(fetch_quota.NOW_MS_ENV, payload["config_error"])
+
     def test_print_config_emits_describe(self) -> None:
         with patch.dict(os.environ, {"QUOTA_WIDGET_HOME": "/home/widget"}):
             with contextlib.redirect_stdout(io.StringIO()) as stdout:
@@ -1291,6 +1335,118 @@ class HttpRetryableTest(unittest.TestCase):
         self.assertTrue(fetch_quota._http_retryable(500))
         self.assertFalse(fetch_quota._http_retryable(401))
         self.assertFalse(fetch_quota._http_retryable(0))
+
+
+class TransportFailureTest(unittest.TestCase):
+    """A dropped connection must stay diagnosable, and a read is retried once
+    while a token POST is not."""
+
+    def setUp(self) -> None:
+        self.sleeps: list[float] = []
+        patcher = patch.object(fetch_quota, "sleep", self.sleeps.append)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _urlopen_raising(self, exc: Exception, calls: list[int]) -> object:
+        def fake_urlopen(req: object, timeout: float = 0.0) -> object:
+            calls.append(1)
+            raise exc
+
+        return fake_urlopen
+
+    def test_get_is_retried_once_then_reports_the_cause(self) -> None:
+        calls: list[int] = []
+        err = io.StringIO()
+        with (
+            patch.object(
+                urllib.request,
+                "urlopen",
+                self._urlopen_raising(OSError("no route"), calls),
+            ),
+            contextlib.redirect_stderr(err),
+        ):
+            status, body, hdrs = fetch_quota.fetch_http(
+                "https://api.test/usage", {"Authorization": "Bearer secret"}
+            )
+        self.assertEqual((status, body, hdrs), (0, None, None))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.sleeps, [fetch_quota.NETWORK_RETRY_BACKOFF_S])
+        logged = err.getvalue()
+        self.assertIn("https://api.test/usage", logged)
+        self.assertIn("no route", logged)
+        self.assertNotIn("secret", logged)
+
+    def test_second_attempt_can_succeed(self) -> None:
+        calls: list[int] = []
+
+        class _Resp:
+            status = 200
+            headers: object = None
+
+            def read(self) -> bytes:
+                return b'{"ok": true}'
+
+            def __enter__(self) -> _Resp:
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+        def fake_urlopen(req: object, timeout: float = 0.0) -> object:
+            calls.append(1)
+            if len(calls) == 1:
+                raise TimeoutError("timed out")
+            return _Resp()
+
+        with (
+            patch.object(urllib.request, "urlopen", fake_urlopen),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status, body, _ = fetch_quota.fetch_http("https://api.test/usage", {})
+        self.assertEqual((status, body), (200, {"ok": True}))
+
+    def test_token_post_is_never_retried(self) -> None:
+        calls: list[int] = []
+        with (
+            patch.object(
+                urllib.request,
+                "urlopen",
+                self._urlopen_raising(TimeoutError("timed out"), calls),
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status, _body, _ = fetch_quota.fetch_http(
+                "https://auth.test/token", {}, data=b"grant=x", method="POST"
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.sleeps, [])
+
+
+class ProviderCrashTest(unittest.TestCase):
+    def test_crash_is_reported_on_stderr_and_stays_transient(self) -> None:
+        def boom() -> JsonDict:
+            raise RuntimeError("meters exploded")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            out = fetch_quota._safe_fetch("claude", boom)
+        self.assertEqual(out, {"ok": False, "error": "net"})
+        logged = err.getvalue()
+        self.assertIn("claude", logged)
+        self.assertIn("meters exploded", logged)
+        self.assertIn("Traceback", logged)
+
+
+class CodexExpiryClockTest(unittest.TestCase):
+    def test_expiry_reads_the_pinned_clock(self) -> None:
+        now = 1_777_000_000_000
+        with config_env(**{fetch_quota.NOW_MS_ENV: str(now)}):
+            exp_s = (now + fetch_quota.TOKEN_SKEW_S * 1000) // 1000
+            fresh = _jwt_with_exp(exp_s + 60)
+            self.assertFalse(fetch_quota._codex_token_expired({"access_token": fresh}))
+            stale = _jwt_with_exp(exp_s - 60)
+            self.assertTrue(fetch_quota._codex_token_expired({"access_token": stale}))
 
 
 class PrintSmokeTest(unittest.TestCase):
