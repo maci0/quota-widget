@@ -27,6 +27,10 @@ The QML owns the fetcher process. One run at a time: `exec.poll()` returns early
 - `package/`: plasmoid (metadata, QML, fetcher, `contents/icons/com.maci.quota-widget.svg`)
 - `docs/THREAT_MODEL.md`: entry points, trust boundaries, assets, and the threats per boundary
 - `tests/`: pytest
+- `tests/test_fuzz_parsers.py`: seeded randomized fuzzing of the parsers fed
+  untrusted input (the Cursor usage-summary body, `ItemTable` cells, JWTs).
+  Generators are seeded so a failure reproduces; raise `ITERATIONS` or move
+  `BASE_SEED` to widen a run.
 - `scripts/print_smoke.py`: prints a fetched JSON dump (`install.sh` writes `.scratch/smoke.json`)
 - `install.sh`: root symlink installer
 - `.scratch/`: gitignored local scratch (never `/tmp`)

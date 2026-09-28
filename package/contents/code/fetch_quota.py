@@ -78,6 +78,16 @@ def _as_dict(value: object) -> JsonDict:
     return value if isinstance(value, dict) else {}
 
 
+def _as_text(value: object) -> str | None:
+    """A wire field that the UI renders as text, or None.
+
+    The emitted document goes to plasmashell through its JSON parser, so a
+    field that arrives as a number, a list, or NaN has to be dropped rather
+    than passed through.
+    """
+    return value if isinstance(value, str) else None
+
+
 def _read_text(path: Path) -> str:
     """Read a JSON state file as UTF-8, whatever the process locale says."""
     return path.read_text(encoding=JSON_ENCODING)
@@ -428,7 +438,9 @@ def iso_to_ms(value: str | None) -> int | None:
     None covers a missing, malformed, or out-of-range value alike: a reset the
     widget cannot read is shown as absent, never as a bogus date.
     """
-    if not value:
+    if not isinstance(value, str) or not value:
+        # A response field is whatever the wire held: an int epoch, a list, a
+        # nested object. None of those is an instant.
         return None
     when = iso_to_utc(value)
     if when is None:
@@ -1552,9 +1564,18 @@ def _vscdb_str(value: Any) -> str | None:
         try:
             decoded = json.loads(s)
             if isinstance(decoded, str):
-                return decoded
+                s = decoded.strip()
+                if not s:
+                    return None  # a quoted blank cell is no token either
         except json.JSONDecodeError:
             pass  # keep the raw cell text
+    try:
+        s.encode(JSON_ENCODING)
+    except UnicodeEncodeError:
+        # A JSON escape can spell a lone surrogate ("\ud800"): it decodes, it
+        # does not encode, and it would fail the header quote or the cache
+        # write. Treat it like any other undecodable cell.
+        return None
     return s
 
 
@@ -1578,7 +1599,10 @@ def cursor_plan_label(membership: str | None) -> str:
     An unknown value is title-cased rather than dropped, so a plan the
     fetcher has not seen still reads as a name rather than as "Cursor".
     """
-    m = (membership or "").strip().lower().replace("-", "_").replace(" ", "_")
+    # The membership arrives from a remote body and a credential file, so it
+    # can be any JSON value. A non-string names no plan.
+    m = (membership if isinstance(membership, str) else "").strip().lower()
+    m = m.replace("-", "_").replace(" ", "_")
     names = {
         "free": "Free",
         "hobby": "Hobby",
@@ -1675,7 +1699,9 @@ def _cursor_meter(
     limit = _finite_number(block.get("limit"))
     util = _finite_number(block.get("totalPercentUsed"))
     if util is None and used is not None and limit:
-        util = round(100.0 * used / limit, 1)
+        # Finite inputs can still overflow the ratio (1e308 / 1e-308), and
+        # json.dumps writes an Infinity plasmashell's parser rejects.
+        util = _finite_number(round(100.0 * used / limit, 1))
     if util is None and used is None and limit is None:
         return None
     return {
@@ -1690,9 +1716,11 @@ def _cursor_meter(
 
 def parse_cursor_summary(data: JsonDict, plan_hint: str | None = None) -> JsonDict:
     """Turn /api/usage-summary JSON into widget periods."""
-    plan = cursor_plan_label(data.get("membershipType") or plan_hint)
-    cycle_end = iso_to_ms(data.get("billingCycleEnd"))
-    unlimited = bool(data.get("isUnlimited"))
+    plan = cursor_plan_label(_as_text(data.get("membershipType")) or plan_hint)
+    cycle_end = iso_to_ms(_as_text(data.get("billingCycleEnd")))
+    # Only a real true says the plan has no included block. A dict or a list
+    # is a type error, and reading it as unlimited would hide the meters.
+    unlimited = data.get("isUnlimited") is True
     periods: list[JsonDict] = []
 
     iu = _as_dict(data.get("individualUsage"))
@@ -1759,7 +1787,7 @@ def parse_cursor_summary(data: JsonDict, plan_hint: str | None = None) -> JsonDi
         "ok": True,
         "plan": plan,
         "unlimited": unlimited,
-        "limit_type": data.get("limitType"),
+        "limit_type": _as_text(data.get("limitType")),
         "periods": periods,
         "resets_ms": cycle_end,
     }

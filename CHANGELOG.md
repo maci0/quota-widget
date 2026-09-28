@@ -14,6 +14,9 @@ prints, so a fetcher and UI shipped together never break each other.
 
 ### Added
 
+- Seeded randomized fuzzing for the parsers that read untrusted input: the
+  Cursor usage-summary body, the Cursor `ItemTable` cells, and vendor JWTs
+  (`tests/test_fuzz_parsers.py`). A failure prints the seed that reproduces it.
 - `QUOTA_WIDGET_NOW_MS` pins the fetcher clock, so the same HTTP responses print
   byte-identical output on every run. Documented in the README, for tests and
   smoke runs.
@@ -27,6 +30,16 @@ prints, so a fetcher and UI shipped together never break each other.
 
 ### Fixed
 
+- A Cursor response whose `membershipType` is not a string, or whose
+  `billingCycleEnd` is not a date string, raised out of the parser and blanked
+  the card instead of reading as unknown.
+- A `used`/`limit` pair whose ratio overflows (`1e308` over `1e-308`) printed a
+  bare `Infinity` in the widget JSON, which plasmashell's parser rejects.
+- A Cursor `ItemTable` cell holding a lone surrogate (`"\ud800"`) reached the
+  header quote and the cache write, where the encode fails. Such a cell is
+  dropped, like any other undecodable one.
+- `limitType` reached the widget JSON with whatever type the wire held; only a
+  string is passed on now. `isUnlimited` likewise counts only a real `true`.
 - The install stops instead of deleting whatever sits at the plasmoid directory
   when that is not this widget, so a copy from Plasma Discover, a distro
   package, or a hand-unpacked archive survives an upgrade.
