@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import math
 import re
 import unittest
 from typing import TYPE_CHECKING, Final
@@ -20,27 +21,70 @@ DIMMED_OPACITY: Final = re.compile(r"opacity:\s*0\.[0-7]\d*")
 ROSTER_RE: Final = re.compile(r"readonly property var providerNames: \[([^\]]*)\]")
 
 
-def label_blocks(source: str) -> Iterator[str]:
-    """The body of every PlasmaComponents3.Label, braces balanced.
+def block_bodies(source: str, opener: str) -> Iterator[str]:
+    """The body of every block `opener` opens, braces balanced.
 
-    A pattern that stops at the first `}` never sees the rest of a label whose
-    text is a block, and a dimmed one among those would pass unnoticed.
+    A pattern that stops at the first `}` never sees the rest of a block whose
+    body is nested, and splitting on a fixed closing column widens to the rest
+    of the file the moment a reformat moves that column. Both make an
+    assertion about the block true by accident, so the depth is counted.
+    Comments and string literals are stepped over: a brace in either is text,
+    not nesting, and counting one leaves the block open for good.
     """
-    start = source.find(LABEL_OPEN)
+    start = source.find(opener)
     while start != -1:
-        body = start + len(LABEL_OPEN)
+        body = start + len(opener)
+        if not opener.endswith("{"):
+            # A signature: the block opens at the brace after the parameter
+            # list, not at the end of the opener itself.
+            body = source.index("{", body) + 1
         depth = 1
         index = body
         while index < len(source) and depth:
-            if source[index] == "{":
+            char = source[index]
+            if char == "/" and source.startswith("//", index):
+                index = source.find("\n", index)
+                if index == -1:
+                    break
+            elif char in {'"', "'", "`"}:
+                index = source.find(char, index + 1)
+                if index == -1:
+                    break
+            elif char == "{":
                 depth += 1
-            elif source[index] == "}":
+            elif char == "}":
                 depth -= 1
             index += 1
         if depth:
             return
         yield source[body : index - 1]
-        start = source.find(LABEL_OPEN, index)
+        start = source.find(opener, index)
+
+
+def block_body(source: str, opener: str) -> str:
+    """The body of the first block `opener` opens, or a failed assertion.
+
+    A missing opener is an `assert`, not an `IndexError` from the split that
+    used to stand here: a renamed or reformatted block is a finding, and the
+    reader should be told which one.
+    """
+    start = source.find(opener)
+    assert start != -1, f"no block opens with {opener!r}"
+    bodies = list(block_bodies(source[start:], opener))
+    assert bodies, f"unbalanced braces after {opener!r}"
+    return bodies[0]
+
+
+def fetcher_int(name: str) -> int:
+    """The value of a module-level integer constant in the fetcher."""
+    match = re.search(rf"^{name} = (-?\d+)$", FETCHER_SOURCE, re.MULTILINE)
+    assert match is not None, f"the fetcher defines no {name}"
+    return int(match.group(1))
+
+
+def label_blocks(source: str) -> Iterator[str]:
+    """The body of every PlasmaComponents3.Label, braces balanced."""
+    return block_bodies(source, LABEL_OPEN)
 
 
 def dimmed_labels(source: str) -> list[str]:
@@ -248,6 +292,11 @@ class MainQmlLocalizationTest(unittest.TestCase):
         self.assertIn("readonly property int minSpendExponent: 0", QML_SOURCE)
         self.assertIn("readonly property int maxSpendExponent: 6", QML_SOURCE)
         self.assertNotIn("Math.pow(10, spend.exponent)", QML_SOURCE)
+        # The bounds are the fetcher's, and the panel is what renders a payload
+        # written under them: a wider window there clips an amount the fetcher
+        # passed on, and a narrower one hides one it meant to show.
+        self.assertEqual(fetcher_int("MIN_SPEND_EXPONENT"), 0)
+        self.assertEqual(fetcher_int("MAX_SPEND_EXPONENT"), 6)
 
     def test_meter_fills_from_the_leading_edge(self) -> None:
         # Qt mirrors the left/right anchor lines in a right-to-left layout; a
@@ -283,8 +332,12 @@ class MainQmlProviderRosterTest(unittest.TestCase):
             self.assertNotIn(f"p.{name}", body)
 
     def test_the_roster_decides_whether_the_panel_has_data(self) -> None:
-        body = QML_SOURCE.split("function noData() {", 1)[1].split("}", 1)[0]
+        # The whole body, not its first line: a noData() that returned true
+        # outright would blank every card on a poll that answered.
+        body = block_body(QML_SOURCE, "function noData(")
         self.assertIn("root.providerNames", body)
+        self.assertIn("return false", body)
+        self.assertIn("return true", body)
         for name in self.roster:
             self.assertNotIn(f"root.{name}", body)
 
@@ -307,6 +360,45 @@ class MainQmlProviderRosterTest(unittest.TestCase):
         assert isinstance(table, ast.Dict)
         emitted = [key.value for key in table.keys if isinstance(key, ast.Constant)]
         self.assertEqual(sorted(emitted), sorted(self.roster))
+
+
+class MainQmlBlockScanTest(unittest.TestCase):
+    """The scanner every block-scoped assertion above runs on.
+
+    A scan that reads past the block it was given turns every one of those
+    assertions into a search of the rest of the file, so it is checked against
+    a source built to end where the block ends.
+    """
+
+    SOURCE = (
+        "function first(a) {\n"
+        '    if (a) { return "{ }" }\n'
+        "    return a\n"
+        "}\n"
+        "function second() {\n"
+        "    return 2\n"
+        "}\n"
+        "const later = 3\n"
+    )
+
+    def test_a_body_ends_at_its_own_brace(self) -> None:
+        self.assertEqual(
+            block_body(self.SOURCE, "function second(").strip(), "return 2"
+        )
+
+    def test_every_block_is_found(self) -> None:
+        bodies = list(block_bodies(self.SOURCE, "function "))
+        self.assertEqual(len(bodies), 2)
+        self.assertTrue(all("return" in body for body in bodies))
+
+    def test_a_missing_block_is_a_failure(self) -> None:
+        with self.assertRaises(AssertionError):
+            block_body(self.SOURCE, "function missing(")
+
+    def test_the_label_scan_reads_the_shipped_source_to_their_ends(self) -> None:
+        self.assertEqual(
+            len(list(label_blocks(QML_SOURCE))), QML_SOURCE.count(LABEL_OPEN)
+        )
 
 
 class MainQmlAccessibilityTest(unittest.TestCase):
@@ -423,12 +515,10 @@ class MainQmlAccessibilityTest(unittest.TestCase):
         # the popup, so each says it is in the tab chain instead of leaning on
         # the control default (WCAG 2.1.1).
         popup = QML_SOURCE.split("fullRepresentation:", 1)[1]
-        buttons = popup.split("PlasmaComponents3.ToolButton {")[1:]
+        buttons = list(block_bodies(popup, "PlasmaComponents3.ToolButton {"))
         self.assertEqual(len(buttons), 2)
         for button in buttons:
-            self.assertIn(
-                "activeFocusOnTab: true", button.split("\n                    }", 1)[0]
-            )
+            self.assertIn("activeFocusOnTab: true", button)
 
     def test_a_failure_is_announced_when_it_arrives(self) -> None:
         # A poll answers into a widget the reader is not looking at, so the
@@ -527,6 +617,13 @@ class MainQmlPollingTest(unittest.TestCase):
             QML_SOURCE,
         )
 
+    def test_the_fetcher_runs_under_the_engine_main_declares(self) -> None:
+        # The DataSource default engine is not the fetcher, so without this the
+        # widget connects to nothing and every card stays empty in silence:
+        # no error, no payload, no trace.
+        source = block_body(QML_SOURCE, "P5Support.DataSource {")
+        self.assertIn('engine: "executable"', source)
+
     def test_a_hung_run_is_dropped_so_polling_resumes(self) -> None:
         # Without this, one stalled fetcher holds the source and no later poll
         # ever starts.
@@ -552,8 +649,8 @@ class MainQmlPollingTest(unittest.TestCase):
     def test_a_dropped_run_releases_the_indicators(self) -> None:
         # The dropped run reports nothing back, so the refresh button and its
         # spinner keep the state of a run that is already gone.
-        drop = QML_SOURCE.split("disconnectSource(connectedSources[0])", 1)[1]
-        block = drop.split("\n                }", 1)[0]
+        block = block_body(QML_SOURCE, "function dropStalled(")
+        self.assertIn("disconnectSource(connectedSources[0])", block)
         self.assertIn("root.fetching = false", block)
         self.assertIn("root.userRefreshing = false", block)
 
@@ -569,7 +666,7 @@ class MainQmlPollingTest(unittest.TestCase):
         # in every payload. The panel kept its own copy across an account switch
         # instead, so a failed first poll showed the previous account's plan and
         # usage for as long as the window allowed.
-        merge = QML_SOURCE.split("function mergeProv(", 1)[1].split("\n    }", 1)[0]
+        merge = block_body(QML_SOURCE, "function mergeProv(")
         self.assertIn("oldv.account && oldv.account === newv.account", merge)
 
     def test_the_transient_call_is_the_fetchers(self) -> None:
@@ -577,7 +674,7 @@ class MainQmlPollingTest(unittest.TestCase):
         # code, so a code added later read as final and blanked a card on a rate
         # limit. The fetcher classifies the failure and says so in the payload;
         # "exec" is the panel's own condition, where no payload arrived at all.
-        merge = QML_SOURCE.split("function mergeProv(", 1)[1].split("\n    }", 1)[0]
+        merge = block_body(QML_SOURCE, "function mergeProv(")
         self.assertIn("newv.transient === true", merge)
         self.assertIn('newv.error === "exec"', merge)
         self.assertNotIn("http-5", merge)
@@ -620,13 +717,15 @@ class MainQmlStaleWindowTest(unittest.TestCase):
         # that reported it. The merge walks providerNames, so one site covers
         # every provider and the window has to precede that walk.
         window = QML_SOURCE.index("root.staleKeepMs = (typeof keepS ===")
-        # The roster walks every provider, so one merge call covers all of
-        # them; what matters is that it sits inside the loop the window is
-        # read ahead of.
+        # The roster walks every provider, so the call site is one loop rather
+        # than a line per provider: the loop header is the thing that has to
+        # sit between the window and the assignment it wraps.
         loop = QML_SOURCE.index(
             "for (let i = 0; i < root.providerNames.length; i++)", window
         )
         merge = QML_SOURCE.index("root[n] = mergeProv(root[n], p[n])", loop)
+        self.assertLess(window, loop, "the roster is walked before the window")
+        self.assertLess(loop, merge, "the merge is not the roster walk")
         self.assertLess(window, merge, "roster merged before the window")
 
     def test_the_fallback_window_is_not_writable_state(self) -> None:
@@ -637,6 +736,19 @@ class MainQmlStaleWindowTest(unittest.TestCase):
             QML_SOURCE,
         )
         self.assertIn("property int staleKeepMs: defaultStaleKeepMs", QML_SOURCE)
+        # A payload that carries no window falls back to the fetcher's own
+        # default, so the two copies have to be the same number of seconds.
+        self.assertIn("DEFAULT_CACHE_MAX_AGE_S = SECONDS_PER_DAY", FETCHER_SOURCE)
+        fallback = re.search(
+            r"readonly property int defaultStaleKeepMs: ([0-9 *]+)$",
+            QML_SOURCE,
+            re.MULTILINE,
+        )
+        assert fallback is not None
+        self.assertEqual(
+            math.prod(int(f) for f in fallback.group(1).split("*")),
+            fetcher_int("SECONDS_PER_DAY") * 1000,
+        )
 
     def test_a_kept_reading_is_marked_with_a_new_object(self) -> None:
         # A property holding a JS object re-reads its bindings only when the
@@ -744,10 +856,8 @@ class MainQmlStatusWordingTest(unittest.TestCase):
         # The refresh button is disabled while a run is out, and a disabled
         # item receives no hover, so the tooltip that explains the greyed
         # button never opened. The spinner has to cover the automatic polls.
-        indicator = QML_SOURCE.split("PlasmaComponents3.BusyIndicator", 1)[1]
-        self.assertIn(
-            "visible: root.fetching", indicator.split("\n                    }", 1)[0]
-        )
+        indicator = block_body(QML_SOURCE, "PlasmaComponents3.BusyIndicator {")
+        self.assertIn("visible: root.fetching", indicator)
 
     def test_the_gauge_shows_the_detail_the_list_row_shows(self) -> None:
         # A money-backed meter states what was spent of what it was capped at

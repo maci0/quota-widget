@@ -1812,7 +1812,11 @@ class ProviderCacheTest(unittest.TestCase):
         fetch_quota._write_provider_cache(
             "grok", {"ok": False, "error": "net"}, self.account
         )
+        # The read is a None for a failed payload whether or not the write
+        # happened, so the entry itself has to be the thing asserted: a
+        # failure on disk would be served back as a last good reading.
         self.assertIsNone(fetch_quota._read_provider_cache("grok", self.account))
+        self.assertFalse((Path(self.tmp.name) / "grok.json").exists())
 
     def test_other_account_cannot_read_the_entry(self) -> None:
         fetch_quota._write_provider_cache(
@@ -3030,13 +3034,18 @@ class ConfigTest(unittest.TestCase):
             self.assertIn("--print-config", stdout.getvalue())
 
     def test_help_survives_a_broken_config(self) -> None:
+        # The flag is parsed before the config is resolved, so a cache
+        # directory the loader would reject does not stop the usage text.
+        stdout = io.StringIO()
         with (
             patch.dict(os.environ, {"QUOTA_WIDGET_CACHE": "relative/path"}),
-            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stdout(stdout),
         ):
             with self.assertRaises(SystemExit) as ctx:
                 fetch_quota.main(["--help"])
         self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("usage:", stdout.getvalue())
+        self.assertIn("--print-config", stdout.getvalue())
 
     def test_providers_are_polled_concurrently(self) -> None:
         # A poll waits on the network, so one provider's round trip must not
@@ -3267,9 +3276,28 @@ class Utf8StreamTest(unittest.TestCase):
         self.assertEqual(stderr.encoding, "utf-8")
 
     def test_a_stream_without_reconfigure_is_left_alone(self) -> None:
-        # A captured stream (this suite) has no reconfigure to call.
-        with patch.object(sys, "stderr", io.StringIO()):
+        # A captured stream (this suite) has no reconfigure to call. Skipping
+        # one must not cost the other its reconfigure, and neither is closed.
+        class _Recapturable(io.StringIO):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls: list[dict[str, str]] = []
+
+            def reconfigure(self, **kwargs: str) -> None:
+                self.calls.append(kwargs)
+
+        captured = io.StringIO()
+        reconfigurable = _Recapturable()
+        with (
+            patch.object(sys, "stdout", reconfigurable),
+            patch.object(sys, "stderr", captured),
+        ):
             fetch_quota._use_utf8_streams()
+        self.assertEqual(
+            reconfigurable.calls, [{"encoding": fetch_quota.JSON_ENCODING}]
+        )
+        self.assertFalse(reconfigurable.closed)
+        self.assertFalse(captured.closed)
 
 
 class TransportFailureTest(unittest.TestCase):
