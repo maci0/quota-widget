@@ -20,8 +20,10 @@ Codex:  GET https://chatgpt.com/backend-api/wham/usage
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime as dt
 import email.utils
+import fcntl
 import json
 import os
 import re
@@ -32,7 +34,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from email.message import Message
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -105,6 +107,11 @@ CURSOR_SUMMARY_URL = "https://cursor.com/api/usage-summary"
 
 CACHE_MAX_AGE_S = 24 * 3600
 HTTP_TIMEOUT_S = 12.0
+REFRESH_LOCK_NAME = "refresh.lock"
+# One poll holds the lock for at most a token round trip; a longer wait means
+# the holder died, and the caller refreshes anyway rather than never.
+REFRESH_LOCK_WAIT_S = 20.0
+REFRESH_LOCK_POLL_S = 0.25
 FILE_MODE_PRIVATE = 0o600
 # Re-read-after-write retries before a token store is left to the racing writer.
 MERGE_WRITE_ATTEMPTS = 3
@@ -307,6 +314,53 @@ def _stale_cache(name: str) -> JsonDict | None:
     return out
 
 
+def _read_json_dict(path: Path) -> JsonDict | None:
+    try:
+        obj = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+@contextlib.contextmanager
+def _refresh_lock() -> Iterator[None]:
+    """Serialize OAuth refreshes between concurrent runs of the fetcher.
+
+    Every widget instance, the install smoke run, and any manual invocation
+    share one credential file per provider, and refreshes rotate the refresh
+    token. Two runs refreshing at once leave the loser holding a token the
+    provider already retired. The lock spans the credential re-read too, so
+    the second run sees the rotated state and skips the round trip.
+    """
+    try:
+        folder = _cache_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        fd = os.open(
+            str(folder / REFRESH_LOCK_NAME),
+            os.O_CREAT | os.O_RDWR,
+            FILE_MODE_PRIVATE,
+        )
+    except OSError:
+        yield  # unwritable cache dir: refresh unguarded, not never
+        return
+    try:
+        deadline = time.monotonic() + REFRESH_LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(REFRESH_LOCK_POLL_S)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def fetch_http(
     url: str,
     headers: dict[str, str],
@@ -368,61 +422,61 @@ def _claude_expired(oauth: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool:
 
 def _refresh_claude(cred: JsonDict) -> JsonDict | None:
     """Refresh Claude Code OAuth and write the rotated tokens back."""
-    try:
-        latest = json.loads(CLAUDE_CRED.read_text())
-        if isinstance(latest, dict):
+    with _refresh_lock():
+        latest = _read_json_dict(CLAUDE_CRED)
+        if latest is not None:
             cred = latest
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        pass  # use the in-memory cred already loaded
-    oauth = cred.get("claudeAiOauth")
-    if not isinstance(oauth, dict):
-        return None
-    refresh = oauth.get("refreshToken")
-    if not isinstance(refresh, str) or not refresh:
-        return None
-
-    body = json.dumps(
-        {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh,
-            "client_id": CLAUDE_CLIENT_ID,
-        }
-    ).encode()
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": USER_AGENT,
-    }
-    tok: Any = None  # OAuth token JSON; fields vary by host
-    for url in CLAUDE_TOKEN_URLS:
-        status, tok = fetch_json(url, headers, data=body, method="POST")
-        if status == 200 and isinstance(tok, dict) and tok.get("access_token"):
-            break
-        if status in (400, 401):
+        oauth = cred.get("claudeAiOauth")
+        if not isinstance(oauth, dict):
             return None
-        tok = None
-    if not isinstance(tok, dict) or not tok.get("access_token"):
-        return None
+        refresh = oauth.get("refreshToken")
+        if not isinstance(refresh, str) or not refresh:
+            return None
+        if not _claude_expired(oauth):
+            return cred  # a concurrent run rotated the token while we waited
 
-    new_oauth = dict(oauth)
-    new_oauth["accessToken"] = tok["access_token"]
-    if tok.get("refresh_token"):
-        new_oauth["refreshToken"] = tok["refresh_token"]
-    expires_in = tok.get("expires_in")
-    if isinstance(expires_in, (int, float)):
-        new_oauth["expiresAt"] = now_ms() + int(expires_in) * 1000
-    new_cred = dict(cred)
-    new_cred["claudeAiOauth"] = new_oauth
+        body = json.dumps(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
+                "client_id": CLAUDE_CLIENT_ID,
+            }
+        ).encode()
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        }
+        tok: Any = None  # OAuth token JSON; fields vary by host
+        for url in CLAUDE_TOKEN_URLS:
+            status, tok = fetch_json(url, headers, data=body, method="POST")
+            if status == 200 and isinstance(tok, dict) and tok.get("access_token"):
+                break
+            if status in (400, 401):
+                return None
+            tok = None
+        if not isinstance(tok, dict) or not tok.get("access_token"):
+            return None
 
-    def put_oauth(store: JsonDict) -> tuple[str, Any]:
-        store["claudeAiOauth"] = new_oauth
-        return "claudeAiOauth", new_oauth
+        new_oauth = dict(oauth)
+        new_oauth["accessToken"] = tok["access_token"]
+        if tok.get("refresh_token"):
+            new_oauth["refreshToken"] = tok["refresh_token"]
+        expires_in = tok.get("expires_in")
+        if isinstance(expires_in, (int, float)):
+            new_oauth["expiresAt"] = now_ms() + int(expires_in) * 1000
+        new_cred = dict(cred)
+        new_cred["claudeAiOauth"] = new_oauth
 
-    try:
-        _merge_write_json(CLAUDE_CRED, put_oauth, new_cred)
-    except OSError:
-        pass  # still return in-memory tokens so this poll can proceed
-    return new_cred
+        def put_oauth(store: JsonDict) -> tuple[str, Any]:
+            store["claudeAiOauth"] = new_oauth
+            return "claudeAiOauth", new_oauth
+
+        try:
+            _merge_write_json(CLAUDE_CRED, put_oauth, new_cred)
+        except OSError:
+            pass  # still return in-memory tokens so this poll can proceed
+        return new_cred
 
 
 def fetch_claude() -> JsonDict:
@@ -620,63 +674,71 @@ def _token_expired(entry: JsonDict, skew_s: int = TOKEN_SKEW_S) -> bool:
 
 def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
     """Refresh OIDC access token and persist the new tokens atomically."""
-    client_id = entry.get("oidc_client_id")
-    if not client_id and "::" in auth_key:
-        client_id = auth_key.split("::", 1)[1]
-    refresh = entry.get("refresh_token")
-    if not client_id or not refresh:
-        return None
+    with _refresh_lock():
+        store = _read_json_dict(GROK_AUTH) or {}
+        current = _as_dict(store.get(auth_key))
+        if current and not _token_expired(current):
+            return current  # a concurrent run rotated the token while we waited
+        if current:
+            entry = current
 
-    _, discovery = fetch_json(
-        GROK_OIDC_DISCOVERY,
-        {"Accept": "application/json", "User-Agent": USER_AGENT},
-    )
-    if not isinstance(discovery, dict):
-        return None
-    token_url = discovery.get("token_endpoint")
-    if not isinstance(token_url, str) or not token_url:
-        return None
+        client_id = entry.get("oidc_client_id")
+        if not client_id and "::" in auth_key:
+            client_id = auth_key.split("::", 1)[1]
+        refresh = entry.get("refresh_token")
+        if not client_id or not refresh:
+            return None
 
-    body = urllib.parse.urlencode(
-        {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh,
-            "client_id": client_id,
-        }
-    ).encode()
-    status, tok = fetch_json(
-        token_url,
-        {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-            "User-Agent": USER_AGENT,
-        },
-        data=body,
-        method="POST",
-    )
-    if status != 200 or not isinstance(tok, dict) or not tok.get("access_token"):
-        return None
+        _, discovery = fetch_json(
+            GROK_OIDC_DISCOVERY,
+            {"Accept": "application/json", "User-Agent": USER_AGENT},
+        )
+        if not isinstance(discovery, dict):
+            return None
+        token_url = discovery.get("token_endpoint")
+        if not isinstance(token_url, str) or not token_url:
+            return None
 
-    new_entry = dict(entry)
-    new_entry["key"] = tok["access_token"]
-    if tok.get("refresh_token"):
-        new_entry["refresh_token"] = tok["refresh_token"]
-    expires_in = tok.get("expires_in")
-    if isinstance(expires_in, (int, float)):
-        exp = now_utc() + dt.timedelta(seconds=int(expires_in))
-        new_entry["expires_at"] = exp.isoformat().replace("+00:00", "Z")
+        body = urllib.parse.urlencode(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
+                "client_id": client_id,
+            }
+        ).encode()
+        status, tok = fetch_json(
+            token_url,
+            {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+            data=body,
+            method="POST",
+        )
+        if status != 200 or not isinstance(tok, dict) or not tok.get("access_token"):
+            return None
 
-    # Persist so subsequent polls (and the Grok CLI) keep working.
-    def put_entry(store: JsonDict) -> tuple[str, Any]:
-        store[auth_key] = new_entry
-        return auth_key, new_entry
+        new_entry = dict(entry)
+        new_entry["key"] = tok["access_token"]
+        if tok.get("refresh_token"):
+            new_entry["refresh_token"] = tok["refresh_token"]
+        expires_in = tok.get("expires_in")
+        if isinstance(expires_in, (int, float)):
+            exp = now_utc() + dt.timedelta(seconds=int(expires_in))
+            new_entry["expires_at"] = exp.isoformat().replace("+00:00", "Z")
 
-    try:
-        _merge_write_json(GROK_AUTH, put_entry, {auth_key: new_entry})
-    except OSError:
-        pass  # return the live token; writing auth.json failed
+        # Persist so subsequent polls (and the Grok CLI) keep working.
+        def put_entry(store: JsonDict) -> tuple[str, Any]:
+            store[auth_key] = new_entry
+            return auth_key, new_entry
 
-    return new_entry
+        try:
+            _merge_write_json(GROK_AUTH, put_entry, {auth_key: new_entry})
+        except OSError:
+            pass  # return the live token; writing auth.json failed
+
+        return new_entry
 
 
 def _money_val(obj: Any) -> int | None:  # JSON number or {val: int}
@@ -909,53 +971,70 @@ def _codex_reset_credits(data: JsonDict) -> JsonDict:
     }
 
 
+def _codex_token_expired(tokens: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool:
+    access = tokens.get("access_token")
+    if not isinstance(access, str) or not access:
+        return True
+    exp_ms = _jwt_exp_ms(access)
+    if exp_ms is None:
+        return False  # opaque token: the usage call is the only truth
+    now_ms = int(dt.datetime.now(dt.UTC).timestamp() * 1000)
+    return exp_ms <= now_ms + skew_ms
+
+
 def _refresh_codex(auth: JsonDict) -> JsonDict | None:
-    tokens = _as_dict(auth.get("tokens"))
-    refresh = tokens.get("refresh_token")
-    if not refresh:
-        return None
+    with _refresh_lock():
+        latest = _read_json_dict(CODEX_AUTH)
+        if latest is not None:
+            auth = latest
+        tokens = _as_dict(auth.get("tokens"))
+        if not _codex_token_expired(tokens):
+            return auth  # a concurrent run rotated the token while we waited
+        refresh = tokens.get("refresh_token")
+        if not refresh:
+            return None
 
-    body = urllib.parse.urlencode(
-        {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh,
-            "client_id": CODEX_CLIENT_ID,
-        }
-    ).encode()
-    status, tok = fetch_json(
-        CODEX_TOKEN_URL,
-        {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-            "User-Agent": USER_AGENT,
-        },
-        data=body,
-        method="POST",
-    )
-    if status != 200 or not isinstance(tok, dict) or not tok.get("access_token"):
-        return None
+        body = urllib.parse.urlencode(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
+                "client_id": CODEX_CLIENT_ID,
+            }
+        ).encode()
+        status, tok = fetch_json(
+            CODEX_TOKEN_URL,
+            {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+            data=body,
+            method="POST",
+        )
+        if status != 200 or not isinstance(tok, dict) or not tok.get("access_token"):
+            return None
 
-    new_tokens = dict(tokens)
-    new_tokens["access_token"] = tok["access_token"]
-    if tok.get("refresh_token"):
-        new_tokens["refresh_token"] = tok["refresh_token"]
-    if tok.get("id_token"):
-        new_tokens["id_token"] = tok["id_token"]
+        new_tokens = dict(tokens)
+        new_tokens["access_token"] = tok["access_token"]
+        if tok.get("refresh_token"):
+            new_tokens["refresh_token"] = tok["refresh_token"]
+        if tok.get("id_token"):
+            new_tokens["id_token"] = tok["id_token"]
 
-    new_auth = dict(auth)
-    new_auth["tokens"] = new_tokens
-    new_auth["last_refresh"] = now_utc().isoformat()
+        new_auth = dict(auth)
+        new_auth["tokens"] = new_tokens
+        new_auth["last_refresh"] = now_utc().isoformat()
 
-    def put_tokens(store: JsonDict) -> tuple[str, Any]:
-        store["tokens"] = new_tokens
-        store["last_refresh"] = new_auth["last_refresh"]
-        return "tokens", new_tokens
+        def put_tokens(store: JsonDict) -> tuple[str, Any]:
+            store["tokens"] = new_tokens
+            store["last_refresh"] = new_auth["last_refresh"]
+            return "tokens", new_tokens
 
-    try:
-        _merge_write_json(CODEX_AUTH, put_tokens, new_auth)
-    except OSError:
-        pass  # return live tokens; writing auth.json failed
-    return new_auth
+        try:
+            _merge_write_json(CODEX_AUTH, put_tokens, new_auth)
+        except OSError:
+            pass  # return live tokens; writing auth.json failed
+        return new_auth
 
 
 def fetch_codex() -> JsonDict:

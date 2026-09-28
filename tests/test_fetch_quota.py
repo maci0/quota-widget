@@ -7,9 +7,13 @@ import io
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
+import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import fetch_quota
@@ -26,6 +30,8 @@ _NEW_TOKENS: dict[str, object] = {
     "refresh_token": "new-refresh",
     "expires_in": 28800,
 }
+
+JsonDict = dict[str, Any]
 
 
 class CodexWindowTest(unittest.TestCase):
@@ -788,6 +794,275 @@ class ReplayTest(unittest.TestCase):
             if cached.name.startswith(("claude", "cursor", "grok", "codex")):
                 cached.unlink()
         self.assertEqual(self._poll(), first)
+
+
+def _jwt_with_exp(exp_s: int) -> str:
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
+    payload = (
+        base64.urlsafe_b64encode(json.dumps({"exp": exp_s}).encode())
+        .rstrip(b"=")
+        .decode()
+    )
+    return f"{header}.{payload}.sig"
+
+
+class RefreshRunsOnceTest(unittest.TestCase):
+    """A second poll must not rotate an already-rotated refresh token.
+
+    Providers invalidate the refresh token they hand out, so a duplicate
+    refresh leaves the credential file holding a token that can never work.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        os.environ["QUOTA_WIDGET_CACHE"] = self.tmp.name
+        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
+
+    def _point(self, name: str, path: Path) -> None:
+        original = getattr(fetch_quota, name)
+        setattr(fetch_quota, name, path)
+        self.addCleanup(lambda: setattr(fetch_quota, name, original))
+
+    def test_claude_second_poll_reuses_rotated_token(self) -> None:
+        cred = Path(self.tmp.name) / "cred.json"
+        cred.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "old-access",
+                        "refreshToken": "old-refresh",
+                        "expiresAt": 1,
+                        "subscriptionType": "pro",
+                    }
+                }
+            )
+        )
+        self._point("CLAUDE_CRED", cred)
+        posts: list[str] = []
+
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            self.assertIn("/oauth/token", url)
+            body = json.loads((data or b"").decode())
+            posts.append(str(body["refresh_token"]))
+            if body["refresh_token"] != "old-refresh":
+                return 400, {"error": "invalid_grant"}
+            return 200, {
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_in": 28800,
+            }
+
+        def fake_http(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object, object]:
+            return 200, {"five_hour": {"utilization": 4}}, None
+
+        with (
+            patch.object(fetch_quota, "fetch_json", fake_json),
+            patch.object(fetch_quota, "fetch_http", fake_http),
+        ):
+            first = fetch_quota.fetch_claude()
+            second = fetch_quota.fetch_claude()
+
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(posts, ["old-refresh"])
+        saved = json.loads(cred.read_text())["claudeAiOauth"]
+        self.assertEqual(saved["accessToken"], "new-access")
+        self.assertEqual(saved["refreshToken"], "new-refresh")
+
+    def test_claude_concurrent_polls_rotate_once(self) -> None:
+        cred = Path(self.tmp.name) / "cred.json"
+        cred.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "old-access",
+                        "refreshToken": "old-refresh",
+                        "expiresAt": 1,
+                    }
+                }
+            )
+        )
+        self._point("CLAUDE_CRED", cred)
+        posts: list[str] = []
+        second_started = threading.Event()
+        first_in_token_call = threading.Event()
+
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            body = json.loads((data or b"").decode())
+            posts.append(str(body["refresh_token"]))
+            first_in_token_call.set()
+            second_started.wait(5)
+            if body["refresh_token"] != "old-refresh":
+                return 400, {"error": "invalid_grant"}
+            return 200, {
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_in": 28800,
+            }
+
+        def fake_http(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object, object]:
+            return 200, {"five_hour": {"utilization": 4}}, None
+
+        results: list[JsonDict] = []
+
+        def run() -> None:
+            results.append(fetch_quota.fetch_claude())
+
+        with (
+            patch.object(fetch_quota, "fetch_json", fake_json),
+            patch.object(fetch_quota, "fetch_http", fake_http),
+        ):
+            first = threading.Thread(target=run)
+            first.start()
+            first_in_token_call.wait(5)
+            second = threading.Thread(target=run)
+            second.start()
+            second_started.set()
+            first.join(10)
+            second.join(10)
+
+        self.assertEqual(posts, ["old-refresh"])
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(r["ok"] for r in results))
+        saved = json.loads(cred.read_text())["claudeAiOauth"]
+        self.assertEqual(saved["refreshToken"], "new-refresh")
+
+    def test_codex_second_poll_reuses_rotated_token(self) -> None:
+        auth = Path(self.tmp.name) / "codex-auth.json"
+        auth.write_text(
+            json.dumps(
+                {
+                    "tokens": {
+                        "access_token": _jwt_with_exp(0),
+                        "refresh_token": "old-refresh",
+                        "account_id": "acct-1",
+                    }
+                }
+            )
+        )
+        self._point("CODEX_AUTH", auth)
+        posts: list[str] = []
+        fresh = _jwt_with_exp(int(time.time()) + 3600)
+
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            if url == fetch_quota.CODEX_TOKEN_URL:
+                body = urllib.parse.parse_qs((data or b"").decode())
+                posts.append(body["refresh_token"][0])
+                if body["refresh_token"][0] != "old-refresh":
+                    return 400, {"error": "invalid_grant"}
+                return 200, {
+                    "access_token": fresh,
+                    "refresh_token": "new-refresh",
+                }
+            return 200, {
+                "plan_type": "plus",
+                "rate_limit": {"allowed": True, "primary_window": {}},
+            }
+
+        with patch.object(fetch_quota, "fetch_json", fake_json):
+            fetch_quota.fetch_codex()
+            fetch_quota.fetch_codex()
+
+        self.assertEqual(posts, ["old-refresh"])
+        saved = json.loads(auth.read_text())["tokens"]
+        self.assertEqual(saved["access_token"], fresh)
+        self.assertEqual(saved["refresh_token"], "new-refresh")
+
+    def test_grok_second_poll_reuses_rotated_token(self) -> None:
+        past = dt.datetime.now(dt.UTC) - dt.timedelta(hours=1)
+        auth = Path(self.tmp.name) / "grok-auth.json"
+        auth.write_text(
+            json.dumps(
+                {
+                    "cli::client-1": {
+                        "key": "old-access",
+                        "refresh_token": "old-refresh",
+                        "oidc_client_id": "client-1",
+                        "expires_at": past.isoformat().replace("+00:00", "Z"),
+                    }
+                }
+            )
+        )
+        self._point("GROK_AUTH", auth)
+        posts: list[str] = []
+        billing = {
+            "config": {
+                "isUnifiedBillingUser": True,
+                "currentPeriod": {
+                    "type": "WEEKLY",
+                    "start": "2026-01-01T00:00:00Z",
+                    "end": "2026-01-08T00:00:00Z",
+                },
+            }
+        }
+
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            if url == fetch_quota.GROK_OIDC_DISCOVERY:
+                return 200, {"token_endpoint": "https://auth.test/token"}
+            if url == "https://auth.test/token":
+                body = urllib.parse.parse_qs((data or b"").decode())
+                posts.append(body["refresh_token"][0])
+                if body["refresh_token"][0] != "old-refresh":
+                    return 400, {"error": "invalid_grant"}
+                return 200, {
+                    "access_token": "new-access",
+                    "refresh_token": "new-refresh",
+                    "expires_in": 3600,
+                }
+            self.assertTrue(url.startswith(fetch_quota.GROK_BILLING_URL))
+            return 200, billing
+
+        with patch.object(fetch_quota, "fetch_json", fake_json):
+            fetch_quota.fetch_grok()
+            fetch_quota.fetch_grok()
+
+        self.assertEqual(posts, ["old-refresh"])
+        saved = json.loads(auth.read_text())["cli::client-1"]
+        self.assertEqual(saved["key"], "new-access")
+        self.assertEqual(saved["refresh_token"], "new-refresh")
 
 
 if __name__ == "__main__":

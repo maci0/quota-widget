@@ -51,7 +51,7 @@ systemctl --user restart plasma-plasmashell.service
 | Codex | `GET https://chatgpt.com/backend-api/wham/usage` | Codex ChatGPT OAuth |
 | Grok | `GET https://cli-chat-proxy.grok.com/v1/billing` | Grok OIDC |
 
-Tokens leave the machine only for those HTTPS calls. Grok, Codex, and Claude OAuth tokens are refreshed in place when near expiry.
+Tokens leave the machine only for those HTTPS calls. Grok, Codex, and Claude OAuth tokens are refreshed in place when near expiry. Every provider rotates the refresh token it hands out, so refreshes run under an advisory lock in `~/.cache/quota-widget` and re-read the credential file once they hold it: a second poll (a second widget instance, a manual run, the install smoke test) reuses the token the first run already wrote instead of rotating it a second time and invalidating it.
 
 Claude's usage API 429s unknown User-Agents. The fetcher sends Claude Code's User-Agent on that request, waits only for a short `Retry-After`, and reuses `~/.cache/quota-widget` when a usage call still 429s or 5xxs. Grok and Codex use that cache too. An expired Claude token whose refresh is also 429 is shown as rate-limited, not signed-out.
 
