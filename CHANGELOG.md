@@ -174,6 +174,12 @@ fails if a Breaking entry lands in this section without a matching next version.
   end. A second argument is a usage error now, exit 2, and all three scripts
   answer the same line the same way. The comment describing the old behavior
   described behavior the script did not have.
+- A `QUOTA_WIDGET_HTTP_TIMEOUT` near the top of its accepted range, 300 s, made
+  every poll outlive the panel's ten-minute poll watchdog, so each run was
+  dropped mid-flight and reported as `exec` with no payload behind it. A poll now
+  reports the budget its timeout adds up to as `poll_timeout_s`, and the panel
+  waits for the longer of that and its own default. The default watchdog is
+  unchanged for every timeout that fitted inside it.
 - A Grok token refresh raised `OverflowError` when the new expiry fell past the
   last instant the calendar holds, which is what a `QUOTA_WIDGET_NOW_MS` at the
   ceiling the fetcher accepts, or a lifetime far longer than the calendar, both

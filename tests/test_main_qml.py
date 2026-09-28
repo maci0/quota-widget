@@ -638,6 +638,44 @@ class MainQmlStaleWindowTest(unittest.TestCase):
         )
 
 
+class MainQmlPollWatchdogTest(unittest.TestCase):
+    """The poll watchdog has to outlast a poll the fetcher is entitled to
+    take: QUOTA_WIDGET_HTTP_TIMEOUT goes to 300 s, more than the panel's own
+    constant holds, and a shorter watchdog drops the run and calls it exec."""
+
+    def test_the_watchdog_budget_comes_from_the_poll_payload(self) -> None:
+        self.assertIn("const budgetS = p.poll_timeout_s", QML_SOURCE)
+        self.assertIn(
+            'root.pollTimeoutMs = (typeof budgetS === "number" && budgetS > 0)',
+            QML_SOURCE,
+        )
+
+    def test_the_fallback_watchdog_is_not_writable_state(self) -> None:
+        # pollTimeoutMs is overwritten by every poll, so the default it falls
+        # back to has to be a separate readonly property, as staleKeepMs is.
+        self.assertIn(
+            "readonly property int defaultPollTimeoutMs: 10 * 60 * 1000", QML_SOURCE
+        )
+        self.assertIn("property int pollTimeoutMs: defaultPollTimeoutMs", QML_SOURCE)
+
+    def test_a_reported_budget_only_ever_raises_the_watchdog(self) -> None:
+        # The budget bounds the requests a poll makes, not the body a socket
+        # trickles back under its per-read timeout, so a smaller number must
+        # not shorten a deadline the default already covers.
+        self.assertIn("Math.max(root.defaultPollTimeoutMs,", QML_SOURCE)
+
+    def test_a_reported_budget_is_capped(self) -> None:
+        # The number arrives in a payload the panel trusts, so a run that would
+        # never end cannot buy itself an unbounded deadline.
+        self.assertIn(
+            "readonly property int maxPollTimeoutMs: 30 * 60 * 1000", QML_SOURCE
+        )
+        self.assertIn("Math.min(root.maxPollTimeoutMs,", QML_SOURCE)
+
+    def test_the_watchdog_uses_it(self) -> None:
+        self.assertIn("interval: root.pollTimeoutMs", QML_SOURCE)
+
+
 class MainQmlStatusWordingTest(unittest.TestCase):
     """A failure has to name its condition; "Unavailable" names none."""
 

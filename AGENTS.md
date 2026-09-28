@@ -20,7 +20,9 @@ Dev and CI use `uv`. The gate is at the end of this file; run it after any edit.
 
 ## Polling
 
-The QML owns the fetcher process. One run at a time: `exec.poll()` returns early while a source is connected, `onNewData` disconnects it, and the one-shot `pollWatchdog` timer disconnects a run still out after `pollTimeoutMs` (10 min, in the token block with the other timing values) so a stalled fetch cannot wedge polling. The deadline is a QML Timer, never a difference of two `Date.now()` readings: `nowMs` is a wall clock and steps backwards on an NTP correction, and a negative elapsed time never reaches the timeout, so polling stays dead. Keep the release on every path that starts a run.
+The QML owns the fetcher process. One run at a time: `exec.poll()` returns early while a source is connected, `onNewData` disconnects it, and the one-shot `pollWatchdog` timer disconnects a run still out after `pollTimeoutMs` so a stalled fetch cannot wedge polling. The deadline is a QML Timer, never a difference of two `Date.now()` readings: `nowMs` is a wall clock and steps backwards on an NTP correction, and a negative elapsed time never reaches the timeout, so polling stays dead. Keep the release on every path that starts a run.
+
+`pollTimeoutMs` is `defaultPollTimeoutMs` (10 min, in the token block with the other timing values) until a poll reports `poll_timeout_s`, the budget its own `QUOTA_WIDGET_HTTP_TIMEOUT` adds up to (`Config.poll_timeout_s`, off `MAX_SEQUENTIAL_REQUESTS` and `POLL_OVERHEAD_S`). `QUOTA_WIDGET_HTTP_TIMEOUT` reaches 300 s, more than a constant in the QML holds, and dropping a run that is still entitled to answer reports it as `exec` with no payload behind it. The reported budget only ever raises the deadline, capped by `maxPollTimeoutMs`, since the number arrives in a payload the panel trusts. This is the `cache_max_age_s` channel again, and the same rule holds for it: a fetcher-side value the panel acts on travels in the payload rather than living as a second constant in the QML.
 
 ## Threads
 

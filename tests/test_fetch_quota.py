@@ -2695,6 +2695,63 @@ class ConfigTest(unittest.TestCase):
             fetch_quota.main([])
         self.assertEqual(json.loads(out.getvalue())["cache_max_age_s"], 300)
 
+    def _poll_payload(self, **env: str) -> JsonDict:
+        """The payload one poll prints, with every provider stubbed out."""
+        out = io.StringIO()
+        stub = {"ok": False, "error": "net"}
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        with (
+            config_env(QUOTA_WIDGET_CACHE=str(Path(tmp) / "cache"), **env),
+            patch.object(fetch_quota, "fetch_claude", return_value=dict(stub)),
+            patch.object(fetch_quota, "fetch_cursor", return_value=dict(stub)),
+            patch.object(fetch_quota, "fetch_grok", return_value=dict(stub)),
+            patch.object(fetch_quota, "fetch_codex", return_value=dict(stub)),
+            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(out),
+            self.assertRaises(SystemExit),
+        ):
+            fetch_quota.main([])
+        parsed: JsonDict = json.loads(out.getvalue())
+        return parsed
+
+    def test_poll_reports_a_watchdog_budget_its_own_timeout_justifies(self) -> None:
+        # The panel's watchdog drops a run that outlasts it, and
+        # QUOTA_WIDGET_HTTP_TIMEOUT is settable past what a constant in the QML
+        # holds, so the budget a poll is entitled to take travels with it.
+        payload = self._poll_payload(QUOTA_WIDGET_HTTP_TIMEOUT="300")
+        self.assertEqual(
+            payload["poll_timeout_s"],
+            fetch_quota.MAX_SEQUENTIAL_REQUESTS * 300.0 + fetch_quota.POLL_OVERHEAD_S,
+        )
+        # Longer than the panel's own 10-minute default, which is the case that
+        # would otherwise drop every poll.
+        self.assertGreater(payload["poll_timeout_s"], 10 * 60)
+
+    def test_the_budget_scales_with_the_timeout_it_is_derived_from(self) -> None:
+        default = self._poll_payload()["poll_timeout_s"]
+        long_run = self._poll_payload(QUOTA_WIDGET_HTTP_TIMEOUT="60")["poll_timeout_s"]
+        self.assertGreater(long_run, default)
+        self.assertEqual(
+            long_run - default,
+            fetch_quota.MAX_SEQUENTIAL_REQUESTS
+            * (60.0 - fetch_quota.DEFAULT_HTTP_TIMEOUT_S),
+        )
+
+    def test_print_config_reports_the_budget_it_would_report(self) -> None:
+        out = io.StringIO()
+        with (
+            config_env(QUOTA_WIDGET_HTTP_TIMEOUT="45"),
+            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(out),
+            self.assertRaises(SystemExit),
+        ):
+            fetch_quota.main(["--print-config"])
+            described = json.loads(out.getvalue())["config"]
+            self.assertEqual(
+                described["poll_timeout_s"],
+                fetch_quota.config().poll_timeout_s,
+            )
+
     def test_bad_config_fails_before_any_provider_runs(self) -> None:
         stderr = io.StringIO()
         with (

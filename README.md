@@ -172,6 +172,14 @@ every other variable belong to the environment and are left alone.
 reports the value it is using as `cache_max_age_s`, so the panel ages a kept
 reading against the same number instead of a constant of its own.
 
+`QUOTA_WIDGET_HTTP_TIMEOUT` has the same relationship with the panel's poll
+watchdog. The panel drops a run that outlasts its watchdog, and at the top of
+the accepted range a poll is entitled to take longer than the panel's own ten
+minutes, so every such poll was dropped and reported as a failure with no
+payload behind it. Each poll now reports the budget its timeout adds up to as
+`poll_timeout_s`, and the panel waits for the longer of that and its own
+default.
+
 `QUOTA_WIDGET_ACCOUNT_SALT` supplies the account-salt key instead of letting
 the run make one. Leave it unset in a session: the fetcher then draws 32 bytes
 from `os.urandom` and keeps them in `account-salt` next to the cache entries
@@ -193,7 +201,8 @@ Verify what the fetcher actually sees:
 python3 package/contents/code/fetch_quota.py --print-config
 ```
 
-That prints paths and the two numeric knobs. No token is read or printed.
+That prints paths, the numeric knobs, and the poll budget the timeout adds up
+to. No token is read or printed.
 
 No secret belongs in these variables: the fetcher takes every token from the
 files above, so a session export leaks nothing. Override a credential path only

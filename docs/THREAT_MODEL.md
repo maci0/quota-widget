@@ -127,10 +127,14 @@ No other host is contacted. `api.openai.com` appears in a JWT claim path
   zero exit code; there is no signature on the output.
 - **Denial of service.** A fetcher that hangs holds the widget at its previous
   reading; each request is bounded by `http_timeout_s`
-  (`DEFAULT_HTTP_TIMEOUT_S`, `fetch_quota.py:392`, capped at
-  `MAX_HTTP_TIMEOUT_S`, `fetch_quota.py:393`), and a run that outlives
-  `pollTimeoutMs` is disconnected by the poll watchdog
-  (`package/contents/ui/main.qml:206`).
+  (`DEFAULT_HTTP_TIMEOUT_S`, capped at `MAX_HTTP_TIMEOUT_S`), and a run that
+  outlives `pollTimeoutMs` is disconnected by the poll watchdog
+  (`package/contents/ui/main.qml`). The watchdog takes the budget a poll reports
+  as `poll_timeout_s` (`Config.poll_timeout_s`), so a `QUOTA_WIDGET_HTTP_TIMEOUT`
+  the panel's own ten-minute default cannot hold does not drop a run that was
+  still entitled to answer. That number arrives in a payload the panel trusts,
+  so the panel caps it (`maxPollTimeoutMs`): a hostile or broken fetcher cannot
+  buy itself an unbounded deadline, only half an hour.
 - **Denial of service (memory).** The payload is read into plasmashell's heap
   every poll. The fetcher caps what it will read from a vendor at
   `MAX_RESPONSE_BYTES` (`fetch_quota.py:427`) and the number of meters it will

@@ -433,6 +433,8 @@ SECONDS_PER_DAY = 86400
 # the holder died, and the caller refreshes anyway rather than never.
 REFRESH_LOCK_WAIT_S = 20.0
 REFRESH_LOCK_POLL_S = 0.25
+# Interpreter start plus the fetcher's own import of its metadata.json.
+POLL_STARTUP_S = 2.0
 # Longest a cached reading may be shown after the vendor API fails, unless
 # QUOTA_WIDGET_CACHE_MAX_AGE_S says otherwise. The plasmoid keeps its own copy
 # for the same window, and takes the length from the poll payload so an
@@ -475,6 +477,19 @@ RETRY_AFTER_MAX_S = 10.0
 NETWORK_RETRY_BACKOFF_S = 0.5
 # Unix seconds vs milliseconds: values above this are treated as ms.
 MS_EPOCH_CUTOFF = 10_000_000_000
+# How many sequential requests one provider may make, counted in per-request
+# timeouts. Grok is the longest: the OIDC discovery, a token POST, then a
+# billing call that can come back 401 and be repeated, and a GET spends two of
+# them because _request retries a dropped connection once. Four requests, two
+# of them GETs, is the ceiling; Claude (two token URLs, then a GET) and Codex
+# (a token POST, then a GET) are both shorter.
+MAX_SEQUENTIAL_REQUESTS = 8
+# Everything a poll can wait on that is not a request: waiting behind another
+# run's token refresh, a rate limit's Retry-After, the retry backoff between
+# two attempts, and interpreter start.
+POLL_OVERHEAD_S = (
+    REFRESH_LOCK_WAIT_S + RETRY_AFTER_MAX_S + NETWORK_RETRY_BACKOFF_S + POLL_STARTUP_S
+)
 CODEX_SESSION_MAX_S = 6 * SECONDS_PER_HOUR
 CODEX_TWO_DAY_S = 2 * SECONDS_PER_DAY
 CODEX_WEEK_MIN_S = 6 * SECONDS_PER_DAY
@@ -528,6 +543,18 @@ class Config:
     cache_max_age_s: int
     account_salt: bytes | None
 
+    @property
+    def poll_timeout_s(self) -> float:
+        """The longest a poll with this config can be entitled to take.
+
+        The panel drops a run that outlasts its watchdog, so a watchdog shorter
+        than this turns a slow but honest poll into an "exec" failure with no
+        payload behind it. QUOTA_WIDGET_HTTP_TIMEOUT is settable up to 300 s,
+        which by itself is more than a fixed watchdog can hold, so the budget
+        travels with the payload instead of being a constant the panel owns.
+        """
+        return MAX_SEQUENTIAL_REQUESTS * self.http_timeout_s + POLL_OVERHEAD_S
+
     def describe(self) -> JsonDict:
         """Active values for `--print-config`: paths and knobs, and no
         token is read to produce them. The account key is reported as pinned or
@@ -542,6 +569,7 @@ class Config:
             "cursor_state_db": str(self.cursor_state_db),
             "cache_dir": str(self.cache_dir),
             "http_timeout_s": self.http_timeout_s,
+            "poll_timeout_s": self.poll_timeout_s,
             "cache_max_age_s": self.cache_max_age_s,
             "account_salt": "pinned" if self.account_salt is not None else "generated",
         }
@@ -2881,6 +2909,11 @@ def main(argv: list[str] | None = None) -> None:
             # of QUOTA_WIDGET_CACHE_MAX_AGE_S reaches it instead of being
             # answered by the 24 h default compiled into the QML.
             "cache_max_age_s": cfg.cache_max_age_s,
+            # And it sizes its poll watchdog from this, so a
+            # QUOTA_WIDGET_HTTP_TIMEOUT the panel's own constant could not hold
+            # is not answered by dropping a run that was still entitled to
+            # answer.
+            "poll_timeout_s": cfg.poll_timeout_s,
             "fetched_ms": now_ms(),
         }
     )

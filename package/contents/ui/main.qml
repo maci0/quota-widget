@@ -46,10 +46,15 @@ PlasmoidItem {
     // panel holding a reading the fetcher has already dropped.
     readonly property int defaultStaleKeepMs: 24 * 60 * 60 * 1000
     property int staleKeepMs: defaultStaleKeepMs
-    // Longest one fetcher run may hold the data source before the poll
-    // watchdog drops it: four providers, each with a bounded HTTP timeout, a
-    // Retry-After sleep, and a refresh-lock wait, plus process startup.
-    readonly property int pollTimeoutMs: 10 * 60 * 1000
+    // How long a run may hold the data source before the poll watchdog drops
+    // it. A poll reports the budget its own QUOTA_WIDGET_HTTP_TIMEOUT adds up
+    // to, and the higher of that and this stands, so a timeout the default
+    // cannot hold does not drop a run the fetcher was still entitled to answer.
+    // maxPollTimeoutMs caps the reported number, which arrives in a payload the
+    // panel trusts; a poll past it is a hung one, not a slow one.
+    readonly property int defaultPollTimeoutMs: 10 * 60 * 1000
+    readonly property int maxPollTimeoutMs: 30 * 60 * 1000
+    property int pollTimeoutMs: defaultPollTimeoutMs
 
     // ── tokens ───────────────────────────────────────────────────────────
     // Meter geometry and opacity. Every view reads these so the panel, the
@@ -168,6 +173,12 @@ PlasmoidItem {
                 }
                 root.fetchedMs = Math.max(root.fetchedMs,
                     p.fetched_ms || Date.now())
+                const budgetS = p.poll_timeout_s
+                root.pollTimeoutMs = (typeof budgetS === "number" && budgetS > 0)
+                    ? Math.min(root.maxPollTimeoutMs,
+                        Math.max(root.defaultPollTimeoutMs,
+                            Math.ceil(budgetS * 1000)))
+                    : root.defaultPollTimeoutMs
                 root.configError = p.config_error || ""
                 let anyOk = false
                 let firstError = ""
