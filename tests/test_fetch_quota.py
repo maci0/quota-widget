@@ -1758,6 +1758,88 @@ class AccountKeyTest(unittest.TestCase):
         self.assertEqual(key.stat().st_mode & 0o777, 0o600)
         self.assertEqual(cache.stat().st_mode & 0o777, fetch_quota.CACHE_DIR_MODE)
 
+    def test_the_key_is_installed_once_and_never_replaced(self) -> None:
+        # A run that mints its own key while another installs one leaves the
+        # entries written under the first key readable by nobody, and scopes
+        # the panel's digest by a key no file names.
+        cache = Path(self.tmp.name) / "cache"
+        fetch_quota._private_dir(cache)
+        key = cache / fetch_quota.ACCOUNT_SALT_NAME
+        first = b"\x01" * fetch_quota.ACCOUNT_SALT_BYTES
+        fetch_quota._install_salt(key, first)
+        fetch_quota._install_salt(key, b"\x02" * fetch_quota.ACCOUNT_SALT_BYTES)
+        self.assertEqual(fetch_quota._salt_on_disk(key), first)
+
+    def test_a_key_installed_while_this_run_was_deciding_is_the_one_kept(self) -> None:
+        cache = Path(self.tmp.name) / "cache"
+        fetch_quota._private_dir(cache)
+        key = cache / fetch_quota.ACCOUNT_SALT_NAME
+        installed = b"\x03" * fetch_quota.ACCOUNT_SALT_BYTES
+        real = fetch_quota._salt_on_disk
+
+        def blocked(path: Path) -> bytes | None:
+            value = real(path)
+            if path.name == fetch_quota.ACCOUNT_SALT_NAME and value is None:
+                fetch_quota._atomic_write_json(key, {"salt": installed.hex()})
+            return value
+
+        with config_env(QUOTA_WIDGET_CACHE=str(cache)):
+            fetch_quota._salt_on_disk = blocked
+            try:
+                chosen = fetch_quota._load_or_create_salt()
+            finally:
+                fetch_quota._salt_on_disk = real
+        self.assertEqual(chosen, installed)
+        self.assertEqual(real(key), installed)
+
+    def test_two_runs_that_reach_it_together_end_on_one_key(self) -> None:
+        cache = Path(self.tmp.name) / "cache"
+        keys: list[bytes] = []
+        real = fetch_quota._salt_on_disk
+        arrived = 0
+        gate = threading.Condition()
+
+        def blocked(path: Path) -> bytes | None:
+            nonlocal arrived
+            value = real(path)
+            if path.name == fetch_quota.ACCOUNT_SALT_NAME and value is None:
+                # Hold a run at the read that found nothing, so the two that
+                # reach it together both try to install a key.
+                with gate:
+                    arrived += 1
+                    if arrived < 2:
+                        gate.wait_for(lambda: arrived >= 2, timeout=10)
+                    else:
+                        gate.notify_all()
+            return value
+
+        def load() -> None:
+            keys.append(fetch_quota._load_or_create_salt())
+
+        with config_env(QUOTA_WIDGET_CACHE=str(cache)):
+            fetch_quota._salt_on_disk = blocked
+            try:
+                threads = [threading.Thread(target=load) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=30)
+            finally:
+                fetch_quota._salt_on_disk = real
+            on_disk = real(cache / fetch_quota.ACCOUNT_SALT_NAME)
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(keys[0], on_disk)
+        self.assertEqual(keys[1], on_disk)
+
+    def test_a_key_left_empty_by_a_killed_run_is_replaced(self) -> None:
+        cache = Path(self.tmp.name) / "cache"
+        fetch_quota._private_dir(cache)
+        key = cache / fetch_quota.ACCOUNT_SALT_NAME
+        key.touch(mode=0o600)
+        with config_env(QUOTA_WIDGET_CACHE=str(cache)):
+            installed = fetch_quota._load_or_create_salt()
+        self.assertEqual(fetch_quota._salt_on_disk(key), installed)
+
 
 class RedactionTest(unittest.TestCase):
     """A printed line never spells out whose machine it came from.

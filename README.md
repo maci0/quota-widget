@@ -205,7 +205,7 @@ Retention:
 | Data | Where | How long |
 | --- | --- | --- |
 | Usage payload cache | `~/.cache/quota-widget/*.json` | At most 24 hours (`DEFAULT_CACHE_MAX_AGE_S`, overridable with `QUOTA_WIDGET_CACHE_MAX_AGE_S`); an expired file is deleted when it is next read, whichever account asks |
-| Account digest key | `~/.cache/quota-widget/account-salt` | Created on the first poll, removed by `--clear-cache` |
+| Account digest key | `~/.cache/quota-widget/account-salt` | Created on the first poll and never replaced, so every reading on the machine is scoped by one key; removed by `--clear-cache` |
 | OAuth tokens | vendor token files above | Rotated by the vendor's own expiry, written back only on refresh |
 
 Both are written `0600` under your home directory, and the cache directory is `0700`, tightened on every poll if it was created with a wider mode. To erase everything the widget keeps, run

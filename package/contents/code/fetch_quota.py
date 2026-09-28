@@ -910,6 +910,40 @@ def _salt_on_disk(path: Path) -> bytes | None:
     return value if len(value) == ACCOUNT_SALT_BYTES else None
 
 
+def _install_salt(path: Path, salt: bytes) -> None:
+    """Put salt at path unless another run installed one first.
+
+    The exclusive create is the claim: a second run cannot create the file, so
+    it never overwrites the key the first one installed, and the first one
+    never has to notice a second. That is the whole property, since the key is
+    the one every entry on disk was scoped under and a run that minted its own
+    would strand every entry written by the run it raced with.
+
+    A run killed between the create and the write leaves a file no entry was
+    scoped under, so a file that holds nothing readable is replaced here.
+    """
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, FILE_MODE_PRIVATE)
+    except FileExistsError:
+        if _salt_on_disk(path) is None:
+            _atomic_write_json(path, {"salt": salt.hex()})
+        return
+    try:
+        with os.fdopen(fd, "w", encoding=JSON_ENCODING, newline="\n") as f:
+            json.dump({"salt": salt.hex()}, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        # A key file nobody can read is no better than none, and the next run
+        # replaces it; leaving this one would pin every digest to a key the
+        # file never states.
+        with contextlib.suppress(OSError):
+            path.unlink()
+        raise
+    _fsync_dir(path.parent)
+
+
 def _load_or_create_salt() -> bytes:
     folder = config().cache_dir
     path = folder / ACCOUNT_SALT_NAME
@@ -919,7 +953,7 @@ def _load_or_create_salt() -> bytes:
     fresh = os.urandom(ACCOUNT_SALT_BYTES)
     try:
         _private_dir(folder)
-        _atomic_write_json(path, {"salt": fresh.hex()})
+        _install_salt(path, fresh)
     except OSError:
         # A cache directory that cannot be written holds no entries to scope
         # either, so a key that lives only in this process costs no cache hit
