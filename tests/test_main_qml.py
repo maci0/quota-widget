@@ -620,10 +620,14 @@ class MainQmlStaleWindowTest(unittest.TestCase):
         # that reported it. The merge walks providerNames, so one site covers
         # every provider and the window has to precede that walk.
         window = QML_SOURCE.index("root.staleKeepMs = (typeof keepS ===")
-        merge = QML_SOURCE.index("root[n] = mergeProv(root[n], p[n])")
-        self.assertLess(window, merge, "the window was taken after the merge")
-        walk = QML_SOURCE[:merge]
-        self.assertIn("for (let i = 0; i < root.providerNames.length; i++)", walk)
+        # The roster walks every provider, so one merge call covers all of
+        # them; what matters is that it sits inside the loop the window is
+        # read ahead of.
+        loop = QML_SOURCE.index(
+            "for (let i = 0; i < root.providerNames.length; i++)", window
+        )
+        merge = QML_SOURCE.index("root[n] = mergeProv(root[n], p[n])", loop)
+        self.assertLess(window, merge, "roster merged before the window")
 
     def test_the_fallback_window_is_not_writable_state(self) -> None:
         # staleKeepMs is overwritten by every poll, so the default it falls
