@@ -15,8 +15,13 @@ prints, so a fetcher and UI shipped together never break each other.
 ### Added
 
 - Seeded randomized fuzzing for the parsers that read untrusted input: the
-  Cursor usage-summary body, the Cursor `ItemTable` cells, and vendor JWTs
-  (`tests/test_fuzz_parsers.py`). A failure prints the seed that reproduces it.
+  Cursor usage-summary body, the Claude and Codex usage bodies, the Grok
+  billing config, the vendor timestamps, the `Retry-After` header, the Cursor
+  `ItemTable` cells, and vendor JWTs (`tests/test_fuzz_parsers.py`). Each
+  reading is asserted for the shape the panel needs, and a parsed Claude
+  reading is written to the provider cache and read back, so a value that
+  cannot survive the round trip fails the run. A failure prints the seed that
+  reproduces it.
 - `QUOTA_WIDGET_NOW_MS` pins the fetcher clock, so the same HTTP responses print
   byte-identical output on every run. Documented in the README, for tests and
   smoke runs.
@@ -30,6 +35,17 @@ prints, so a fetcher and UI shipped together never break each other.
 
 ### Fixed
 
+- A Codex `reset_at` or a JWT `exp` beyond any renderable instant is finite but
+  cannot be rounded to milliseconds, so the conversion raised `OverflowError`
+  and took the whole provider down. Such a value now reads as an absent reset,
+  the way an unparseable one does.
+- `Retry-After` assumed the header parser hands back a string. A value that is
+  not one raised `AttributeError` out of a poll, and a header of `inf` gave
+  `sleep()` an infinite wait. Both read as no wait now.
+- A Codex reset-credit count, a `rate_limit.allowed`, and a credits `balance`
+  reached the widget JSON as whatever the wire held. A non-finite one is
+  rejected by plasmashell's parser and blanks the widget, so only a finite
+  number is passed on.
 - The gate was red on a clean tree: `ruff` reported an unparameterized table
   name and a needless comprehension in the Cursor `state.vscdb` fixture. The
   table name is now checked against the names the fixture builds, so `CI` is

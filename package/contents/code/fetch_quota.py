@@ -137,6 +137,19 @@ def ms_from_seconds(seconds: float) -> int:
     return round(seconds * 1000)
 
 
+def seconds_to_ms(value: object) -> int | None:
+    """Epoch-ms from a numeric seconds field a vendor sent, or None.
+
+    The bound is checked before the conversion, not after: a double of 1e308
+    is finite and still cannot be rounded to an int, so reading a reset or an
+    expiry out of range has to come back absent rather than raise.
+    """
+    number = _finite_number(value)
+    if number is None or not -MAX_EPOCH_S <= number <= MAX_EPOCH_S:
+        return None
+    return ms_from_seconds(number)
+
+
 def now_utc() -> dt.datetime:
     return EPOCH_UTC + dt.timedelta(milliseconds=now_ms())
 
@@ -234,6 +247,9 @@ RETRY_AFTER_MAX_S = 10.0
 NETWORK_RETRY_BACKOFF_S = 0.5
 # Unix seconds vs milliseconds: values above this are treated as ms.
 MS_EPOCH_CUTOFF = 10_000_000_000
+# 9999-12-31T23:59:59Z. A seconds value past the last instant a date can
+# render is not a reset time, whatever the payload calls it.
+MAX_EPOCH_S = 253_402_300_800
 SECONDS_PER_HOUR = 3600
 SECONDS_PER_DAY = 86400
 CODEX_SESSION_MAX_S = 6 * SECONDS_PER_HOUR
@@ -488,21 +504,32 @@ def plan_label(subscription: str | None, tier: str | None) -> str:
 
 
 def parse_retry_after(value: str | None) -> float | None:
-    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date)."""
-    if not value:
+    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date).
+
+    A header is the vendor's to shape, so anything that is not a plain
+    string, and any value that is not a finite number of seconds, reads as
+    no wait at all. The result feeds sleep(), where an infinity or a raise
+    would cost the poll far more than the retry it was meant to cover.
+    """
+    if not isinstance(value, str) or not value:
         return None
     s = value.strip()
+    if not s:
+        return None
     try:
-        return max(0.0, float(s))
+        seconds = float(s)
     except ValueError:
         pass  # not delta-seconds; try HTTP-date next
+    else:
+        return max(0.0, seconds) if math.isfinite(seconds) else None
     try:
         when = email.utils.parsedate_to_datetime(s)
         if when.tzinfo is None:
             when = when.replace(tzinfo=dt.UTC)
-        return max(0.0, (when - now_utc()).total_seconds())
+        wait = (when - now_utc()).total_seconds()
     except (TypeError, ValueError, OverflowError):
         return None  # HTTP-date present but not parseable
+    return max(0.0, wait) if math.isfinite(wait) else None
 
 
 def _fsync_dir(path: Path) -> None:
@@ -792,7 +819,12 @@ def _claude_expired(oauth: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool:
     exp = _finite_number(oauth.get("expiresAt"))
     if exp is None:
         return False
-    ts_ms = int(exp) if exp > MS_EPOCH_CUTOFF else ms_from_seconds(exp)
+    if exp > MS_EPOCH_CUTOFF:
+        ts_ms: int | None = int(exp)
+    else:
+        ts_ms = seconds_to_ms(exp)
+    if ts_ms is None:
+        return False
     return ts_ms <= now_ms() + skew_ms
 
 
@@ -1318,8 +1350,7 @@ def _jwt_claim(token: str, *path: str) -> Any:
 
 
 def _jwt_exp_ms(token: str) -> int | None:
-    exp = _finite_number(_jwt_claim(token, "exp"))
-    return ms_from_seconds(exp) if exp is not None else None
+    return seconds_to_ms(_jwt_claim(token, "exp"))
 
 
 def _codex_window_label(window_seconds: int | None, name: str) -> str:
@@ -1357,12 +1388,12 @@ def _codex_window(block: JsonDict | None, name: str) -> JsonDict | None:
     window_s_i = int(window_number) if window_number is not None else None
 
     resets_ms = None
-    reset_at = _finite_number(block.get("reset_at"))
-    after = _finite_number(block.get("reset_after_seconds"))
+    reset_at = seconds_to_ms(block.get("reset_at"))
+    after = seconds_to_ms(block.get("reset_after_seconds"))
     if reset_at is not None:
-        resets_ms = ms_from_seconds(reset_at)
+        resets_ms = reset_at
     elif after is not None:
-        resets_ms = now_ms() + ms_from_seconds(after)
+        resets_ms = now_ms() + after
 
     return {
         "label": _codex_window_label(window_s_i, name),
@@ -1374,16 +1405,25 @@ def _codex_window(block: JsonDict | None, name: str) -> JsonDict | None:
 
 
 def _codex_reset_credits(data: JsonDict) -> JsonDict:
-    """Preserve a reported empty reset-credit balance as an explicit zero."""
+    """Preserve a reported empty reset-credit balance as an explicit zero.
+
+    A count that is present but is not a finite number is not a balance, so
+    it reads as absent: a NaN here would reach the emitted document and the
+    panel's JSON parser would reject the whole payload.
+    """
     reported = "rate_limit_reset_credits" in data
     raw = data.get("rate_limit_reset_credits")
     resets = raw if isinstance(raw, dict) else {}
-    available = resets.get("available_count")
-    applicable = resets.get("applicable_available_count")
+
+    def count(key: str) -> int | float | None:
+        if key not in resets:
+            return 0 if reported else None
+        return _finite_number(resets[key])
+
     return {
         "reported": reported,
-        "available": 0 if reported and available is None else available,
-        "applicable": 0 if reported and applicable is None else applicable,
+        "available": count("available_count"),
+        "applicable": count("applicable_available_count"),
     }
 
 
@@ -1546,12 +1586,12 @@ def fetch_codex() -> JsonDict:
         {
             "ok": True,
             "plan": plan,
-            "allowed": rate.get("allowed"),
+            "allowed": _finite_number(rate.get("allowed")),
             "limit_reached": bool(rate.get("limit_reached")),
             "windows": windows,
             "credits": {
                 "has_credits": bool(credits.get("has_credits")),
-                "balance": credits.get("balance"),
+                "balance": _finite_number(credits.get("balance")),
                 "unlimited": bool(credits.get("unlimited")),
                 "overage_limit_reached": bool(credits.get("overage_limit_reached")),
             },
