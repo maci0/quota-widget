@@ -214,6 +214,8 @@ class MainQmlLocalizationTest(unittest.TestCase):
         # and its own digits, and some locales lead with the sign.
         self.assertNotIn('qsTr("%1%")', QML_SOURCE)
         self.assertIn('style: "percent"', QML_SOURCE)
+        self.assertIn("function percentStr(fraction, maxDigits)", QML_SOURCE)
+        self.assertIn("Qt.locale().percent", QML_SOURCE)
 
     def test_counts_in_durations_use_the_locale(self) -> None:
         # qsTr().arg() on a raw number splices a JS number, so an Arabic

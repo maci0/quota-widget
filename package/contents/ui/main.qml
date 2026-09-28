@@ -378,10 +378,19 @@ PlasmoidItem {
     // ("12 %") and a few locales lead with it. style: "percent" places the
     // sign, the space, and the digits the way the locale writes them.
     function percentStr(fraction, maxDigits) {
-        return Number(fraction).toLocaleString(Qt.locale().name, {
-            style: "percent",
-            maximumFractionDigits: maxDigits
-        })
+        const f = Number(fraction)
+        if (!isFinite(f))
+            return ""
+        const scale = Math.pow(10, maxDigits || 0)
+        const val = Math.round(f * 100 * scale) / scale
+        const n = numStr(val, maxDigits, 0)
+        const sym = Qt.locale().percent || "%"
+        const lang = Qt.locale().name.split("_")[0]
+        if (lang === "tr" || lang === "az" || lang === "fa")
+            return sym + n
+        if (["fr", "de", "sv", "no", "nb", "nn", "da", "fi", "ru", "cs", "sk", "pl", "uk", "nl", "pt"].indexOf(lang) !== -1)
+            return n + " " + sym
+        return n + sym
     }
 
     // Vendor amounts arrive as strings of unknown precision. Group and
