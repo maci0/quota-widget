@@ -1138,6 +1138,19 @@ class IsoToMsTest(unittest.TestCase):
         self.assertIsNone(fetch_quota.iso_to_ms(None))
         self.assertIsNone(fetch_quota.iso_to_ms("nope"))
 
+    def test_a_bare_epoch_is_read_in_the_unit_it_arrives_in(self) -> None:
+        # The same field arrives in seconds from one provider and in
+        # milliseconds from another; reading both as seconds put a millisecond
+        # reset thousands of years out.
+        self.assertEqual(fetch_quota.iso_to_ms(1777000000), 1_777_000_000_000)
+        self.assertEqual(fetch_quota.iso_to_ms(1777000000.25), 1_777_000_000_250)
+        self.assertEqual(fetch_quota.iso_to_ms(1_777_000_000_250), 1_777_000_000_250)
+
+    def test_a_value_that_is_not_an_instant_is_absent(self) -> None:
+        for value in (True, [1777000000], {"at": 1777000000}, ""):
+            with self.subTest(value=value):
+                self.assertIsNone(fetch_quota.iso_to_ms(value))
+
     def test_offset_free_timestamp_is_utc_not_host_local(self) -> None:
         # A payload timestamp with no offset means UTC. Resolving it against
         # the host zone put the same reading an hour or nine off depending on

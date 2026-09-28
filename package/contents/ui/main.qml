@@ -46,8 +46,8 @@ PlasmoidItem {
     // panel holding a reading the fetcher has already dropped.
     readonly property int defaultStaleKeepMs: 24 * 60 * 60 * 1000
     property int staleKeepMs: defaultStaleKeepMs
-    // Longest one fetcher run may hold the data source before the poll timer
-    // drops it: four providers, each with a bounded HTTP timeout, a
+    // Longest one fetcher run may hold the data source before the poll
+    // watchdog drops it: four providers, each with a bounded HTTP timeout, a
     // Retry-After sleep, and a refresh-lock wait, plus process startup.
     readonly property int pollTimeoutMs: 10 * 60 * 1000
 
@@ -79,7 +79,6 @@ PlasmoidItem {
     property string configError: ""
     property double nowMs: Date.now()
     property double fetchedMs: 0
-    property double pollStartedMs: 0
     readonly property bool gaugeView: !!Plasmoid.configuration.gaugeView
     readonly property bool firstLoad: root.noData() && root.errorMsg === ""
     // A poll is in flight. exec.poll() drops a second one, so the header
@@ -102,7 +101,7 @@ PlasmoidItem {
         connectedSources: []
         onNewData: (sourceName, data) => {
             disconnectSource(sourceName)
-            root.pollStartedMs = 0
+            pollWatchdog.stop()
             root.fetching = false
             root.userRefreshing = false
             if (data["exit code"] !== 0 && data["exit code"] !== "0") {
@@ -135,24 +134,26 @@ PlasmoidItem {
                     root.errorMsg = "parse"
             }
         }
-        function poll() {
-            if (connectedSources.length) {
-                // A run that outlived every timeout in the fetcher (a socket
-                // trickling bytes, say) would hold the source and stall every
-                // later poll; drop it and let the next tick start a fresh one.
-                if (root.nowMs - root.pollStartedMs > root.pollTimeoutMs) {
-                    disconnectSource(connectedSources[0])
-                    root.pollStartedMs = 0
-                    // The dropped run reports nothing back, so its flags would
-                    // stay set: the spinner turning for good and refresh
-                    // disabled until some later poll happened to answer.
-                    root.fetching = false
-                    root.userRefreshing = false
-                }
+        // A run that outlived every timeout in the fetcher (a socket
+        // trickling bytes, say) would hold the source and stall every later
+        // poll, so the watchdog drops it and the next tick starts a fresh one.
+        function dropStalled() {
+            if (!connectedSources.length)
                 return
-            }
+            disconnectSource(connectedSources[0])
+            // The dropped run reports nothing back, so its flags would stay
+            // set: the spinner turning for good and refresh disabled until
+            // some later poll happened to answer.
+            root.fetching = false
+            root.userRefreshing = false
+        }
+        function poll() {
+            // exec.poll() drops a second run while one is connected; the
+            // watchdog is what ends that one.
+            if (connectedSources.length)
+                return
             root.fetching = true
-            root.pollStartedMs = root.nowMs
+            pollWatchdog.restart()
             connectSource(root.cmd)
         }
     }
@@ -170,6 +171,17 @@ PlasmoidItem {
         repeat: true
         triggeredOnStart: true
         onTriggered: root.nowMs = Date.now()
+    }
+    // A one-shot deadline for the run in flight, on the monotonic clock a
+    // QML Timer runs on. Subtracting two Date.now() readings instead let a
+    // backward wall-clock step (an NTP correction, a manual set) make the
+    // elapsed time negative: the drop then never fires, the source stays
+    // connected, and no later poll ever starts.
+    Timer {
+        id: pollWatchdog
+        interval: root.pollTimeoutMs
+        repeat: false
+        onTriggered: exec.dropStalled()
     }
 
     // A poll is a child process, and the other two exits (onNewData, the

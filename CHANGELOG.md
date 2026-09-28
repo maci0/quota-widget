@@ -45,6 +45,14 @@ prints, so a fetcher and UI shipped together never break each other.
   whatever type and value the wire held. A `NaN`, an `Infinity`, or a non-string
   currency there printed JSON plasmashell's parser rejects, blanking the view.
   Each is checked like every other number the fetcher passes on.
+- A stalled fetcher run is dropped by a one-shot QML timer instead of by
+  subtracting two `Date.now()` readings. The wall clock steps backwards on an
+  NTP correction or a manual set, and a negative elapsed time never reached
+  `pollTimeoutMs`, so the source stayed connected and no later poll ever
+  started.
+- A provider timestamp sent as a bare epoch number (`billingCycleEnd`,
+  `resets_at`) is read in the unit it arrived in, seconds or milliseconds,
+  instead of being dropped as unparsable and showing no reset at all.
 - The gate was red on a clean tree: `ruff` reported an unparameterized table
   name and a needless comprehension in the Cursor `state.vscdb` fixture. The
   table name is now checked against the names the fixture builds, so `CI` is

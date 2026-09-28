@@ -567,23 +567,41 @@ def iso_to_utc(value: str) -> dt.datetime | None:
     return when.astimezone(dt.UTC)
 
 
-def iso_to_ms(value: str | None) -> int | None:
-    """Epoch-ms from a vendor ISO-8601 timestamp, or None.
+def epoch_ms(value: float) -> int:
+    """Epoch-ms from a number the vendor sent in seconds or in milliseconds.
+
+    The units are not one across the providers (Claude writes `expiresAt` in
+    milliseconds, Codex `reset_at` in seconds), so a value past the cutoff is
+    read as milliseconds. That cutoff is 10^10: 2286-11-20 in seconds, and
+    1970-01-01T02:46 in milliseconds, so no instant this widget shows falls
+    on the wrong side of it.
+    """
+    return int(value) if value > MS_EPOCH_CUTOFF else ms_from_seconds(value)
+
+
+def iso_to_ms(value: object) -> int | None:
+    """Epoch-ms from a vendor timestamp, or None.
+
+    A payload carries the instant either as an ISO-8601 string or as a bare
+    epoch number, and reading only the string form dropped the reset of every
+    response that sent a number, which reads as an absent date rather than as
+    a wrong one.
 
     None covers a missing, malformed, or out-of-range value alike: a reset the
     widget cannot read is shown as absent, never as a bogus date.
     """
-    if not isinstance(value, str) or not value:
-        # A response field is whatever the wire held: an int epoch, a list, a
-        # nested object. None of those is an instant.
-        return None
-    when = iso_to_utc(value)
-    if when is None:
-        return None
-    try:
-        return ms_from_seconds(when.timestamp())
-    except (OSError, OverflowError, ValueError):
-        return None
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        when = iso_to_utc(value)
+        if when is None:
+            return None
+        try:
+            return ms_from_seconds(when.timestamp())
+        except (OSError, OverflowError, ValueError):
+            return None
+    number = _finite_number(value)
+    return None if number is None else epoch_ms(number)
 
 
 def plan_label(subscription: str | None, tier: str | None) -> str:
@@ -934,8 +952,7 @@ def _claude_expired(oauth: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool:
     exp = _finite_number(oauth.get("expiresAt"))
     if exp is None:
         return False
-    ts_ms = int(exp) if exp > MS_EPOCH_CUTOFF else ms_from_seconds(exp)
-    return ts_ms <= now_ms() + skew_ms
+    return epoch_ms(exp) <= now_ms() + skew_ms
 
 
 def _refresh_claude(cred: JsonDict) -> tuple[JsonDict | None, bool]:
@@ -1932,7 +1949,7 @@ def _cursor_meter(
 def parse_cursor_summary(data: JsonDict, plan_hint: str | None = None) -> JsonDict:
     """Turn /api/usage-summary JSON into widget periods."""
     plan = cursor_plan_label(_as_text(data.get("membershipType")) or plan_hint)
-    cycle_end = iso_to_ms(_as_text(data.get("billingCycleEnd")))
+    cycle_end = iso_to_ms(data.get("billingCycleEnd"))
     # Only a real true says the plan has no included block. A dict or a list
     # is a type error, and reading it as unlimited would hide the meters.
     unlimited = data.get("isUnlimited") is True

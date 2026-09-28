@@ -224,24 +224,29 @@ class MainQmlAccessibilityTest(unittest.TestCase):
 class MainQmlPollingTest(unittest.TestCase):
     """A poll holds a child process; it must always be released."""
 
-    def test_every_started_run_records_its_start(self) -> None:
-        self.assertIn(
-            "root.pollStartedMs = root.nowMs\n            connectSource", QML_SOURCE
-        )
+    def test_every_started_run_arms_the_watchdog(self) -> None:
+        self.assertIn("pollWatchdog.restart()\n            connectSource", QML_SOURCE)
 
     def test_completed_run_releases_the_source(self) -> None:
         self.assertIn(
-            "disconnectSource(sourceName)\n            root.pollStartedMs = 0",
+            "disconnectSource(sourceName)\n            pollWatchdog.stop()",
             QML_SOURCE,
         )
 
     def test_a_hung_run_is_dropped_so_polling_resumes(self) -> None:
         # Without this, one stalled fetcher holds the source and no later poll
         # ever starts.
-        self.assertIn(
-            "root.nowMs - root.pollStartedMs > root.pollTimeoutMs", QML_SOURCE
-        )
+        self.assertIn("id: pollWatchdog", QML_SOURCE)
+        self.assertIn("interval: root.pollTimeoutMs", QML_SOURCE)
+        self.assertIn("onTriggered: exec.dropStalled()", QML_SOURCE)
         self.assertIn("disconnectSource(connectedSources[0])", QML_SOURCE)
+
+    def test_the_stall_deadline_is_not_measured_on_the_wall_clock(self) -> None:
+        # Date.now() steps backwards on an NTP correction or a manual set, so
+        # the difference went negative and the drop never fired: the source
+        # stayed connected and polling was dead until the widget was reloaded.
+        # A QML Timer runs on a monotonic clock, so it is immune to either.
+        self.assertNotIn("pollStartedMs", QML_SOURCE)
 
     def test_a_run_in_flight_is_released_when_the_widget_goes_away(self) -> None:
         # Removing the widget destroys the QML while a run is still out, and

@@ -123,7 +123,8 @@ Seven distinct hosts can receive a request, not four:
   reading; each request is bounded by `http_timeout_s`
   (`DEFAULT_HTTP_TIMEOUT_S`, `fetch_quota.py:206`, capped at
   `MAX_HTTP_TIMEOUT_S`, `fetch_quota.py:207`), and a run that outlives
-  `pollTimeoutMs` is disconnected (`package/contents/ui/main.qml:135`).
+  `pollTimeoutMs` is disconnected by the poll watchdog
+  (`package/contents/ui/main.qml:172`).
 
 ### Fetcher to local filesystem
 

@@ -231,7 +231,15 @@ class CursorSummaryFuzz(unittest.TestCase):
             {"membershipType": ["pro"], "billingCycleEnd": 1743691915000}
         )
         self.assertIsInstance(parsed["plan"], str)
-        self.assertIsNone(parsed["resets_ms"])
+        # A bare epoch is an instant like any other: reading only the string
+        # form dropped the cycle end of every response that sent a number.
+        self.assertEqual(parsed["resets_ms"], 1743691915000)
+
+    def test_unreadable_cycle_end_is_absent_not_a_wrong_date(self) -> None:
+        for value in (True, [1743691915], {"at": 1743691915}, "not a date", ""):
+            with self.subTest(value=value):
+                parsed = self._check({"billingCycleEnd": value})
+                self.assertIsNone(parsed["resets_ms"])
 
 
 GROK_SEED_CORPUS: tuple[JsonDict, ...] = (
