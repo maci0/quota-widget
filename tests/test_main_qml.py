@@ -385,6 +385,13 @@ class MainQmlStaleWindowTest(unittest.TestCase):
         )
         self.assertIn("property int staleKeepMs: defaultStaleKeepMs", QML_SOURCE)
 
+    def test_a_kept_reading_is_marked_with_a_new_object(self) -> None:
+        # A property holding a JS object re-reads its bindings only when the
+        # value changes identity, so setting stale on the stored reading would
+        # leave the card unmarked until some later poll replaced the object.
+        self.assertNotIn("oldv.stale = true", QML_SOURCE)
+        self.assertIn("return Object.assign({}, oldv, {stale: true})", QML_SOURCE)
+
 
 class MainQmlTokenTest(unittest.TestCase):
     """The token block is the widget's type scale. A factor typed at a call

@@ -28,6 +28,7 @@ import base64
 import contextlib
 import datetime as dt
 import email.utils
+import errno
 import hashlib
 import json
 import math
@@ -36,6 +37,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import unicodedata
@@ -317,6 +319,9 @@ CLAUDE_USER_AGENT = "claude-code/2.1.251"
 CURSOR_SUMMARY_URL = "https://cursor.com/api/usage-summary"
 
 REFRESH_LOCK_NAME = "refresh.lock"
+# flock(LOCK_NB) reports a held lock through these errnos and nothing else, so
+# a wait can tell contention from a lock this platform cannot take at all.
+LOCK_BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN})
 SECONDS_PER_HOUR = 3600
 SECONDS_PER_DAY = 86400
 # One poll holds the lock for at most a token round trip; a longer wait means
@@ -476,6 +481,11 @@ def _cursor_state_db(env: Mapping[str, str], home: Path) -> Path:
 
 
 _CONFIG: Config | None = None
+# Guards the lazy load in config(). main() publishes the config before the
+# provider pool starts, so a poll reads it and takes nothing; a caller that
+# reaches a provider without that would otherwise have every provider thread
+# build and publish the module global at the same time.
+_CONFIG_LOCK = threading.Lock()
 
 
 def _home(env: Mapping[str, str]) -> Path:
@@ -539,9 +549,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
 
 def config() -> Config:
     """The validated configuration. main() loads it before any provider runs."""
-    if _CONFIG is None:
-        return load_config()
-    return _CONFIG
+    loaded = _CONFIG
+    if loaded is None:
+        with _CONFIG_LOCK:
+            loaded = _CONFIG if _CONFIG is not None else load_config()
+    return loaded
 
 
 def _use_utf8_streams() -> None:
@@ -915,18 +927,27 @@ def _refresh_lock() -> Iterator[None]:
         return
     try:
         deadline = monotonic() + REFRESH_LOCK_WAIT_S
-        while True:
+        held = False
+        while not held:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
+                held = True
+            except OSError as exc:
+                # Only "somebody else holds it" is worth waiting out. A
+                # filesystem that cannot lock (a network mount, an overlay
+                # without ENOLCK support) raises for every try, so polling that
+                # one burns the whole deadline on every refresh instead of
+                # falling through to the unguarded refresh below.
+                if exc.errno not in LOCK_BUSY_ERRNOS:
+                    break
                 if monotonic() >= deadline:
                     break
                 sleep(REFRESH_LOCK_POLL_S)
         try:
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if held:
+                fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
 

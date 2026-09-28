@@ -22,6 +22,17 @@ Dev and CI use `uv`. The gate is at the end of this file; run it after any edit.
 
 The QML owns the fetcher process. One run at a time: `exec.poll()` returns early while a source is connected, `onNewData` disconnects it, and the one-shot `pollWatchdog` timer disconnects a run still out after `pollTimeoutMs` (10 min, in the token block with the other timing values) so a stalled fetch cannot wedge polling. The deadline is a QML Timer, never a difference of two `Date.now()` readings: `nowMs` is a wall clock and steps backwards on an NTP correction, and a negative elapsed time never reaches the timeout, so polling stays dead. Keep the release on every path that starts a run.
 
+## Threads
+
+The four providers run in one `ThreadPoolExecutor`, so every provider is a
+shared-state site. `config()` publishes `_CONFIG` behind `_CONFIG_LOCK`, so a
+caller that reaches a provider without `main()`'s preload still loads it once.
+`_refresh_lock()` waits only on `LOCK_BUSY_ERRNOS`: a filesystem that cannot
+lock (`ENOLCK`, a network mount) refreshes unguarded at once instead of
+spinning out the 20 s deadline, and a `flock` never taken is never released.
+Nothing else in the fetcher mutates module state; the rest is cross-process,
+through `flock`, `_atomic_write_json`, and the re-read in `_merge_write_json`.
+
 ## Layout
 
 - `package/`: plasmoid (metadata, QML, fetcher, `contents/config/main.xml` defaults, `contents/icons/com.maci.quota-widget.svg`)

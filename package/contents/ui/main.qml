@@ -247,9 +247,11 @@ PlasmoidItem {
         if (transient && oldv && oldv.ok && oldv.fetched_ms
                 && oldv.account && oldv.account === newv.account
                 && root.nowMs - oldv.fetched_ms <= root.staleKeepMs) {
-            // A copy, not the kept reading itself: assigning the same object
-            // back to the property raises no change signal, so a card that
-            // binds on `stale` would keep rendering the fresh reading.
+            // A copy, not the kept reading itself: a property holding a JS
+            // object is only re-read by a binding when the value it holds
+            // changes identity, so assigning the same object back raises no
+            // change signal and marking the reading in place leaves the card
+            // without its "cached" badge until a later poll replaces it.
             return Object.assign({}, oldv, { stale: true })
         }
         return newv

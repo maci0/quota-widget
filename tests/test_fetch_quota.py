@@ -6,6 +6,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import email.message
+import errno
 import io
 import json
 import os
@@ -19,7 +20,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -2885,7 +2886,25 @@ class RefreshLockWaitTest(unittest.TestCase):
                 return
             self.tries += 1
             if self.tries <= self.busy_tries:
-                raise OSError("resource temporarily unavailable")
+                raise OSError(errno.EAGAIN, "resource temporarily unavailable")
+
+    class UnlockableFcntl:
+        """A flock on a filesystem that cannot take a lock at all."""
+
+        LOCK_EX = 1
+        LOCK_NB = 2
+        LOCK_UN = 4
+
+        def __init__(self) -> None:
+            self.tries = 0
+            self.released: list[int] = []
+
+        def flock(self, fd: int, operation: int) -> None:
+            if operation == self.LOCK_UN:
+                self.released.append(fd)
+                return
+            self.tries += 1
+            raise OSError(errno.ENOLCK, "no locks available")
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -2901,7 +2920,9 @@ class RefreshLockWaitTest(unittest.TestCase):
         self.slept.append(seconds)
         self.clock[0] += seconds
 
-    def _acquire(self, fake: RefreshLockWaitTest.FakeFcntl) -> list[str]:
+    def _acquire(
+        self, fake: RefreshLockWaitTest.FakeFcntl | RefreshLockWaitTest.UnlockableFcntl
+    ) -> list[str]:
         """Run the lock body once, returning what it recorded while held."""
         held: list[str] = []
         with (
@@ -2941,6 +2962,59 @@ class RefreshLockWaitTest(unittest.TestCase):
             self.assertEqual(self._acquire(fake), ["body"])
         # Unguarded, not never: a holder that died must not block a poll.
         self.assertEqual(self.clock[0], fetch_quota.REFRESH_LOCK_WAIT_S)
+
+    def test_a_lock_the_filesystem_cannot_take_is_not_waited_out(self) -> None:
+        # ENOLCK is not contention, so waiting for the deadline would add the
+        # full REFRESH_LOCK_WAIT_S to every refresh on such a filesystem.
+        fake = self.UnlockableFcntl()
+
+        self.assertEqual(self._acquire(fake), ["body"])
+        self.assertEqual(fake.tries, 1)
+        self.assertEqual(self.slept, [])
+        # The lock was never taken, so releasing one would be a lie.
+        self.assertEqual(fake.released, [])
+
+
+class LazyConfigTest(unittest.TestCase):
+    """config() is read from every provider thread, so it loads once.
+
+    main() publishes the config before the pool starts, so a poll finds it
+    without the lock. A caller that reaches a provider without that would
+    otherwise have every thread build the module global at the same time.
+    """
+
+    THREADS = 8
+
+    def test_concurrent_callers_share_one_load(self) -> None:
+        barrier = threading.Barrier(self.THREADS, timeout=10)
+        loads: list[fetch_quota.Config] = []
+        seen: list[fetch_quota.Config] = []
+        real = fetch_quota.load_config
+
+        def counting_load(env: Mapping[str, str] | None = None) -> fetch_quota.Config:
+            # Long enough that a thread which skipped the lock is still inside
+            # load_config when the next one starts one.
+            time.sleep(0.05)
+            cfg = real(env)
+            loads.append(cfg)
+            return cfg
+
+        def run() -> None:
+            barrier.wait()
+            seen.append(fetch_quota.config())
+
+        fetch_quota._CONFIG = None
+        self.addCleanup(fetch_quota.load_config)
+        with patch.object(fetch_quota, "load_config", counting_load):
+            threads = [threading.Thread(target=run) for _ in range(self.THREADS)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+
+        self.assertEqual(len(seen), self.THREADS)
+        self.assertEqual(len(loads), 1)
+        self.assertTrue(all(cfg is seen[0] for cfg in seen))
 
 
 class SilentWriteTest(unittest.TestCase):
