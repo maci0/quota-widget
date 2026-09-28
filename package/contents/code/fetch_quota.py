@@ -85,18 +85,31 @@ def _http_retryable(status: int) -> bool:
     return status in (429, 503) or status >= 500
 
 
+class ConfigError(ValueError):
+    """A configuration value is unset-but-empty, unparsable, or out of range."""
+
+
+def _pinned_ms(raw: str) -> int:
+    """The pinned clock. Every other knob is validated by load_config, and this
+    one has to be too: the emit path reads the clock outside _safe_fetch, so a
+    malformed pin would abort the whole poll instead of one provider."""
+    if not raw.strip():
+        raise ConfigError(f"{NOW_MS_ENV} is set but empty")
+    try:
+        return int(raw)
+    except ValueError:
+        raise ConfigError(
+            f"{NOW_MS_ENV}={raw!r} is not an integer epoch-ms value"
+        ) from None
+
+
 def now_ms() -> int:
     """Epoch milliseconds. QUOTA_WIDGET_NOW_MS pins the clock to a fixed value,
     so a whole poll replays byte-for-byte; unset in production, real clock."""
     override = os.environ.get(NOW_MS_ENV)
     if override is None:
         return ms_from_seconds(time.time())
-    try:
-        return int(override)
-    except ValueError:
-        raise ValueError(
-            f"{NOW_MS_ENV}={override!r} is not an integer epoch-ms value"
-        ) from None
+    return _pinned_ms(override)
 
 
 EPOCH_UTC = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
@@ -206,10 +219,6 @@ CODEX_MONTH_MAX_S = 32 * SECONDS_PER_DAY
 # ── configuration ───────────────────────────────────────────────────────────
 # Every knob is an environment variable read once at startup and validated
 # before any request. See README "Configuration" for the documented set.
-
-
-class ConfigError(Exception):
-    """A configuration value is unset-but-empty, unparsable, or out of range."""
 
 
 @dataclass(frozen=True)
@@ -336,13 +345,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     # A malformed clock override would otherwise raise from now_ms() in the
     # middle of the poll, after the panel has already been told nothing.
     if NOW_MS_ENV in values:
-        try:
-            int(str(values[NOW_MS_ENV]).strip())
-        except ValueError as exc:
-            raise ConfigError(
-                f"{NOW_MS_ENV} must be an integer epoch-ms value, "
-                f"got {values[NOW_MS_ENV]!r}"
-            ) from exc
+        _pinned_ms(values[NOW_MS_ENV])
     global _CONFIG
     _CONFIG = Config(
         home=home,
@@ -541,6 +544,14 @@ def _discard_provider_cache(path: Path) -> None:
         pass  # already gone, or not ours to remove
 
 
+def _reading(payload: JsonDict) -> JsonDict:
+    """Stamp a payload with the instant the reading was taken. Without it a
+    consumer can only age a value by when it arrived, which resets on every
+    replay from the cache and stacks a second stale window on the first."""
+    payload["fetched_ms"] = now_ms()
+    return payload
+
+
 def _read_provider_cache(
     name: str, account: str | None, max_age_s: int | None = None
 ) -> JsonDict | None:
@@ -566,7 +577,8 @@ def _read_provider_cache(
         # Past the retention window, so drop it rather than leave it on disk.
         _discard_provider_cache(path)
         return None
-    return payload
+    # The reading is as old as the write, not as fresh as this read.
+    return {**payload, "fetched_ms": int(ts)}
 
 
 def _write_provider_cache(name: str, payload: JsonDict, account: str | None) -> None:
@@ -925,28 +937,30 @@ def fetch_claude() -> JsonDict:
     spend = _as_dict(data.get("spend"))
     spend_used = _as_dict(spend.get("used"))
 
-    result = {
-        "ok": True,
-        "plan": plan,
-        "session": {
-            "util": session_util,
-            "resets_ms": session_reset,
-        },
-        "weekly": weekly,
-        "extra_usage": {
-            "enabled": bool(extra.get("is_enabled")),
-            "used_credits": _finite_number(extra.get("used_credits")),
-            "currency": extra.get("currency"),
-            "monthly_limit": _finite_number(extra.get("monthly_limit")),
-        },
-        "spend": {
-            "enabled": bool(spend.get("enabled")),
-            "percent": _finite_number(spend.get("percent")),
-            "used_minor": _finite_number(spend_used.get("amount_minor")),
-            "currency": spend_used.get("currency") or extra.get("currency"),
-            "exponent": spend_used.get("exponent", 2),
-        },
-    }
+    result = _reading(
+        {
+            "ok": True,
+            "plan": plan,
+            "session": {
+                "util": session_util,
+                "resets_ms": session_reset,
+            },
+            "weekly": weekly,
+            "extra_usage": {
+                "enabled": bool(extra.get("is_enabled")),
+                "used_credits": _finite_number(extra.get("used_credits")),
+                "currency": extra.get("currency"),
+                "monthly_limit": _finite_number(extra.get("monthly_limit")),
+            },
+            "spend": {
+                "enabled": bool(spend.get("enabled")),
+                "percent": _finite_number(spend.get("percent")),
+                "used_minor": _finite_number(spend_used.get("amount_minor")),
+                "currency": spend_used.get("currency") or extra.get("currency"),
+                "exponent": spend_used.get("exponent", 2),
+            },
+        }
+    )
     _write_provider_cache("claude", result, account)
     return result
 
@@ -1204,7 +1218,7 @@ def fetch_grok() -> JsonDict:
                 return cached
         return {"ok": False, "error": f"http-{status}" if status else "net"}
 
-    result = {"ok": True, "plan": "Grok", "periods": periods}
+    result = _reading({"ok": True, "plan": "Grok", "periods": periods})
     _write_provider_cache("grok", result, account)
     return result
 
@@ -1459,20 +1473,22 @@ def fetch_codex() -> JsonDict:
     credits = _as_dict(data.get("credits"))
     reset_credits = _codex_reset_credits(data)
 
-    result = {
-        "ok": True,
-        "plan": plan,
-        "allowed": rate.get("allowed"),
-        "limit_reached": bool(rate.get("limit_reached")),
-        "windows": windows,
-        "credits": {
-            "has_credits": bool(credits.get("has_credits")),
-            "balance": credits.get("balance"),
-            "unlimited": bool(credits.get("unlimited")),
-            "overage_limit_reached": bool(credits.get("overage_limit_reached")),
-        },
-        "reset_credits": reset_credits,
-    }
+    result = _reading(
+        {
+            "ok": True,
+            "plan": plan,
+            "allowed": rate.get("allowed"),
+            "limit_reached": bool(rate.get("limit_reached")),
+            "windows": windows,
+            "credits": {
+                "has_credits": bool(credits.get("has_credits")),
+                "balance": credits.get("balance"),
+                "unlimited": bool(credits.get("unlimited")),
+                "overage_limit_reached": bool(credits.get("overage_limit_reached")),
+            },
+            "reset_credits": reset_credits,
+        }
+    )
     _write_provider_cache("codex", result, account)
     return result
 
@@ -1739,7 +1755,7 @@ def fetch_cursor() -> JsonDict:
     if status != 200 or not isinstance(data, dict):
         return {"ok": False, "error": f"http-{status}" if status else "net"}
 
-    result = parse_cursor_summary(data, auth.get("plan"))
+    result = _reading(parse_cursor_summary(data, auth.get("plan")))
     _write_provider_cache("cursor", result, account)
     return result
 
@@ -1789,6 +1805,16 @@ def _safe_fetch(name: str, fetch: Callable[[], JsonDict]) -> JsonDict:
         return {"ok": False, "error": "net"}
 
 
+def _poll_stamp() -> int:
+    """Now for the emitted envelope. The config-error path reports a value the
+    clock itself rejected, so it falls back to the real one instead of raising
+    a second time and leaving plasmashell with no JSON at all."""
+    try:
+        return now_ms()
+    except ConfigError:
+        return ms_from_seconds(time.time())
+
+
 def main(argv: list[str] | None = None) -> None:
     args = sys.argv[1:] if argv is None else argv
     if args in (["--help"], ["-h"]):
@@ -1800,9 +1826,6 @@ def main(argv: list[str] | None = None) -> None:
     except ConfigError as exc:
         # No provider runs on a bad value; the panel shows "config" and the
         # detail lands on stderr for anyone running the fetcher by hand.
-        # fetched_ms is left out on purpose: a bad clock override is one of the
-        # values that can fail here, and the panel falls back to its own clock
-        # when the field is absent.
         warn(str(exc))
         emit(
             {
@@ -1813,6 +1836,7 @@ def main(argv: list[str] | None = None) -> None:
                 "cursor": {"ok": False, "error": "config"},
                 "grok": {"ok": False, "error": "config"},
                 "codex": {"ok": False, "error": "config"},
+                "fetched_ms": _poll_stamp(),
             }
         )
     if args == ["--print-config"]:

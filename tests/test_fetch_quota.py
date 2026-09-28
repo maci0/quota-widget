@@ -8,6 +8,7 @@ import email.message
 import io
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -954,6 +955,65 @@ class ProviderCacheTest(unittest.TestCase):
         path.write_text(json.dumps(entry))
         self.assertIsNone(fetch_quota._stale_cache("grok", self.account))
 
+    def test_replayed_reading_reports_its_write_time_not_the_read_time(self) -> None:
+        written_ms = int(
+            (dt.datetime.now(dt.UTC).timestamp() - 3600) * 1000  # an hour ago
+        )
+        path = Path(self.tmp.name) / "grok.json"
+        fetch_quota._write_provider_cache(
+            "grok", {"ok": True, "plan": "Grok"}, self.account
+        )
+        entry = json.loads(path.read_text())
+        entry["cached_ms"] = written_ms
+        path.write_text(json.dumps(entry))
+
+        replayed = fetch_quota._stale_cache("grok", self.account)
+        assert replayed is not None
+        self.assertEqual(replayed["fetched_ms"], written_ms)
+
+
+class ReadingAgeTest(unittest.TestCase):
+    """Every payload carries the instant the reading was taken, so a consumer
+    ages a value by its age and not by when it happened to arrive."""
+
+    def test_stale_cache_reports_the_write_time(self) -> None:
+        with config_env(QUOTA_WIDGET_NOW_MS=str(PINNED_NOW_MS)):
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            with config_env(QUOTA_WIDGET_CACHE=tmp.name):
+                account = "acct-1"
+                fetch_quota._write_provider_cache(
+                    "grok", {"ok": True, "plan": "Grok"}, account
+                )
+                replayed = fetch_quota._stale_cache("grok", account)
+        assert replayed is not None
+        self.assertEqual(replayed["fetched_ms"], PINNED_NOW_MS)
+
+    def test_fresh_reading_is_stamped_with_the_poll_clock(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cred = Path(tmp.name) / "cred.json"
+        cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+
+        def fake_http(
+            url: str,
+            headers: dict[str, str],
+            **kwargs: object,
+        ) -> tuple[int, object, None]:
+            return 200, {"five_hour": {"utilization": 3, "resets_at": None}}, None
+
+        with (
+            config_env(
+                QUOTA_WIDGET_NOW_MS=str(PINNED_NOW_MS),
+                QUOTA_WIDGET_CLAUDE_CREDENTIALS=str(cred),
+                QUOTA_WIDGET_CACHE=str(Path(tmp.name) / "cache"),
+            ),
+            patch.object(fetch_quota, "fetch_http", fake_http),
+        ):
+            out = fetch_quota.fetch_claude()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["fetched_ms"], PINNED_NOW_MS)
+
 
 class AccountIdTest(unittest.TestCase):
     def test_survives_access_token_rotation(self) -> None:
@@ -1016,6 +1076,7 @@ class ErrorBodyTest(unittest.TestCase):
                 QUOTA_WIDGET_CLAUDE_CREDENTIALS=str(cred),
             ),
             patch.object(urllib.request, "urlopen", side_effect=self._error(body)),
+            patch.object(sys, "argv", ["fetch_quota.py"]),
             contextlib.redirect_stdout(out),
             self.assertRaises(SystemExit),
         ):
@@ -1217,6 +1278,33 @@ class ConfigTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(fetch_quota.ConfigError):
                 fetch_quota.load_config({"QUOTA_WIDGET_CACHE_MAX_AGE_S": bad})
 
+    def test_pinned_clock_must_be_epoch_ms(self) -> None:
+        for bad in ("yesterday", "", "  ", "1.5"):
+            with (
+                self.subTest(bad=bad),
+                self.assertRaises(fetch_quota.ConfigError) as ctx,
+            ):
+                fetch_quota.load_config({"QUOTA_WIDGET_NOW_MS": bad})
+            self.assertIn("QUOTA_WIDGET_NOW_MS", str(ctx.exception))
+
+    def test_a_bad_pin_reports_config_instead_of_killing_the_poll(self) -> None:
+        # The emit path reads the clock, so an unvalidated pin would abort the
+        # whole run rather than produce the JSON plasmashell needs.
+        out = io.StringIO()
+        with (
+            patch.dict(os.environ, {"QUOTA_WIDGET_NOW_MS": "yesterday"}),
+            patch.object(sys, "argv", ["fetch_quota.py"]),
+            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(out),
+            self.assertRaises(SystemExit),
+        ):
+            fetch_quota.main([])
+
+        emitted = json.loads(out.getvalue())
+        self.assertEqual(emitted["error"], "config")
+        self.assertIn("QUOTA_WIDGET_NOW_MS", emitted["config_error"])
+        self.assertIsInstance(emitted["fetched_ms"], int)
+
     def test_describe_exposes_paths_only(self) -> None:
         described = fetch_quota.load_config(
             {"QUOTA_WIDGET_HOME": "/home/widget"}
@@ -1360,9 +1448,8 @@ class Utf8StateFileTest(unittest.TestCase):
         with config_env(QUOTA_WIDGET_CACHE=self.tmp.name):
             with patch.object(fetch_quota, "now_ms", return_value=PINNED_NOW_MS):
                 fetch_quota._write_provider_cache("claude", payload, account)
-                self.assertEqual(
-                    fetch_quota._read_provider_cache("claude", account), payload
-                )
+                got = fetch_quota._read_provider_cache("claude", account)
+                self.assertEqual(got, {**payload, "fetched_ms": PINNED_NOW_MS})
 
     def test_vscdb_cell_that_is_not_utf8_is_dropped(self) -> None:
         self.assertIsNone(fetch_quota._vscdb_str(b"\xff\xfe not utf-8"))

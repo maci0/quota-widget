@@ -170,20 +170,17 @@ PlasmoidItem {
     }
     // Keep the last good reading on transient failures (429/5xx/net/exec) so a
     // blip doesn't blank a card. Replace on success or on auth/no-token errors.
-    // A kept reading is dropped once it is older than the fetcher's own stale
-    // window (DEFAULT_CACHE_MAX_AGE_S), so an offline widget cannot show
-    // week-old meters as if they were live.
+    // A kept reading is aged by its own fetched_ms, the instant the fetcher took
+    // it, so replaying a cached payload cannot keep it alive past
+    // DEFAULT_CACHE_MAX_AGE_S the way an arrival clock would.
     function mergeProv(oldv, newv) {
         if (!newv) return oldv
-        if (newv.ok) {
-            newv._at = Date.now()
-            return newv
-        }
+        if (newv.ok) return newv
         const e = newv.error || ""
         const transient = e === "net" || e === "exec"
             || e.indexOf("429") >= 0 || e.indexOf("http-5") === 0
-        if (transient && oldv && oldv.ok && oldv._at
-                && Date.now() - oldv._at <= root.staleKeepMs) {
+        if (transient && oldv && oldv.ok && oldv.fetched_ms
+                && root.nowMs - oldv.fetched_ms <= root.staleKeepMs) {
             oldv.stale = true
             return oldv
         }
@@ -570,7 +567,7 @@ PlasmoidItem {
                 // so the view would otherwise be blank under the heading.
                 PlasmaComponents3.Label {
                     visible: root.firstLoad
-                    text: "Loading quota…"
+                    text: qsTr("Loading quota…")
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     Accessible.role: Accessible.StatusBar
@@ -911,7 +908,7 @@ PlasmoidItem {
                         PlasmaComponents3.Label {
                             visible: !!(root.grok && root.grok.periods
                                 && root.grok.periods.length === 0)
-                            text: "No usage meters reported"
+                            text: qsTr("No usage meters reported")
                             Layout.fillWidth: true
                         }
 

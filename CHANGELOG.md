@@ -30,6 +30,15 @@ prints, so a fetcher and UI shipped together never break each other.
 - The install stops instead of deleting whatever sits at the plasmoid directory
   when that is not this widget, so a copy from Plasma Discover, a distro
   package, or a hand-unpacked archive survives an upgrade.
+- Every provider payload now carries `fetched_ms`, the instant the reading was
+  taken. The plasmoid ages a kept reading by that stamp instead of by when it
+  arrived, so replaying a cached payload no longer resets the 24 h stale window
+  and stretches the oldest reading a widget can show to two windows.
+- A malformed `QUOTA_WIDGET_NOW_MS` is reported as a configuration error before
+  any provider runs, instead of raising out of the emit path and leaving
+  plasmashell with no JSON for that poll.
+- The Codex and Grok cards mark a reading served from the cache the way the
+  Claude and Cursor cards already did.
 - Non-finite readings (`NaN`, `1e400`) from a provider no longer reach the JSON
   the plasmoid parses, and no longer read as a clamped 0% or a full 100%.
 - Seconds-to-milliseconds conversion rounds instead of truncating, so a reset
