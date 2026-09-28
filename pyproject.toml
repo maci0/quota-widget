@@ -60,13 +60,21 @@ select = [
     "PGH",  # blanket noqa and blanket type: ignore
     "PD",   # pandas-vet
     "PIE",  # misc lints
+    "PLC",  # pylint convention
     "PLE",  # pylint errors
+    # Two rules out of the pylint warnings group, not the whole of it: the
+    # rest is a global-statement rule this tree needs and a complexity
+    # measure. These two are defects. Both were at zero here, so the tree
+    # already passed them.
+    "PLR1714",  # repeated equality comparison
+    "PLW1510",  # subprocess.run without an explicit check
     "PTH",  # os.path to pathlib
     "RET",  # return statements
     "RSE",  # raise correctness
     "RUF",  # ruff specific
     "SLOT", # dataclass slots
     "TC",   # type-checking imports
+    "T10",  # debugger left in the source
     "TID",  # tidy imports
     "YTT",  # sys.version misuse
 ]

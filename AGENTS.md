@@ -146,7 +146,8 @@ shellcheck install.sh
 
 `ruff` selects its groups in `[tool.ruff.lint]`, defect groups (bugbear, blind
 except, builtin shadowing, bandit, comprehensions, datetime, type-checking
-imports, raise correctness, return statements, pathlib) alongside the style
+imports, raise correctness, return statements, pathlib, pylint convention and
+errors, plus `PLR1714` and `PLW1510` named on their own) alongside the style
 ones, and every gate step is blocking in CI. `mypy` is strict over the
 fetcher, `tests/`, and `scripts/`, with `warn_unreachable` on. A
 `noqa` carries its rule and a reason (`PGH` fails a bare one); the per-file

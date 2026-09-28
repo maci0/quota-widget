@@ -3740,7 +3740,7 @@ class OriginBoundRedirectTest(unittest.TestCase):
     def _redirect(self, url: str, newurl: str, headers: dict[str, str]) -> object:
         # S310: a Request is built, never opened, and both URLs are literals
         # naming the origins the check is about.
-        req = urllib.request.Request(url, headers=headers)  # noqa: S310
+        req = urllib.request.Request(url, headers=headers)  # noqa: S310 (never opened)
         return fetch_quota._OriginBoundRedirect().redirect_request(
             req,
             io.BytesIO(b""),

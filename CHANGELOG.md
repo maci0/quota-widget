@@ -354,6 +354,13 @@ fails if a Breaking entry lands in this section without a matching next version.
 
 ### Changed
 
+- The lint gate covers more defect classes: the pylint convention group, a
+  repeated-equality comparison, a `subprocess.run` without an explicit `check`,
+  and a debugger statement left in the source. The first two were at zero
+  across the tree, so nothing was rewritten to satisfy them; the last two each
+  had one site, now fixed. The `status` test in `_transient_failure` reads
+  `status in {0, 429} or status >= 500`, and the installer test states its
+  `check=False` rather than leaving it to the default.
 - The panel widget can be opened by an assistive technology, not only by a
   click or a key: the compact reading carries an accessible press action, so a
   screen reader that lands on it has something to activate. The two readings it

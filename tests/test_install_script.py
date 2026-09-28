@@ -156,13 +156,16 @@ class FindRootTest(unittest.TestCase):
         # HOME is read before the argument is dispatched, and set -u would
         # abort on a missing one; the temp dir keeps a stray write harmless.
         env = dict(os.environ, HOME=str(self.tmp))
-        return subprocess.run(  # this file's own script, in a temp dir
+        # check=False, not an exception: a failing run is a result the caller
+        # asserts on, not an error the runner should raise over the output.
+        return subprocess.run(
             [str(script), "--help"],
             cwd=cwd,
             env=env,
             capture_output=True,
             text=True,
             timeout=60,
+            check=False,
         )
 
     def test_run_from_the_checkout(self) -> None:

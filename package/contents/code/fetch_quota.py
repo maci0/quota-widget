@@ -197,7 +197,7 @@ def _transient_failure(status: int) -> bool:
     otherwise show a blank card where the same reading is sitting on disk.
     A 401 or 403 is a decision by the vendor and is reported as one.
     """
-    return status == 0 or status == 429 or status >= 500
+    return status in {0, 429} or status >= 500
 
 
 def _failure(
@@ -1344,14 +1344,16 @@ def fetch_http(
     # Every caller passes either an https vendor constant or a token endpoint
     # _is_grok_token_url has already checked, so the scheme is settled before
     # here and the URL is never user input.
-    req = urllib.request.Request(  # noqa: S310
+    req = urllib.request.Request(  # noqa: S310 (https URL, never user input)
         url, data=data, headers=headers, method=method
     )
     attempts = 1 if data is not None or method not in (None, "GET") else 2
     timeout = config().http_timeout_s
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            with urllib.request.urlopen(  # noqa: S310 (https URL, never user input)
+                req, timeout=timeout
+            ) as resp:
                 # One byte past the cap: reading exactly the cap cannot tell a
                 # body that fits from one that is only just over it.
                 body = resp.read(MAX_RESPONSE_BYTES + 1)
