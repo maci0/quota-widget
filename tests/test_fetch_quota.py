@@ -7,6 +7,7 @@ import dataclasses
 import datetime as dt
 import email.message
 import errno
+import http.client
 import io
 import json
 import os
@@ -2391,7 +2392,7 @@ class TransportFailureTest(unittest.TestCase):
             status = 200
             headers: object = None
 
-            def read(self) -> bytes:
+            def read(self, size: int = -1) -> bytes:
                 return b'{"ok": true}'
 
             def __enter__(self) -> _Resp:
@@ -2794,8 +2795,10 @@ class RefreshRunsOnceTest(unittest.TestCase):
             method: str | None = None,
         ) -> tuple[int, object]:
             if url == fetch_quota.GROK_OIDC_DISCOVERY:
-                return 200, {"token_endpoint": "https://auth.test/token"}
-            if url == "https://auth.test/token":
+                return 200, {
+                    "token_endpoint": f"https://{fetch_quota.GROK_OIDC_HOST}/token"
+                }
+            if url == f"https://{fetch_quota.GROK_OIDC_HOST}/token":
                 body = urllib.parse.parse_qs((data or b"").decode())
                 posts.append(body["refresh_token"][0])
                 if body["refresh_token"][0] != "old-refresh":
@@ -3160,6 +3163,257 @@ class HomeDirectoryTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         self.assertEqual(json.loads(out.getvalue())["error"], "config")
         self.assertIn("home directory", err.getvalue())
+
+
+class OriginBoundRedirectTest(unittest.TestCase):
+    """A 30x must not walk the user's token to whichever host it names.
+
+    urllib copies the request headers onto the redirected request, so the
+    default handler hands a Bearer token (or Cursor's session cookie) to
+    whatever host a vendor endpoint answers 3xx with.
+    """
+
+    def _redirect(self, url: str, newurl: str, headers: dict[str, str]) -> object:
+        # S310: a Request is built, never opened, and both URLs are literals
+        # naming the origins the check is about.
+        req = urllib.request.Request(url, headers=headers)  # noqa: S310
+        return fetch_quota._OriginBoundRedirect().redirect_request(
+            req,
+            io.BytesIO(b""),
+            302,
+            "Found",
+            http.client.HTTPMessage(),
+            newurl,
+        )
+
+    def test_same_origin_redirect_is_followed(self) -> None:
+        new = self._redirect(
+            "https://api.anthropic.com/api/oauth/usage",
+            "https://api.anthropic.com/api/oauth/usage?page=2",
+            {"Authorization": "Bearer tok"},
+        )
+        self.assertEqual(
+            getattr(new, "full_url", None),
+            "https://api.anthropic.com/api/oauth/usage?page=2",
+        )
+
+    def test_cross_origin_redirect_is_refused(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError):
+            self._redirect(
+                "https://api.anthropic.com/api/oauth/usage",
+                "https://attacker.test/collect",
+                {"Authorization": "Bearer tok"},
+            )
+
+    def test_session_cookie_counts_as_a_credential(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError):
+            self._redirect(
+                "https://cursor.com/api/usage-summary",
+                "https://attacker.test/collect",
+                {"Cookie": "WorkosCursorSessionToken=tok"},
+            )
+
+    def test_scheme_downgrade_is_cross_origin(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError):
+            self._redirect(
+                "https://api.anthropic.com/api/oauth/usage",
+                "http://api.anthropic.com/api/oauth/usage",
+                {"Authorization": "Bearer tok"},
+            )
+
+    def test_credential_free_request_may_still_redirect(self) -> None:
+        new = self._redirect(
+            "https://api.anthropic.com/discovery", "https://cdn.anthropic.com/doc", {}
+        )
+        self.assertEqual(
+            getattr(new, "full_url", None), "https://cdn.anthropic.com/doc"
+        )
+
+    def test_the_installed_opener_carries_the_handler(self) -> None:
+        # urlopen() uses a global opener it builds itself; the refusal only
+        # holds if the opener carrying the handler is the installed one.
+        handlers = urllib.request.urlopen.__globals__["_opener"]
+        self.assertTrue(
+            any(
+                isinstance(h, fetch_quota._OriginBoundRedirect)
+                for h in handlers.handlers
+            )
+        )
+
+
+class ResponseSizeCapTest(unittest.TestCase):
+    """A body longer than the cap is not read into the panel's heap whole."""
+
+    class _Resp:
+        status = 200
+        headers: object = None
+
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+            self.requested: list[int] = []
+
+        def read(self, size: int = -1) -> bytes:
+            self.requested.append(size)
+            return self._payload if size < 0 else self._payload[:size]
+
+        def __enter__(self) -> ResponseSizeCapTest._Resp:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def test_oversized_body_is_refused_without_reading_it_all(self) -> None:
+        resp = self._Resp(b'{"ok": true}' + b" " * fetch_quota.MAX_RESPONSE_BYTES)
+        with (
+            patch.object(urllib.request, "urlopen", lambda *a, **k: resp),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status, body, _hdrs = fetch_quota.fetch_http("https://api.test/usage", {})
+
+        self.assertEqual(status, 200)
+        self.assertIsNone(body)
+        self.assertEqual(
+            resp.requested, [fetch_quota.MAX_RESPONSE_BYTES + 1], "read past the cap"
+        )
+
+    def test_a_body_under_the_cap_still_parses(self) -> None:
+        resp = self._Resp(b'{"ok": true}')
+        with patch.object(urllib.request, "urlopen", lambda *a, **k: resp):
+            status, body, _hdrs = fetch_quota.fetch_http("https://api.test/usage", {})
+
+        self.assertEqual((status, body), (200, {"ok": True}))
+
+    def test_the_discarded_error_body_is_capped_too(self) -> None:
+        # A 429 or a 5xx is the response a peer picks at length, and this body
+        # is drained and thrown away: reading it whole is the same heap cost.
+        class _Big(io.BytesIO):
+            def __init__(self) -> None:
+                super().__init__(b"x" * 4096)
+                self.requested: list[int] = []
+
+            def read(self, size: int | None = -1) -> bytes:
+                self.requested.append(-1 if size is None else size)
+                return super().read(size)
+
+        body = _Big()
+        error = urllib.error.HTTPError(
+            "https://api.test/usage",
+            429,
+            "Too Many Requests",
+            email.message.Message(),
+            body,
+        )
+        with (
+            patch.object(urllib.request, "urlopen", side_effect=error),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status, data, _hdrs = fetch_quota.fetch_http("https://api.test/usage", {})
+
+        self.assertEqual(status, 429)
+        self.assertIsNone(data)
+        self.assertEqual(body.requested, [fetch_quota.MAX_RESPONSE_BYTES + 1])
+
+
+class CacheDirModeTest(unittest.TestCase):
+    """The cache holds readings and account digests; the folder is private."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name) / "cache"
+
+    def test_a_wide_existing_folder_is_closed_up(self) -> None:
+        self.folder.mkdir(mode=0o755)
+        self.folder.chmod(0o755)
+
+        fetch_quota._private_dir(self.folder)
+
+        self.assertEqual(self.folder.stat().st_mode & 0o777, 0o700)
+
+    def test_a_private_folder_is_left_alone(self) -> None:
+        self.folder.mkdir(mode=0o700)
+
+        fetch_quota._private_dir(self.folder)
+
+        self.assertEqual(self.folder.stat().st_mode & 0o777, 0o700)
+
+    def test_the_written_cache_is_not_readable_by_others(self) -> None:
+        point_config(self, "cache_dir", self.folder)
+        fetch_quota._write_provider_cache(
+            "grok",
+            {"ok": True, "plan": "Grok"},
+            fetch_quota._account_id(_fake_jwt("user_01GROK")),
+        )
+        self.assertEqual(self.folder.stat().st_mode & 0o777, 0o700)
+        entry = self.folder / "grok.json"
+        self.assertEqual(entry.stat().st_mode & 0o777, 0o600)
+
+
+class GrokTokenEndpointTest(unittest.TestCase):
+    """The refresh token goes to an endpoint the discovery document named, so
+    that endpoint has to be the vendor's own over https."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        past = dt.datetime.now(dt.UTC) - dt.timedelta(hours=1)
+        self.auth = Path(self.tmp.name) / "grok-auth.json"
+        self.auth.write_text(
+            json.dumps(
+                {
+                    "cli::client-1": {
+                        "key": "old-access",
+                        "refresh_token": "old-refresh",
+                        "oidc_client_id": "client-1",
+                        "expires_at": past.isoformat().replace("+00:00", "Z"),
+                    }
+                }
+            )
+        )
+        point_config(self, "grok_auth", self.auth)
+
+    def _discovery(self, token_endpoint: object) -> list[str]:
+        posted: list[str] = []
+
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            if url == fetch_quota.GROK_OIDC_DISCOVERY:
+                return 200, {"token_endpoint": token_endpoint}
+            if data is not None:
+                posted.append(url)
+            return 200, {"error": "not reached"}
+
+        with (
+            patch.object(fetch_quota, "fetch_json", fake_json),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertIsNone(fetch_quota._refresh_grok("cli::client-1", {}))
+        return posted
+
+    def test_a_cleartext_endpoint_is_refused(self) -> None:
+        self.assertEqual(self._discovery("http://auth.x.ai/token"), [])
+
+    def test_another_host_is_refused(self) -> None:
+        self.assertEqual(self._discovery("https://attacker.test/token"), [])
+
+    def test_a_host_lookalike_is_refused(self) -> None:
+        self.assertEqual(self._discovery("https://auth.x.ai.evil.test/token"), [])
+
+    def test_a_non_url_is_refused(self) -> None:
+        self.assertEqual(self._discovery(["https://auth.x.ai/token"]), [])
+
+    def test_the_vendor_endpoint_is_accepted(self) -> None:
+        self.assertTrue(
+            fetch_quota._is_grok_token_url(
+                f"https://{fetch_quota.GROK_OIDC_HOST}/oauth/token"
+            )
+        )
 
 
 if __name__ == "__main__":

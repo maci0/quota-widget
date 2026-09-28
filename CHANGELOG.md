@@ -238,6 +238,25 @@ fails if a Breaking entry lands in this section without a matching next version.
   out of the config load.
 - `print_smoke.py` reports a dump it cannot read as a message rather than a
   traceback.
+- A redirect answered by a vendor endpoint no longer carries the request's
+  `Authorization` or `Cookie` header to another host. `urllib` copies the
+  whole header set onto the redirected request, so a `3xx` from any of the four
+  usage endpoints handed the user's access token (Claude, Codex, Grok) or
+  Cursor's session cookie to whichever host it named. A redirect that stays on
+  the origin is still followed; one that leaves it is reported as a failure.
+- The Grok refresh token is no longer POSTed to whatever URL the OIDC discovery
+  document names. The endpoint has to be `https` on `auth.x.ai`; a document
+  naming another host, or the same host over plain `http`, fails the refresh
+  and says so on stderr instead of forwarding the token.
+- A vendor response body is read up to `MAX_RESPONSE_BYTES` (4 MB) and no
+  further. The read was unbounded, so a peer that names no length and answers
+  with an endless body was read into plasmashell's heap once a poll, every
+  poll. An over-long body is refused and reported like any other unreadable
+  one.
+- The cache directory is closed up to `0700` when it already exists with a wider
+  mode. `mkdir`'s mode only applies to the directory it creates, so a cache
+  folder left behind by an earlier run kept whatever mode it had and left the
+  readings and account digests in it readable by every local account.
 
 ### Changed
 

@@ -48,8 +48,9 @@ from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from email.message import Message
+from http.client import HTTPMessage
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import IO, TYPE_CHECKING, Any, Literal, TypeAlias
 from urllib.request import pathname2url
 
 # flock is POSIX-only; on Windows the refresh lock degrades to no lock, which
@@ -362,6 +363,22 @@ CODEX_WEEK_MIN_S = 6 * SECONDS_PER_DAY
 CODEX_WEEK_MAX_S = 8 * SECONDS_PER_DAY
 CODEX_MONTH_MIN_S = 28 * SECONDS_PER_DAY
 CODEX_MONTH_MAX_S = 32 * SECONDS_PER_DAY
+
+# Longest vendor response body read into memory. Every reading is a few tens of
+# kilobytes of JSON, so this is generous by two orders of magnitude; it exists
+# because the alternative is a peer that names no length answering with an
+# endless body, and plasmashell reads that into its own heap once a poll, every
+# poll, until the desktop session is killed by the OOM killer.
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+# Host that serves the Grok OIDC discovery document. The document names the
+# token endpoint, and a refresh token is POSTed there, so an endpoint on any
+# other host is not followed.
+GROK_OIDC_HOST = "auth.x.ai"
+
+# Request headers that carry the user's access token. urllib copies the whole
+# header set onto a redirect target, these two included.
+CREDENTIAL_HEADERS = frozenset({"authorization", "cookie"})
 
 
 # ── configuration ───────────────────────────────────────────────────────────
@@ -802,6 +819,20 @@ def _account_id(access_token: str | None, fallback: str | None = None) -> str | 
     return _digest(sub if isinstance(sub, str) and sub else fallback)
 
 
+def _private_dir(folder: Path) -> None:
+    """Create the cache folder, and close it up when it already existed.
+
+    mkdir's mode is the mode of the directory it creates and nothing else, so
+    a cache folder left behind by an earlier run, or created by whatever else
+    owns XDG_CACHE_HOME, keeps a mode that lets every local account read the
+    readings and the account digests in it.
+    """
+    folder.mkdir(parents=True, mode=CACHE_DIR_MODE, exist_ok=True)
+    with contextlib.suppress(OSError):
+        if folder.stat().st_mode & 0o777 != CACHE_DIR_MODE:
+            folder.chmod(CACHE_DIR_MODE)
+
+
 def _discard_provider_cache(path: Path) -> None:
     """Delete one cache file. Best-effort: a leftover file is unreadable anyway."""
     with contextlib.suppress(OSError):
@@ -867,7 +898,7 @@ def _write_provider_cache(name: str, payload: JsonDict, account: str | None) -> 
     folder = config().cache_dir
     path = folder / f"{name}.json"
     try:
-        folder.mkdir(parents=True, mode=CACHE_DIR_MODE, exist_ok=True)
+        _private_dir(folder)
         taken = _finite_number(payload.get("fetched_ms"))
         stamp = int(taken) if taken is not None else now_ms()
         if _cache_holds_newer(path, stamp, account):
@@ -919,7 +950,7 @@ def _refresh_lock() -> Iterator[None]:
         return
     try:
         folder = config().cache_dir
-        folder.mkdir(parents=True, mode=CACHE_DIR_MODE, exist_ok=True)
+        _private_dir(folder)
         fd = os.open(
             str(folder / REFRESH_LOCK_NAME),
             os.O_CREAT | os.O_RDWR,
@@ -955,6 +986,52 @@ def _refresh_lock() -> Iterator[None]:
         os.close(fd)
 
 
+def _origin(url: str) -> tuple[str, str, int | None] | None:
+    """(scheme, host, port) a request is aimed at, or None if it has no host."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    if not parts.hostname:
+        return None
+    return (parts.scheme.lower(), parts.hostname.lower(), parts.port)
+
+
+class _OriginBoundRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect that would carry a credential to another origin.
+
+    Every call this module makes is to a fixed vendor endpoint with the user's
+    token in a header: a Bearer for Claude, Codex, and Grok, a session cookie
+    for Cursor. urllib's default handler copies the request headers onto the
+    redirected request, so whichever host a 30x names is handed that token, and
+    the vendor's own infrastructure does not have to be compromised for that to
+    happen. A redirect that stays on the origin is followed as before; one that
+    leaves it is reported as the failure it is, and the token stays where it
+    was sent.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        carries_credential = any(
+            name.lower() in CREDENTIAL_HEADERS for name in req.headers
+        )
+        if carries_credential and _origin(req.full_url) != _origin(newurl):
+            raise urllib.error.HTTPError(newurl, code, msg, headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+# urlopen() builds a default global opener on first use, so the handler above is
+# only the one that runs if the opener carrying it is installed.
+urllib.request.install_opener(urllib.request.build_opener(_OriginBoundRedirect()))
+
+
 def fetch_http(
     url: str,
     headers: dict[str, str],
@@ -979,8 +1056,16 @@ def fetch_http(
     for attempt in range(attempts):
         try:
             with urllib.request.urlopen(req, timeout=req_timeout) as resp:  # noqa: S310
-                body = resp.read()
+                # One byte past the cap: reading exactly the cap cannot tell a
+                # body that fits from one that is only just over it.
+                body = resp.read(MAX_RESPONSE_BYTES + 1)
                 hdrs = resp.headers
+                if len(body) > MAX_RESPONSE_BYTES:
+                    warn(
+                        f"{url} returned over {MAX_RESPONSE_BYTES} bytes; "
+                        "the body was not read past the cap"
+                    )
+                    return resp.status, None, hdrs
                 if not body:
                     return resp.status, None, hdrs
                 try:
@@ -994,9 +1079,11 @@ def fetch_http(
             # drained and discarded rather than returned or logged.
             hdrs = e.headers if e.headers is not None else Message()
             # The error response owns a socket; reading it is not closing it.
+            # Bounded like the success path: a 429 or a 5xx is the response a
+            # peer chooses to send at length, and this body is thrown away.
             try:
                 with contextlib.closing(e):
-                    e.read()
+                    e.read(MAX_RESPONSE_BYTES + 1)
             except OSError as exc:
                 warn(
                     f"{url} returned {e.code} and its error body was unreadable: {exc}"
@@ -1349,6 +1436,19 @@ def _post_refresh(url: str, refresh: str, client_id: str) -> JsonDict | None:
     return tok
 
 
+def _is_grok_token_url(url: str) -> bool:
+    """Whether the OIDC document's token endpoint is one we will talk to.
+
+    The endpoint is named by a document that came off the network, and the
+    value it carries decides where a long-lived refresh token is POSTed. A
+    document that names another host, or the same host over plain http, is not
+    trusted with it: the exchange fails and the CLI's own refresh covers the
+    user until the vendor is reachable again.
+    """
+    parts = _origin(url)
+    return parts is not None and parts[0] == "https" and parts[1] == GROK_OIDC_HOST
+
+
 def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
     """Refresh OIDC access token and persist the new tokens atomically."""
     with _refresh_lock():
@@ -1373,7 +1473,12 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
         if not isinstance(discovery, dict):
             return None
         token_url = discovery.get("token_endpoint")
-        if not isinstance(token_url, str) or not token_url:
+        if not isinstance(token_url, str) or not _is_grok_token_url(token_url):
+            if token_url is not None:
+                warn(
+                    "grok discovery named a token endpoint that is not https on "
+                    f"{GROK_OIDC_HOST}; the refresh token was not sent to it"
+                )
             return None
 
         tok = _post_refresh(token_url, refresh, client_id)
