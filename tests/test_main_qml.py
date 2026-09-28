@@ -390,7 +390,11 @@ class MainQmlStaleWindowTest(unittest.TestCase):
         # value changes identity, so setting stale on the stored reading would
         # leave the card unmarked until some later poll replaced the object.
         self.assertNotIn("oldv.stale = true", QML_SOURCE)
-        self.assertIn("return Object.assign({}, oldv, {stale: true})", QML_SOURCE)
+        # Spacing inside the object literal is the formatter's, not the rule's.
+        self.assertRegex(
+            QML_SOURCE,
+            r"return Object\.assign\(\{\},\s*oldv,\s*\{\s*stale:\s*true\s*\}\s*\)",
+        )
 
 
 class MainQmlTokenTest(unittest.TestCase):

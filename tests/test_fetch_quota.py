@@ -2173,6 +2173,31 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn("usage: fetch_quota.py", stderr.getvalue())
 
+    def test_unknown_argument_outranks_a_broken_config(self) -> None:
+        # A typo is the operator's to fix, so it stays a usage error even when
+        # the environment is bad: the config payload exits 0, and a script
+        # reading stdout would never learn its argument was wrong.
+        stderr = io.StringIO()
+        with (
+            patch.dict(os.environ, {"QUOTA_WIDGET_CACHE": "relative/path"}),
+            contextlib.redirect_stderr(stderr),
+        ):
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                with self.assertRaises(SystemExit) as ctx:
+                    fetch_quota.main(["--nope"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("'--nope'", stderr.getvalue())
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_extra_argument_names_the_extra_one(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as ctx:
+                fetch_quota.main(["--print-config", "extra"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("'extra'", stderr.getvalue())
+        self.assertNotIn("--print-config", stderr.getvalue().splitlines()[0])
+
     def test_help_exits_zero_and_lists_the_flags(self) -> None:
         for flag in ("--help", "-h"):
             stdout = io.StringIO()

@@ -66,6 +66,12 @@ fails if a Breaking entry lands in this section without a matching next version.
 
 ### Fixed
 
+- An unknown argument to the fetcher is now a usage error whatever the
+  environment says. Before, the config was read first, so a typo run against a
+  broken `QUOTA_WIDGET_*` printed the configuration payload and exited 0, and
+  a script reading stdout never learned its argument was wrong. The argument is
+  checked before the environment, exits 2, and names the offending name, so
+  `--print-config extra` no longer reports `--print-config` as unknown.
 - A poll the panel dropped for running long can still answer after the poll
   that replaced it, and its numbers are the older ones. The provider cache and
   the panel now keep the newer reading instead of rewinding to the late one, so

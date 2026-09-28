@@ -2339,6 +2339,19 @@ def main(argv: list[str] | None = None) -> None:
         # Answered before load_config: help must work on a broken environment.
         print(HELP, end="")
         raise SystemExit(0)
+    if len(args) > 1 or (args and args[0] != "--print-config"):
+        # A usage error is the operator's, not the panel's, so it is reported
+        # before load_config: a typo on a machine with a broken environment
+        # would otherwise print the config payload and exit 0, and a script
+        # reading stdout would never learn its argument was wrong. The name
+        # printed is the offending one, so `--print-config extra` does not
+        # report a valid flag as unknown.
+        unexpected = args[1] if len(args) > 1 else args[0]
+        print(
+            f"fetch_quota: unexpected argument {unexpected!r}\n{USAGE_LINE}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     try:
         cfg = load_config()
     except ConfigError as exc:
@@ -2357,14 +2370,8 @@ def main(argv: list[str] | None = None) -> None:
                 "fetched_ms": _poll_stamp(),
             }
         )
-    if args == ["--print-config"]:
-        emit({"ok": True, "config": cfg.describe()})
     if args:
-        print(
-            f"fetch_quota: unknown argument {args[0]!r}\n{USAGE_LINE}",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
+        emit({"ok": True, "config": cfg.describe()})
 
     # A poll waits on network, not CPU: each provider is one or more HTTPS round
     # trips, so running them in turn made the panel wait the sum of every

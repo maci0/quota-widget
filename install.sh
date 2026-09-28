@@ -132,10 +132,11 @@ check_python() {
 
 usage() {
   cat <<'EOF'
-usage: install.sh [--uninstall]
+usage: install.sh [-u | --uninstall]
 
-  (no argument)  link package/ into the user's Plasma plasmoid directory
-  --uninstall    remove the installed widget, keep the cache and settings
+  (no argument)      link package/ into the user's Plasma plasmoid directory
+  -u, --uninstall    remove the installed widget, keep the cache and settings
+  -h, --help         print this help and exit
 EOF
 }
 
