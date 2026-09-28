@@ -19,7 +19,7 @@ Four vendor dashboards. Numbers match the same endpoints the CLIs and websites a
 - KDE Plasma 6
 - Python 3.11 or newer on `PATH` as `python3` (plasmashell runs the fetcher with it; `install.sh` refuses an older one)
 - Claude Code logged in (`~/.claude/.credentials.json`)
-- Cursor logged in (`~/.config/Cursor/User/globalStorage/state.vscdb`, or `~/.config/cursor/auth.json` from cursor-agent)
+- Cursor logged in (`$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb`, or `$XDG_CONFIG_HOME/cursor/auth.json` from cursor-agent; `~/.config` when that variable is unset or relative)
 - Codex CLI logged in (`~/.codex/auth.json`)
 - Grok CLI logged in (`~/.grok/auth.json`)
 

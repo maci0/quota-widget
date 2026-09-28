@@ -2297,6 +2297,51 @@ class TransientFailureTest(unittest.TestCase):
         self.assertTrue(fetch_quota._transient_failure(0))
 
 
+class Utf8StreamTest(unittest.TestCase):
+    """The journal and the payload are written as UTF-8 whatever the locale is.
+
+    A plasmashell started without LANG gets a C locale, where the streams are
+    ASCII: a warning naming a credential path or vendor text that is not ASCII
+    then raises UnicodeEncodeError mid-poll, and the panel is left with no
+    payload at all, which is the state this fetcher must never reach.
+    """
+
+    @staticmethod
+    def _ascii_stream() -> tuple[io.TextIOWrapper, io.BytesIO]:
+        raw = io.BytesIO()
+        return io.TextIOWrapper(raw, encoding="ascii"), raw
+
+    def test_warn_writes_non_ascii_to_an_ascii_locale(self) -> None:
+        stderr, raw = self._ascii_stream()
+        with patch.object(sys, "stderr", stderr):
+            fetch_quota._use_utf8_streams()
+            fetch_quota.warn("could not read /home/Ünïcodé/.codex/auth.json")
+
+        stderr.flush()
+        self.assertEqual(
+            raw.getvalue(),
+            "fetch_quota: could not read /home/Ünïcodé/.codex/auth.json\n".encode(),
+        )
+
+    def test_main_pins_the_streams_it_writes_through(self) -> None:
+        stdout, _ = self._ascii_stream()
+        stderr, _stderr_raw = self._ascii_stream()
+        with (
+            patch.object(sys, "stdout", stdout),
+            patch.object(sys, "stderr", stderr),
+            config_env(),
+            self.assertRaises(SystemExit),
+        ):
+            fetch_quota.main(["--print-config"])
+        self.assertEqual(stdout.encoding, "utf-8")
+        self.assertEqual(stderr.encoding, "utf-8")
+
+    def test_a_stream_without_reconfigure_is_left_alone(self) -> None:
+        # A captured stream (this suite) has no reconfigure to call.
+        with patch.object(sys, "stderr", io.StringIO()):
+            fetch_quota._use_utf8_streams()
+
+
 class TransportFailureTest(unittest.TestCase):
     """A dropped connection must stay diagnosable, and a read is retried once
     while a token POST is not."""

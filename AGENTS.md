@@ -31,14 +31,17 @@ The QML owns the fetcher process. One run at a time: `exec.poll()` returns early
   `test_release.py`, `test_install_script.py`); `project_paths.py` is the only
   shared helper and holds `project_root()`.
 - `tests/test_install_script.py`: runs `install.sh` against a checkout copied
-  into a temp dir, over the paths that decide a directory's fate. It never runs
-  the install itself, which polls four providers.
+  into a temp dir, over the paths that decide a directory's fate, and through
+  symlinks that name it from outside the checkout. It never runs the install
+  itself, which polls four providers.
 - `tests/test_fuzz_parsers.py`: seeded randomized fuzzing of the parsers fed
   untrusted input (the Cursor usage-summary body, `ItemTable` cells, JWTs).
   Generators are seeded so a failure reproduces; raise `ITERATIONS` or move
   `BASE_SEED` to widen a run.
 - `scripts/print_smoke.py`: prints a fetched JSON dump (`install.sh` writes `.scratch/smoke.json`)
-- `install.sh`: root symlink installer
+- `install.sh`: root symlink installer. Its root walk starts at the script
+  behind whatever symlink named it, since a distro package or a link in
+  `~/bin` runs it from outside the checkout.
 - `.scratch/`: gitignored local scratch (never `/tmp`)
 
 Project marker: `package/metadata.json`. Scripts walk up to that file.

@@ -8,9 +8,31 @@ set -euo pipefail
 # world-readable. A dir that already exists keeps the mode it had.
 umask 077
 
+# $0 is the path the caller typed, and a symlink is what a distro package or a
+# convenience link in ~/bin hands this script. Walking up from the link's own
+# directory then never reaches the project marker. readlink is spelled the same
+# everywhere but has no -f, so the chain is followed by hand and bounded by the
+# kernel's own ELOOP limit.
+MAX_SYMLINK_HOPS=40
+
+script_path() {
+  local src="$1" dir hops=0
+  while [[ -L "$src" ]]; do
+    if ((hops++ >= MAX_SYMLINK_HOPS)); then
+      echo "error: $src is a symlink loop" >&2
+      return 1
+    fi
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" == /* ]] || src="$dir/$src"
+  done
+  printf '%s\n' "$src"
+}
+
 find_root() {
   local dir
-  dir="$(cd "$(dirname "$0")" && pwd)"
+  dir="$(dirname "$(script_path "$0")")"
+  dir="$(cd "$dir" && pwd)"
   while [[ "$dir" != "/" ]]; do
     if [[ -f "$dir/package/metadata.json" ]]; then
       printf '%s\n' "$dir"
@@ -50,8 +72,11 @@ xdg_data="$HOME/.local/share"
 [[ "${XDG_DATA_HOME:-}" = /* ]] && xdg_data="$XDG_DATA_HOME"
 xdg_cache="$HOME/.cache"
 [[ "${XDG_CACHE_HOME:-}" = /* ]] && xdg_cache="$XDG_CACHE_HOME"
+xdg_config="$HOME/.config"
+[[ "${XDG_CONFIG_HOME:-}" = /* ]] && xdg_config="$XDG_CONFIG_HOME"
 
 DEST="$xdg_data/plasma/plasmoids/${PKG_ID}"
+PLASMOID_CONFIG="$xdg_config/plasmoids/org.kde.plasma.plasmoid/${PKG_ID}.json"
 SCRATCH="$ROOT/.scratch"
 
 # DEST may hold a copy put there by Plasma Discover, by a distro package, or
@@ -109,7 +134,7 @@ uninstall() {
   fi
   rm -rf "$xdg_cache/plasmashell/qmlcache" 2>/dev/null || true
   echo "kept: $xdg_cache/quota-widget (last good readings)"
-  echo "      ~/.config/plasmoids/org.kde.plasma.plasmoid/com.maci.quota-widget.json"
+  echo "      $PLASMOID_CONFIG"
 }
 
 case "${1:-}" in

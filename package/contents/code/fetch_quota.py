@@ -544,6 +544,25 @@ def config() -> Config:
     return _CONFIG
 
 
+def _use_utf8_streams() -> None:
+    """Write the payload and the journal as UTF-8 whatever the locale says.
+
+    plasmashell hands the fetcher the session environment, and a session that
+    exported no LANG (a user unit, a nested Plasma session) leaves the streams
+    on ASCII where the runtime cannot coerce C to C.UTF-8. The payload is
+    ASCII, since json.dumps escapes what it cannot spell, but a warning
+    carries a credential path and vendor text, and the UnicodeEncodeError
+    printing one raises aborts the poll before emit() runs, so the panel is
+    left with no payload at all. A captured stream (the test suite) has no
+    reconfigure; it needs no fixing.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(ValueError):  # stream already detached
+                reconfigure(encoding=JSON_ENCODING)
+
+
 def emit(obj: JsonDict) -> None:
     """Print the one payload plasmashell reads and exit.
 
@@ -2150,6 +2169,7 @@ def main(argv: list[str] | None = None) -> None:
     usage error. The process always exits through emit(), so a run that
     crashed on its way there still leaves the panel a payload it can read.
     """
+    _use_utf8_streams()
     args = sys.argv[1:] if argv is None else argv
     if args in (["--help"], ["-h"]):
         # Answered before load_config: help must work on a broken environment.

@@ -106,6 +106,21 @@ fails if a Breaking entry lands in this section without a matching next version.
 - A provider timestamp sent as a bare epoch number (`billingCycleEnd`,
   `resets_at`) is read in the unit it arrived in, seconds or milliseconds,
   instead of being dropped as unparsable and showing no reset at all.
+- `install.sh --uninstall` named the widget settings file as
+  `~/.config/plasmoids/...` whatever `XDG_CONFIG_HOME` said, so on a session
+  with a custom base directory the path it told the user to keep was not the
+  one plasmashell wrote.
+- `install.sh` walked up from the path it was called through, so a symlink to
+  it from outside the checkout (a distro package, a link in `~/bin`) reported
+  `package/metadata.json not found` and installed nothing. The root walk now
+  follows the symlink chain to the script, as the Python entry points already
+  do with `Path(__file__).resolve()`.
+- The fetcher wrote its payload and its journal through whatever encoding the
+  session locale gave the streams. A plasmashell started without `LANG` on a
+  host with no `C.UTF-8` left them on ASCII, where a warning naming a
+  non-ASCII path or vendor text raised `UnicodeEncodeError` mid-poll and the
+  panel got no payload at all. Both streams are now pinned to UTF-8 at
+  startup, as `scripts/print_smoke.py` already did for its own output.
 - The gate was red on a clean tree: `ruff` reported an unparameterized table
   name and a needless comprehension in the Cursor `state.vscdb` fixture. The
   table name is now checked against the names the fixture builds, so `CI` is

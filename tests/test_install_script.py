@@ -1,13 +1,16 @@
-"""install.sh: the paths that remove or refuse a directory.
+"""install.sh: root resolution, and the paths that remove or refuse a directory.
 
-The install path itself polls four providers, so it is not run here. The
-decisions around it are: a manifest whose Id cannot name a directory, and a
-destination holding something this widget did not put there.
+`--help` answers before the installer touches the plasmoid directory, the
+cache, or the network, so it exercises root resolution and nothing else. The
+install path itself polls four providers, so it is not run here; the decisions
+around it are a manifest whose Id cannot name a directory, and a destination
+holding something this widget did not put there.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -120,6 +123,82 @@ class InstallScriptTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("not installed", result.stdout)
+
+
+class FindRootTest(unittest.TestCase):
+    """The root walk starts at the script, not at the link that names it.
+
+    A distro package or a convenience link in ~/bin runs this script from
+    outside the checkout, and a walk from the link's own directory never
+    reaches package/metadata.json.
+    """
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+    def _run(self, script: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
+        # HOME is read before the argument is dispatched, and set -u would
+        # abort on a missing one; the temp dir keeps a stray write harmless.
+        env = dict(os.environ, HOME=str(self.tmp))
+        return subprocess.run(  # this file's own script, in a temp dir
+            [str(script), "--help"],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def test_run_from_the_checkout(self) -> None:
+        done = self._run(SCRIPT, project_root())
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("usage: install.sh", done.stdout)
+
+    def test_absolute_symlink_outside_the_checkout(self) -> None:
+        link = self.tmp / "install.sh"
+        link.symlink_to(SCRIPT)
+
+        done = self._run(link, self.tmp)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("usage: install.sh", done.stdout)
+
+    def test_relative_symlink_in_a_subdirectory(self) -> None:
+        # A packaged link is written relative to its own directory; a relative
+        # target must be resolved against the link, not against the cwd.
+        nested = self.tmp / "bin"
+        nested.mkdir()
+        target = nested / "real-install.sh"
+        target.symlink_to(os.path.relpath(SCRIPT, nested))
+        link = nested / "quota-widget-install"
+        link.symlink_to(Path("real-install.sh"))
+
+        done = self._run(link, self.tmp)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("usage: install.sh", done.stdout)
+
+    def test_symlink_chain(self) -> None:
+        first = self.tmp / "install.sh"
+        first.symlink_to(SCRIPT)
+        second = self.tmp / "quota-widget-install"
+        second.symlink_to(first)
+
+        done = self._run(second, self.tmp)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_no_project_above_fails_loudly(self) -> None:
+        # A link to a copy of the script with no checkout above it is the
+        # failure the root walk is there to report, not to install around.
+        detached = self.tmp / "detached"
+        detached.mkdir()
+        script = detached / "install.sh"
+        script.write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+        script.chmod(0o755)
+
+        done = self._run(script, detached)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("package/metadata.json not found", done.stderr)
 
 
 if __name__ == "__main__":
