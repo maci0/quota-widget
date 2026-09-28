@@ -16,7 +16,7 @@ Dev and CI use `uv` (`uv run pytest`, `uv run black`, `uv run ruff`, `uv run myp
 
 ## Layout
 
-- `package/`: plasmoid (metadata, QML, fetcher)
+- `package/`: plasmoid (metadata, QML, fetcher, `contents/icons/com.maci.quota-widget.svg`)
 - `tests/`: pytest
 - `scripts/print_smoke.py`: prints a fetched JSON dump (`install.sh` writes `.scratch/smoke.json`)
 - `install.sh`: root symlink installer
@@ -26,6 +26,14 @@ Project marker: `package/metadata.json`. Scripts walk up to that file.
 
 `install.sh` deletes `~/.local/share/plasma/plasmoids/com.maci.quota-widget` before
 symlinking. Run it only when the user asks to install or upgrade, never as a build or test step.
+
+## Look
+
+`package/contents/ui/main.qml` holds the type scale, dimming steps, meter thickness, and provider marks in one token block at the top. Add a value there instead of an inline literal, so the panel, the popup, and the gauges stay on one scale.
+
+Provider marks: Claude and Codex use their published brand color. Cursor and Grok are monochrome brands, so they use `Kirigami.Theme` neutrals. Do not invent a hue for a vendor without one.
+
+The applet icon is `package/contents/icons/com.maci.quota-widget.svg`, a 270 degree gauge arc matching the in-app meter. It is a dark rim under a light fill so it reads on both panel themes; keep that pairing if it is redrawn.
 
 ## Providers
 

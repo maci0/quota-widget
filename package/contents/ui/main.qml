@@ -41,6 +41,27 @@ PlasmoidItem {
     // Mirrors DEFAULT_CACHE_MAX_AGE_S in package/contents/code/fetch_quota.py.
     readonly property int staleKeepMs: 24 * 60 * 60 * 1000
 
+    // ── tokens ───────────────────────────────────────────────────────────
+    // Type scale, dimming steps, and meter geometry. Every view reads these
+    // so the panel, the popup, and the gauges stay on one scale.
+    readonly property real scaleTitle: 1.15
+    readonly property real scaleReading: 1.1
+    readonly property real scaleGaugeRead: 1.05
+    readonly property real dim: 0.8
+    readonly property real dimMuted: 0.7
+    readonly property real dimFaint: 0.55
+    readonly property real trackOpacity: 0.2
+    readonly property real inactiveMarkOpacity: 0.35
+    readonly property int markThickness: 3
+    readonly property int barThickness: 8
+
+    // Provider marks. Claude and Codex ship a brand color; Cursor and Grok
+    // are monochrome, so they get theme neutrals rather than invented hues.
+    readonly property color claudeMark: "#D97757"
+    readonly property color codexMark: "#10A37F"
+    readonly property color cursorMark: Kirigami.Theme.textColor
+    readonly property color grokMark: Kirigami.Theme.neutralTextColor
+
     property var claude: null
     property var cursor: null
     property var grok: null
@@ -50,7 +71,7 @@ PlasmoidItem {
     property double fetchedMs: 0
     readonly property bool gaugeView: !!Plasmoid.configuration.gaugeView
 
-    Plasmoid.icon: "office-chart-pie"
+    Plasmoid.icon: "com.maci.quota-widget.svg"
     toolTipMainText: "AI Quota"
     toolTipSubText: tooltipBody()
 
@@ -296,6 +317,15 @@ PlasmoidItem {
         return m
     }
 
+    // The provider the compact reading is showing, in priority order.
+    function primaryMarkColor() {
+        if (claude && claude.ok && claude.session) return claudeMark
+        if (cursorTopPeriod()) return cursorMark
+        if (codexTopWindow()) return codexMark
+        if (grokTopPeriod()) return grokMark
+        return Kirigami.Theme.disabledTextColor
+    }
+
     // ── compact (panel) ───────────────────────────────────────────────────
     compactRepresentation: MouseArea {
         id: compact
@@ -325,7 +355,7 @@ PlasmoidItem {
         ColumnLayout {
             id: compactCol
             anchors.centerIn: parent
-            spacing: 0
+            spacing: 2
 
             PlasmaComponents3.Label {
                 Layout.alignment: Qt.AlignHCenter
@@ -376,6 +406,12 @@ PlasmoidItem {
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
                 font.features: { "tnum": 1 }
                 horizontalAlignment: Text.AlignHCenter
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.topMargin: 1
+                Layout.preferredHeight: 2
+                color: root.primaryMarkColor()
             }
         }
     }
@@ -450,7 +486,7 @@ PlasmoidItem {
                         ? (root.claude.plan + (root.claude.stale ? " · cached" : ""))
                         : ((root.claude && root.claude.error)
                             ? errLabel(root.claude.error, "Sign in with Claude Code") : "Loading")
-                    accent: "#D97757"
+                    accent: root.claudeMark
                     ok: root.claude && root.claude.ok
 
                     ColumnLayout {
@@ -552,7 +588,7 @@ PlasmoidItem {
                         ? (root.cursor.plan + (root.cursor.stale ? " · cached" : ""))
                         : ((root.cursor && root.cursor.error)
                             ? errLabel(root.cursor.error, "Sign in to Cursor") : "Loading")
-                    accent: "#F54E00"
+                    accent: root.cursorMark
                     ok: root.cursor && root.cursor.ok
 
                     ColumnLayout {
@@ -610,7 +646,7 @@ PlasmoidItem {
                         ? root.codex.plan
                         : ((root.codex && root.codex.error)
                             ? errLabel(root.codex.error, "Sign in with `codex login`") : "Loading")
-                    accent: "#10A37F"
+                    accent: root.codexMark
                     ok: root.codex && root.codex.ok
 
                     ColumnLayout {
@@ -708,7 +744,7 @@ PlasmoidItem {
                         ? "Credit limits"
                         : ((root.grok && root.grok.error)
                             ? errLabel(root.grok.error, "Sign in with `grok login`") : "Loading")
-                    accent: "#1DA1F2"
+                    accent: root.grokMark
                     ok: root.grok && root.grok.ok
 
                     ColumnLayout {
@@ -792,10 +828,10 @@ PlasmoidItem {
 
         Rectangle {
             Layout.fillWidth: true
-            radius: 3
-            height: 3
+            radius: root.markThickness / 2
+            height: root.markThickness
             color: card.accent
-            opacity: card.ok ? 1 : 0.35
+            opacity: card.ok ? 1 : root.inactiveMarkOpacity
         }
 
         RowLayout {
@@ -885,13 +921,13 @@ PlasmoidItem {
         Item {
             visible: !root.gaugeView
             Layout.fillWidth: true
-            height: 8
+            Layout.preferredHeight: root.barThickness
 
             Rectangle {
                 anchors.fill: parent
-                radius: 4
+                radius: root.barThickness / 2
                 color: Kirigami.Theme.disabledTextColor
-                opacity: 0.45
+                opacity: root.trackOpacity
                 Accessible.ignored: true
             }
             Rectangle {
@@ -899,7 +935,7 @@ PlasmoidItem {
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
                 width: parent.width * row.shownFrac
-                radius: 4
+                radius: root.barThickness / 2
                 color: utilColor(row.util)
             }
         }
@@ -930,8 +966,8 @@ PlasmoidItem {
             Layout.alignment: Qt.AlignHCenter
             Layout.preferredWidth: row.gaugeSize
             Layout.preferredHeight: row.gaugeSize
-            width: row.gaugeSize
-            height: row.gaugeSize
+            implicitWidth: row.gaugeSize
+            implicitHeight: row.gaugeSize
 
             HoverHandler { id: gaugeHover }
 
@@ -945,7 +981,7 @@ PlasmoidItem {
 
             Shape {
                 anchors.fill: parent
-                opacity: 0.45
+                opacity: root.trackOpacity
                 ShapePath {
                     strokeWidth: row.ring
                     strokeColor: Kirigami.Theme.disabledTextColor
