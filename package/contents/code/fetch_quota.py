@@ -134,7 +134,7 @@ def ms_from_seconds(seconds: float) -> int:
     real value, so a reset the API sent in whole milliseconds displays a
     minute early after the seconds are divided back out.
     """
-    return int(round(seconds * 1000))
+    return round(seconds * 1000)
 
 
 def now_utc() -> dt.datetime:
@@ -172,7 +172,7 @@ GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing"
 GROK_OIDC_DISCOVERY = "https://auth.x.ai/.well-known/openid-configuration"
 
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
-CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"  # noqa: S105 (not a secret)
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 METADATA_JSON = Path(__file__).resolve().parents[2] / "metadata.json"
@@ -522,13 +522,13 @@ def _atomic_write_json(path: Path, obj: Any) -> None:
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
-        os.chmod(tmp, FILE_MODE_PRIVATE)
-        os.replace(tmp, path)
+        Path(tmp).chmod(FILE_MODE_PRIVATE)
+        Path(tmp).replace(path)
     except BaseException:
         # Any failure, not only OSError: an encoding or serialization error
         # would otherwise leave a temp file in the token store for every poll.
         with contextlib.suppress(OSError):
-            os.unlink(tmp)
+            Path(tmp).unlink()
         raise
     _fsync_dir(path.parent)
 
@@ -715,12 +715,16 @@ def fetch_http(
     offline panel is diagnosable without rerunning the fetcher by hand; it
     never reaches stdout, which the panel parses as the only payload.
     """
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    # Every caller passes an https vendor constant, so no scheme check is
+    # needed here; the URL is not user or network input.
+    req = urllib.request.Request(  # noqa: S310
+        url, data=data, headers=headers, method=method
+    )
     req_timeout = config().http_timeout_s if timeout is None else timeout
     attempts = 1 if data is not None or method not in (None, "GET") else 2
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=req_timeout) as resp:
+            with urllib.request.urlopen(req, timeout=req_timeout) as resp:  # noqa: S310
                 body = resp.read()
                 hdrs = resp.headers
                 if not body:

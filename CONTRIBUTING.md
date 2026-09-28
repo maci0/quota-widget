@@ -13,7 +13,7 @@ Do not commit to `main`.
 
 ```bash
 uv sync --extra dev --frozen
-uv run black --check . && uv run ruff check . && uv run mypy && uv run pytest
+uv run black --check . && uv run ruff check . && uv run mypy && uv run pytest && shellcheck install.sh
 ```
 
 That is the whole gate, in CI order. Both must be green before a push.

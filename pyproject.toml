@@ -25,7 +25,32 @@ line-length = 88
 src = ["package/contents/code", "tests", "scripts"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "S",   # bandit
+    "C4",  # comprehensions
+    "DTZ", # naive datetimes
+    "ERA",  # dead code
+    "FLY",  # string formatting
+    "G",    # logging format
+    "INT",  # gettext
+    "ISC",  # implicit string concat
+    "N",    # naming
+    "PERF",  # perflint
+    "PIE",  # misc lints
+    "PTH",  # os.path to pathlib
+    "RET",  # return statements
+    "RUF",  # ruff specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+# A test asserts; that is the assertion API. S105 and S108 fire on fixture
+# names for a token or a temp path, and RUF001 on a real UI string.
+"tests/*" = ["S101", "S105", "S108", "RUF001"]
 
 [tool.mypy]
 python_version = "3.11"
