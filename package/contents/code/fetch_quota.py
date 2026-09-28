@@ -157,6 +157,22 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding=JSON_ENCODING)
 
 
+def _utf8_encodable(value: str) -> bool:
+    """Whether the value survives being encoded as UTF-8.
+
+    Text off the wire can hold an unpaired surrogate (a JSON "\\ud800" escape,
+    or a cell a state.vscdb holds as raw bytes), which decodes but does not
+    encode: percent-encoding a header, digesting an account id, or writing a
+    cache entry all raise on it. Such a value is dropped where it arrives, the
+    rule _vscdb_str and _digest already follow.
+    """
+    try:
+        value.encode(JSON_ENCODING)
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _transient_failure(status: int) -> bool:
     """Whether a cached reading beats reporting this failure.
 
@@ -1570,7 +1586,7 @@ def _post_refresh(url: str, refresh: str, client_id: str) -> JsonDict | None:
             "refresh_token": refresh,
             "client_id": client_id,
         }
-    ).encode()
+    ).encode(JSON_ENCODING)
     status, tok = fetch_json(
         url,
         {
@@ -1841,7 +1857,12 @@ def _jwt_payload(token: str) -> JsonDict | None:
         if len(parts) < 2:
             return None
         pad = "=" * ((4 - len(parts[1]) % 4) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+        # RFC 7519 spells the payload UTF-8, and it is decoded as such:
+        # json.loads on bytes sniffs a UTF-16 or UTF-32 payload instead, and a
+        # token that is not UTF-8 is no token.
+        payload = json.loads(
+            base64.urlsafe_b64decode(parts[1] + pad).decode(JSON_ENCODING)
+        )
     except (ValueError, TypeError):
         return None
     return payload if isinstance(payload, dict) else None
@@ -2115,9 +2136,7 @@ def _vscdb_str(value: Any) -> str | None:
                     return None  # a quoted blank cell is no token either
         except json.JSONDecodeError:
             pass  # keep the raw cell text
-    try:
-        s.encode(JSON_ENCODING)
-    except UnicodeEncodeError:
+    if not _utf8_encodable(s):
         # A JSON escape can spell a lone surrogate ("\ud800"): it decodes, it
         # does not encode, and it would fail the header quote or the cache
         # write. Treat it like any other undecodable cell.
@@ -2133,8 +2152,14 @@ def _workos_user_id(sub: str) -> str:
 
 
 def _jwt_sub(token: str) -> str | None:
+    """The WorkOS user id a Cursor token claims, or None if it names none.
+
+    A claim that cannot be encoded names no usable session: it is
+    percent-encoded into the Cookie header below, and quoting it raises where
+    a dropped claim only costs the Cursor card.
+    """
     sub = _jwt_claim(token, "sub")
-    if not isinstance(sub, str) or not sub:
+    if not isinstance(sub, str) or not sub or not _utf8_encodable(sub):
         return None
     return _workos_user_id(sub)
 
@@ -2385,7 +2410,7 @@ def fetch_cursor() -> JsonDict:
         return _failure("no-token")
 
     cookie = "WorkosCursorSessionToken=" + urllib.parse.quote(
-        auth["sub"] + "::" + auth["token"], safe=""
+        auth["sub"] + "::" + auth["token"], safe="", encoding=JSON_ENCODING
     )
     headers = {
         "Cookie": cookie,
@@ -2508,9 +2533,7 @@ def main(argv: list[str] | None = None) -> None:
         # Answered before load_config: help must work on a broken environment.
         print(HELP, end="")
         raise SystemExit(0)
-    if len(args) > 1 or (
-        args and args[0] not in ("--print-config", "--clear-cache")
-    ):
+    if len(args) > 1 or (args and args[0] not in ("--print-config", "--clear-cache")):
         # A usage error is the operator's, not the panel's, so it is reported
         # before load_config: a typo on a machine with a broken environment
         # would otherwise print the config payload and exit 0, and a script

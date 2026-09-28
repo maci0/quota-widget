@@ -1206,6 +1206,14 @@ class CursorStateDbTest(unittest.TestCase):
         self.assertEqual(loaded["sub"], "user_01AGENT")
         self.assertEqual(loaded["plan"], "")
 
+    def test_a_claim_that_cannot_be_encoded_names_no_session(self) -> None:
+        # A JSON escape can spell a lone surrogate. The sub is percent-encoded
+        # into the session cookie, so quoting it raises, and a raised provider
+        # is reported to the panel as a dropped connection.
+        self.assertIsNone(fetch_quota._jwt_sub(_fake_jwt("auth0|user_\ud800")))
+        self.assertIsNotNone(fetch_quota._jwt_sub(_fake_jwt("auth0|user_01ABC")))
+        self.assertIsNotNone(fetch_quota._jwt_sub(_fake_jwt("auth0|üser_01ABC")))
+
 
 class IsoToMsTest(unittest.TestCase):
     def test_parses_zulu(self) -> None:

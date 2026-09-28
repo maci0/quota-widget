@@ -362,6 +362,10 @@ class TokenAndCellFuzz(unittest.TestCase):
                 self.assertTrue(payload is None or isinstance(payload, dict))
                 sub = fetch_quota._jwt_sub(token)
                 self.assertTrue(sub is None or isinstance(sub, str))
+                # The sub is percent-encoded into the session cookie, so a
+                # claim that decodes but does not encode must be dropped
+                # before it reaches the header.
+                self.assertTrue(sub is None or fetch_quota._utf8_encodable(sub))
                 # A token that claims an expiry must produce a usable instant.
                 exp = fetch_quota._jwt_exp_ms(token)
                 self.assertTrue(exp is None or isinstance(exp, int))

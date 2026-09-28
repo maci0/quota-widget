@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 QML_PATH: Final = project_root() / "package" / "contents" / "ui" / "main.qml"
-QML_SOURCE: Final = QML_PATH.read_text()
+QML_SOURCE: Final = QML_PATH.read_text(encoding="utf-8")
 LABEL_OPEN: Final = "PlasmaComponents3.Label {"
 DIMMED_OPACITY: Final = re.compile(r"opacity:\s*0\.[0-7]\d*")
 
