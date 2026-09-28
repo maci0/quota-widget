@@ -211,6 +211,19 @@ def _finite_number(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _emittable(value: object) -> Any:
+    """A wire value the panel's JSON parser can read.
+
+    Codex sends a balance and a reset-credit count as numbers, and a non-finite
+    one (json.loads accepts both) would be written back as bare NaN/Infinity
+    and take the whole poll down with it. Values that are not numbers, the
+    string balances the QML documents, are passed through untouched.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return value
+    return _finite_number(value)
+
+
 def sleep(seconds: float) -> None:
     """A seam the tests patch, so a Retry-After, a retry backoff, or a lock poll
     costs no wall clock in the suite."""
@@ -1106,15 +1119,17 @@ def fetch_claude() -> JsonDict:
             "extra_usage": {
                 "enabled": bool(extra.get("is_enabled")),
                 "used_credits": _finite_number(extra.get("used_credits")),
-                "currency": extra.get("currency"),
+                "currency": _as_text(extra.get("currency")),
                 "monthly_limit": _finite_number(extra.get("monthly_limit")),
             },
             "spend": {
                 "enabled": bool(spend.get("enabled")),
                 "percent": _finite_number(spend.get("percent")),
                 "used_minor": _finite_number(spend_used.get("amount_minor")),
-                "currency": spend_used.get("currency") or extra.get("currency"),
-                "exponent": spend_used.get("exponent", 2),
+                "currency": _as_text(
+                    spend_used.get("currency") or extra.get("currency")
+                ),
+                "exponent": _emittable(spend_used.get("exponent", 2)),
             },
         }
     )
@@ -1249,9 +1264,21 @@ def _money_val(obj: Any) -> int | None:  # JSON number or {val: int}
     return None if number is None else round(number)
 
 
+def _first_present(cfg: JsonDict, *keys: str) -> Any:
+    """The first key the payload carries, by presence and not by truth.
+
+    A cap of 0 is a real cap, so `cfg.get(a) or cfg.get(b)` would drop it for
+    the fallback key and report the plan as uncapped.
+    """
+    for key in keys:
+        if key in cfg:
+            return cfg[key]
+    return None
+
+
 def _parse_grok_period(cfg: JsonDict) -> JsonDict:
     """Parse one billing config into a period dict (weekly or monthly shape)."""
-    on_demand = _money_val(cfg.get("onDemandCap") or cfg.get("on_demand_cap"))
+    on_demand = _money_val(_first_present(cfg, "onDemandCap", "on_demand_cap"))
     period = _as_dict(cfg.get("currentPeriod"))
     ptype = str(period.get("type") or "")
     label = (
@@ -1283,11 +1310,15 @@ def _parse_grok_period(cfg: JsonDict) -> JsonDict:
     else:
         # Legacy monthly shape: $ used of $ limit (values in cents).
         used = _money_val(cfg.get("used"))
-        limit = _money_val(cfg.get("monthlyLimit") or cfg.get("monthly_limit"))
+        limit = _money_val(_first_present(cfg, "monthlyLimit", "monthly_limit"))
         # A limit of zero or less is no limit; dividing by it would blow up or
-        # flip the meter negative.
+        # flip the meter negative. The ratio itself can still overflow on a
+        # large used amount (100 * 1.7e308 is Infinity), and json.dumps writes
+        # that as bare Infinity, which is not JSON and which plasmashell
+        # rejects, so the computed percent is a finite check like every other
+        # number the payload carries.
         util = (
-            round(100.0 * used / limit, 1)
+            _finite_number(round(100.0 * used / limit, 1))
             if used is not None and limit is not None and limit > 0
             else None
         )
@@ -1473,8 +1504,8 @@ def _codex_reset_credits(data: JsonDict) -> JsonDict:
     reported = "rate_limit_reset_credits" in data
     raw = data.get("rate_limit_reset_credits")
     resets = raw if isinstance(raw, dict) else {}
-    available = resets.get("available_count")
-    applicable = resets.get("applicable_available_count")
+    available = _emittable(resets.get("available_count"))
+    applicable = _emittable(resets.get("applicable_available_count"))
     return {
         "reported": reported,
         "available": 0 if reported and available is None else available,
@@ -1646,7 +1677,7 @@ def fetch_codex() -> JsonDict:
             "windows": windows,
             "credits": {
                 "has_credits": bool(credits.get("has_credits")),
-                "balance": credits.get("balance"),
+                "balance": _emittable(credits.get("balance")),
                 "unlimited": bool(credits.get("unlimited")),
                 "overage_limit_reached": bool(credits.get("overage_limit_reached")),
             },
@@ -1840,9 +1871,10 @@ def _cursor_meter(
     used = _finite_number(block.get("used"))
     limit = _finite_number(block.get("limit"))
     util = _finite_number(block.get("totalPercentUsed"))
-    if util is None and used is not None and limit:
+    if util is None and used is not None and limit is not None and limit > 0:
         # Finite inputs can still overflow the ratio (1e308 / 1e-308), and
-        # json.dumps writes an Infinity plasmashell's parser rejects.
+        # json.dumps writes an Infinity plasmashell's parser rejects. A
+        # negative limit is not a limit either, and would flip the meter.
         util = _finite_number(round(100.0 * used / limit, 1))
     if util is None and used is None and limit is None:
         return None

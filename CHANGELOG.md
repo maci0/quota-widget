@@ -58,6 +58,18 @@ prints, so a fetcher and UI shipped together never break each other.
   `load_config` accepts.
 - `QUOTA_WIDGET_NOW_MS` accepted a negative value, dating every reading before
   the epoch.
+- A Grok `used`/`limit` pair whose percent overflows (`100 * 1.7e308`) printed
+  a bare `Infinity` in the widget JSON, which plasmashell's parser rejects, and
+  a negative Cursor `limit` flipped the meter negative instead of reading as no
+  ratio.
+- A Grok on-demand cap of `0` was dropped for the snake_case fallback key, so a
+  plan forbidden from on-demand spend reported itself as uncapped.
+- A Codex credits balance or reset-credit count, and a Claude currency or spend
+  exponent, no longer reach the widget JSON with a non-finite number or an
+  untyped value the UI cannot format.
+- `uv run ruff check .` failed on the Cursor `ItemTable` fixture in
+  `tests/test_fetch_quota.py` (`S608`, `C416`), so the gate was red for
+  everyone before a first change.
 - A Cursor response whose `membershipType` is not a string, or whose
   `billingCycleEnd` is not a date string, raised out of the parser and blanked
   the card instead of reading as unknown.

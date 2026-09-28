@@ -1,9 +1,11 @@
 """Randomized (property) fuzzing for the parsers fed untrusted input.
 
-Two surfaces carry bytes or JSON that this process does not control:
+Three surfaces carry bytes or JSON that this process does not control:
 
 - ``parse_cursor_summary`` reads the Cursor usage-summary body off the wire
   and out of ``~/.cache/quota-widget/cursor.json``.
+- ``_parse_grok_period`` reads the Grok billing config off the wire and out of
+  the same cache.
 - ``_vscdb_str`` and ``_jwt_payload`` read cells and tokens out of a Cursor
   SQLite state DB and a vendor credential file.
 
@@ -230,6 +232,99 @@ class CursorSummaryFuzz(unittest.TestCase):
         )
         self.assertIsInstance(parsed["plan"], str)
         self.assertIsNone(parsed["resets_ms"])
+
+
+GROK_SEED_CORPUS: tuple[JsonDict, ...] = (
+    {
+        "used": 2500,
+        "monthlyLimit": 10000,
+        "onDemandCap": 5000,
+        "billingPeriodStart": "2026-04-02T14:11:55.000Z",
+        "billingPeriodEnd": "2026-05-02T14:11:55.000Z",
+    },
+    {
+        "currentPeriod": {"type": "WEEKLY", "start": "2026-04-02T00:00:00Z"},
+        "creditUsagePercent": 12.5,
+        "isUnifiedBillingUser": True,
+    },
+    {"isUnifiedBillingUser": True, "currentPeriod": {"type": "MONTHLY"}},
+    {},
+    # Wrong types where the schema says number or string.
+    {"used": ["2500"], "monthlyLimit": None},
+    {"used": 0, "monthlyLimit": 0, "onDemandCap": 0},
+    {"used": 2500, "monthly_limit": 10000, "on_demand_cap": 5000},
+    {"used": 1.7e308, "monthlyLimit": 1, "onDemandCap": float("inf")},
+    {"used": float("nan"), "monthlyLimit": float("nan"), "creditUsagePercent": "x"},
+)
+
+
+def _rand_grok_period(rng: random.Random) -> Any:
+    base = json.loads(json.dumps(rng.choice(GROK_SEED_CORPUS)))
+    for key in list(base) + rng.sample(
+        [
+            "used",
+            "monthlyLimit",
+            "monthly_limit",
+            "onDemandCap",
+            "on_demand_cap",
+            "creditUsagePercent",
+            "currentPeriod",
+        ],
+        k=rng.randrange(5),
+    ):
+        if rng.random() < 0.5:
+            base[key] = _rand_json(rng)
+    return base
+
+
+class GrokPeriodFuzz(unittest.TestCase):
+    """Invariants every Grok billing config must satisfy.
+
+    The credits and dollar shapes share one period parser, and its util is a
+    ratio of two wire numbers, so the values that can reach it are the ones a
+    response can invent: zero, negative, and non-finite.
+    """
+
+    def _check(self, data: Any) -> JsonDict:
+        parsed = fetch_quota._parse_grok_period(data)
+        self.assertIn(parsed["label"], ("Weekly", "Monthly", "Usage"))
+        self.assertEqual(parsed["unit"], "cents")
+        self.assertIsInstance(parsed["currency"], str)
+        for key in ("util", "used", "limit", "on_demand_cap"):
+            value = parsed[key]
+            if isinstance(value, float):
+                self.assertTrue(math.isfinite(value), f"{key}={value!r} not finite")
+        if parsed["used"] is not None and parsed["limit"] is not None:
+            if parsed["limit"] <= 0:
+                self.assertIsNone(parsed["util"])
+            elif parsed["util"] is not None:
+                self.assertEqual(
+                    parsed["util"],
+                    round(100.0 * parsed["used"] / parsed["limit"], 1),
+                )
+        # The panel parses this with JSON; a NaN or Infinity blanks the widget.
+        json.loads(json.dumps(parsed, allow_nan=False))
+        return parsed
+
+    def test_fuzz_billing_config(self) -> None:
+        for iteration in range(ITERATIONS):
+            rng = random.Random(BASE_SEED + 30_000 + iteration)
+            with self.subTest(iteration=iteration, seed=BASE_SEED + 30_000 + iteration):
+                self._check(_rand_grok_period(rng))
+
+    def test_known_shapes_parse_as_before(self) -> None:
+        dollars = self._check(json.loads(json.dumps(GROK_SEED_CORPUS[0])))
+        self.assertEqual(dollars["label"], "Monthly")
+        self.assertEqual(dollars["util"], 25.0)
+        self.assertEqual(dollars["used"], 2500)
+        self.assertEqual(dollars["limit"], 10000)
+        self.assertEqual(dollars["on_demand_cap"], 5000)
+        credits = self._check(json.loads(json.dumps(GROK_SEED_CORPUS[1])))
+        self.assertEqual(credits["label"], "Weekly")
+        self.assertEqual(credits["util"], 12.5)
+        self.assertEqual(credits["on_demand_cap"], None)
+        empty = self._check(json.loads(json.dumps(GROK_SEED_CORPUS[2])))
+        self.assertEqual(empty["util"], 0.0)
 
 
 class TokenAndCellFuzz(unittest.TestCase):

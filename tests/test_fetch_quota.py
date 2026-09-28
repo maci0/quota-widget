@@ -1261,6 +1261,39 @@ class NonFiniteReadingTest(unittest.TestCase):
         )
         self.assertIsNone(period["util"])
 
+    def test_grok_ratio_overflow_is_not_a_reading(self) -> None:
+        # 100 * 1.7e308 is Infinity before the division even runs.
+        period = fetch_quota._parse_grok_period({"used": 1.7e308, "monthlyLimit": 5})
+        self.assertIsNone(period["util"])
+        self.assertNotIn("Infinity", json.dumps(period))
+
+    def test_cursor_meter_refuses_a_negative_limit(self) -> None:
+        meter = fetch_quota._cursor_meter(
+            {"enabled": True, "used": 250, "limit": -100}, "On-demand", "cents", 1
+        )
+        assert meter is not None
+        self.assertIsNone(meter["util"])
+
+    def test_emittable_drops_non_finite_and_keeps_the_rest(self) -> None:
+        self.assertIsNone(fetch_quota._emittable(float("nan")))
+        self.assertIsNone(fetch_quota._emittable(float("inf")))
+        self.assertEqual(fetch_quota._emittable(12.5), 12.5)
+        self.assertEqual(fetch_quota._emittable("12.50"), "12.50")
+        self.assertTrue(fetch_quota._emittable(True))
+
+    def test_codex_reset_counts_stay_finite(self) -> None:
+        resets = fetch_quota._codex_reset_credits(
+            {
+                "rate_limit_reset_credits": {
+                    "available_count": float("inf"),
+                    "applicable_available_count": 2,
+                }
+            }
+        )
+        self.assertEqual(resets["available"], 0)
+        self.assertEqual(resets["applicable"], 2)
+        self.assertNotIn("Infinity", json.dumps(resets))
+
     def test_poll_output_stays_parseable_json(self) -> None:
         parsed = fetch_quota.parse_cursor_summary(
             {
@@ -1301,6 +1334,22 @@ class GrokPeriodTest(unittest.TestCase):
             {"creditUsagePercent": 12.5, "currentPeriod": "weekly"}
         )
         self.assertEqual(parsed["util"], 12.5)
+
+    def test_on_demand_cap_of_zero_is_a_cap(self) -> None:
+        # A zero cap forbids on-demand spend, so dropping it for the snake_case
+        # fallback would report the plan as uncapped.
+        for key in ("onDemandCap", "on_demand_cap"):
+            parsed = fetch_quota._parse_grok_period(
+                {key: 0, "used": 250, "monthlyLimit": 1000}
+            )
+            self.assertEqual(parsed["on_demand_cap"], 0)
+
+    def test_snake_case_limit_is_used_when_the_camel_key_is_absent(self) -> None:
+        parsed = fetch_quota._parse_grok_period(
+            {"used": 250, "monthly_limit": 1000, "on_demand_cap": 750}
+        )
+        self.assertEqual(parsed["util"], 25.0)
+        self.assertEqual(parsed["on_demand_cap"], 750)
 
 
 class GrokNoPeriodTest(unittest.TestCase):
