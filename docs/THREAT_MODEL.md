@@ -48,6 +48,7 @@ no signing key, and can only read what its own user can already read.
 | OAuth token endpoints | `fetch_quota.py:341,342` (two Claude hosts), `fetch_quota.py:349` (OpenAI), and the Grok endpoint read out of the discovery document at `fetch_quota.py:346` | JSON bodies, plus `Retry-After` headers parsed at `parse_retry_after`, `fetch_quota.py:789` |
 | Poll interval | `package/contents/ui/main.qml:35`, clamped to 30..3600 s | Widget setting |
 | Stale window in the UI | `package/contents/ui/main.qml:47` (`defaultStaleKeepMs`), overridden from the payload at `package/contents/ui/main.qml:145` | Fixed fallback; the effective value arrives in `cache_max_age_s` |
+| CI pipeline | `.github/workflows/test.yml`, the only workflow; it runs `scripts/gate.sh` on a `ubuntu-24.04` runner with `contents: read` and no persisted credentials | Each third-party action is pinned to the commit behind its version tag and bumped by Dependabot (`.github/dependabot.yml`); the gate installs the dev tools from `uv.lock` with `--locked`, so a dependency that is not the reviewed resolution fails the run. The residual is the runner image itself (`ubuntu-24.04` is a moving label, not a digest) and the two actions that execute third-party code, `actions/checkout` and `astral-sh/setup-uv` |
 
 ### Outbound requests
 

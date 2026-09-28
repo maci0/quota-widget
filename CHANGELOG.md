@@ -173,6 +173,11 @@ fails if a Breaking entry lands in this section without a matching next version.
 
 ### Fixed
 
+- The test that holds the stale-keep window in force before the merge it
+  governs looked for a `mergeProv(root.claude, p.claude)` call per provider.
+  The merge walks `providerNames`, so the call it was ordering against is the
+  one inside that loop, and the test failed on the roster the panel is built
+  on rather than on the behaviour it names.
 - The tooltip's "No reading for:" line joined the provider names on a literal
   `", "`, a comma in every locale, and failed the gate's own rule that no
   sentence is assembled from a translated phrase and a separator written in
