@@ -87,8 +87,9 @@ uv run pytest
 shellcheck install.sh
 ```
 
-`ruff` runs the defect groups (bugbear, bandit, comprehensions, return
-statements, pathlib) alongside the style ones, and every gate step is blocking
-in CI. `mypy` is strict over the fetcher, `tests/`, and `scripts/`. A
+`ruff` selects its groups in `[tool.ruff.lint]`, defect groups (bugbear,
+bandit, comprehensions, datetime, return statements, pathlib) alongside the
+style ones, and every gate step is blocking in CI. `mypy` is strict over the
+fetcher, `tests/`, and `scripts/`. A
 `noqa` carries its rule and a reason; the per-file ignores in `pyproject.toml`
 are scoped to `tests/` and say why.

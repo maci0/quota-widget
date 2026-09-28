@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import datetime as dt
 import email.message
 import io
@@ -17,7 +18,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 from unittest.mock import patch
 
 import fetch_quota

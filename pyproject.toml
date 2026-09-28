@@ -54,6 +54,9 @@ select = [
 # A test asserts; that is the assertion API. S105 and S108 fire on fixture
 # names for a token or a temp path, and RUF001 on a real UI string.
 "tests/*" = ["S101", "S105", "S108", "RUF001"]
+# The fuzzer needs a reproducible stream, not a secure one: every generator is
+# seeded from BASE_SEED so a failure replays from the printed seed.
+"tests/test_fuzz_parsers.py" = ["S311"]
 
 [tool.mypy]
 python_version = "3.11"

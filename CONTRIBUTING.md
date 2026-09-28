@@ -16,7 +16,9 @@ uv sync --extra dev --frozen
 uv run black --check . && uv run ruff check . && uv run mypy && uv run pytest && shellcheck install.sh
 ```
 
-That is the whole gate, in CI order. Both must be green before a push.
+That is the whole gate, in CI order (`.github/workflows/test.yml` runs exactly
+these steps, and the workflow grants the token read-only access). Every step
+must be green before a push.
 
 Adding a dependency: `uv add <pkg>` (or `uv add --optional dev <pkg>`), which
 rewrites `pyproject.toml` and `uv.lock`. Hand-editing `uv.lock` is not a change a

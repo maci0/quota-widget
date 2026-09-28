@@ -4,11 +4,25 @@ on:
   push:
   pull_request:
 
+# The gate only reads the tree, so the token needs nothing but the checkout.
+permissions:
+  contents: read
+
+# A push to a branch with an open PR supersedes its own earlier run; main keeps
+# every run so the history of the default branch stays complete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No step pushes, so the token stays out of .git/config.
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v5
         with:
           version: "0.12.13"
