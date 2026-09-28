@@ -126,12 +126,13 @@ uv run pytest
 shellcheck install.sh
 ```
 
-`ruff` selects its groups in `[tool.ruff.lint]`, defect groups (bugbear,
-bandit, comprehensions, datetime, return statements, pathlib) alongside the
-style ones, and every gate step is blocking in CI. `mypy` is strict over the
-fetcher, `tests/`, and `scripts/`. A
-`noqa` carries its rule and a reason; the per-file ignores in `pyproject.toml`
-are scoped to `tests/` and say why.
+`ruff` selects its groups in `[tool.ruff.lint]`, defect groups (bugbear, blind
+except, builtin shadowing, bandit, comprehensions, datetime, type-checking
+imports, raise correctness, return statements, pathlib) alongside the style
+ones, and every gate step is blocking in CI. `mypy` is strict over the
+fetcher, `tests/`, and `scripts/`, with `warn_unreachable` on. A
+`noqa` carries its rule and a reason (`PGH` fails a bare one); the per-file
+ignores in `pyproject.toml` are scoped to `tests/` and say why.
 
 `.github/workflows/test.yml` pins each third-party action to the commit behind
 its version tag; `.github/dependabot.yml` opens the bump. Do not repin one to a

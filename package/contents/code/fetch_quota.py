@@ -49,12 +49,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from email.message import Message
 from pathlib import Path
-from types import ModuleType
-from typing import Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 from urllib.request import pathname2url
 
 # flock is POSIX-only; on Windows the refresh lock degrades to no lock, which
 # costs a possible double refresh, not a broken poll.
+if TYPE_CHECKING:
+    from types import ModuleType
+
 fcntl: ModuleType | None
 try:
     import fcntl
@@ -603,8 +605,11 @@ def iso_to_utc(value: str) -> dt.datetime | None:
     resolves it in the host's zone, so the same reading lands hours off on a
     plasmashell running anywhere west of Greenwich.
     """
+    # 3.11 reads a trailing "Z" itself; the rewrite keeps the value parseable
+    # when a vendor sends a shape fromisoformat rejects.
+    stamp = value.strip().replace("Z", "+00:00")
     try:
-        when = dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        when = dt.datetime.fromisoformat(stamp)
     except (TypeError, ValueError):
         return None
     if when.tzinfo is None:
@@ -799,10 +804,8 @@ def _account_id(access_token: str | None, fallback: str | None = None) -> str | 
 
 def _discard_provider_cache(path: Path) -> None:
     """Delete one cache file. Best-effort: a leftover file is unreadable anyway."""
-    try:
+    with contextlib.suppress(OSError):
         path.unlink()
-    except OSError:
-        pass  # already gone, or not ours to remove
 
 
 def _reading(payload: JsonDict) -> JsonDict:
@@ -1793,7 +1796,7 @@ def fetch_codex() -> JsonDict:
                 w["label"] = "Code review"
                 windows.append(w)
 
-    credits = _as_dict(data.get("credits"))
+    credits_block = _as_dict(data.get("credits"))
     reset_credits = _codex_reset_credits(data)
 
     result = _reading(
@@ -1805,9 +1808,9 @@ def fetch_codex() -> JsonDict:
             "limit_reached": bool(rate.get("limit_reached")),
             "windows": windows,
             "credits": {
-                "has_credits": bool(credits.get("has_credits")),
-                "balance": _amount(credits.get("balance")),
-                "unlimited": bool(credits.get("unlimited")),
+                "has_credits": bool(credits_block.get("has_credits")),
+                "balance": _amount(credits_block.get("balance")),
+                "unlimited": bool(credits_block.get("unlimited")),
             },
             "reset_credits": reset_credits,
         }
@@ -1954,10 +1957,10 @@ def _read_cursor_state_db(path: Path) -> tuple[str, str] | None:
         return None
     finally:
         if con is not None:
-            try:
+            # A close failure is never actionable here: the read is already over
+            # and the connection is dropped with the process either way.
+            with contextlib.suppress(sqlite3.Error):
                 con.close()
-            except sqlite3.Error:
-                pass  # connection already closed or unusable
     m = {k: _vscdb_str(v) for k, v in rows}
     token = m.get("cursorAuth/accessToken")
     if not token:
@@ -2163,7 +2166,7 @@ session (systemctl --user import-environment NAME) or the widget never sees it.
 def _safe_fetch(name: str, fetch: Callable[[], JsonDict]) -> JsonDict:
     try:
         return fetch()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 (catch-all by design)
         # Plasmashell needs JSON every poll; one provider must not abort the rest.
         # The panel reads "net" as transient and keeps its last good card, but
         # the cause belongs in the journal: a bug here otherwise looks exactly

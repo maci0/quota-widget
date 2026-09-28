@@ -33,24 +33,42 @@ src = ["package/contents/code", "tests", "scripts"]
 [tool.ruff.lint]
 select = [
     "E",   # pycodestyle
+    "W",   # pycodestyle warnings
     "F",   # pyflakes
     "I",   # isort
     "UP",  # pyupgrade
+    "A",   # builtin shadowing
+    "ASYNC", # async correctness
     "B",   # bugbear
+    "BLE",  # blind except
     "S",   # bandit
     "C4",  # comprehensions
     "DTZ", # naive datetimes
     "ERA",  # dead code
+    "EXE",  # executable file policy
+    "FA",   # future annotations
     "FLY",  # string formatting
+    "FURB", # refurb rules
     "G",    # logging format
+    "ICN",  # import conventions
+    "INP",  # implicit namespace package
     "INT",  # gettext
     "ISC",  # implicit string concat
+    "LOG",  # logging misuse
     "N",    # naming
     "PERF",  # perflint
+    "PGH",  # blanket noqa and blanket type: ignore
+    "PD",   # pandas-vet
     "PIE",  # misc lints
+    "PLE",  # pylint errors
     "PTH",  # os.path to pathlib
     "RET",  # return statements
+    "RSE",  # raise correctness
     "RUF",  # ruff specific
+    "SLOT", # dataclass slots
+    "TC",   # type-checking imports
+    "TID",  # tidy imports
+    "YTT",  # sys.version misuse
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -68,6 +86,9 @@ select = [
 [tool.mypy]
 python_version = "3.11"
 strict = true
+# strict leaves unreachable code alone; this tree has none, so a narrowing bug
+# should not pass as a line mypy decided to skip.
+warn_unreachable = true
 mypy_path = "package/contents/code"
 files = ["package/contents/code/fetch_quota.py", "tests", "scripts"]
 

@@ -21,7 +21,7 @@ Manifest = dict[str, Any]
 
 def metadata() -> Manifest:
     return cast(
-        Manifest, json.loads((PKG / "metadata.json").read_text(encoding="utf-8"))
+        "Manifest", json.loads((PKG / "metadata.json").read_text(encoding="utf-8"))
     )
 
 

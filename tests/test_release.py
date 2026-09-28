@@ -128,7 +128,9 @@ class DevDependencyRangeTest(unittest.TestCase):
 
     def test_floor_admits_the_locked_release(self) -> None:
         lock = (project_root() / "uv.lock").read_text(encoding="utf-8")
-        locked = dict(re.findall(r'^name = "([^"]+)"\nversion = "([^"]+)"', lock, re.M))
+        locked = dict(
+            re.findall(r'^name = "([^"]+)"\nversion = "([^"]+)"', lock, re.MULTILINE)
+        )
         for requirement in self.requirements:
             name, _, specifier = requirement.partition(">=")
             floor = specifier.split(",")[0]

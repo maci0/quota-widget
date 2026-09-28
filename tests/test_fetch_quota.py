@@ -2250,6 +2250,8 @@ class Utf8StateFileTest(unittest.TestCase):
         )
 
         def rotate(store: dict[str, object]) -> tuple[str, object]:
+            # dict() picks its overload from a homogeneous value type, and this
+            # store is mixed JSON, so the copy is the deliberate cast.
             oauth = dict(store["claudeAiOauth"])  # type: ignore[call-overload]
             oauth["accessToken"] = "new"
             store["claudeAiOauth"] = oauth
@@ -2929,9 +2931,9 @@ class RefreshLockWaitTest(unittest.TestCase):
             patch.object(fetch_quota, "fcntl", fake),
             patch.object(fetch_quota, "monotonic", self._monotonic),
             patch.object(fetch_quota, "sleep", self._sleep),
+            fetch_quota._refresh_lock(),
         ):
-            with fetch_quota._refresh_lock():
-                held.append("body")
+            held.append("body")
         return held
 
     def test_polls_at_the_interval_until_the_lock_frees(self) -> None:
@@ -3152,9 +3154,9 @@ class HomeDirectoryTest(unittest.TestCase):
             patch.object(Path, "home", side_effect=RuntimeError("no HOME")),
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),
+            self.assertRaises(SystemExit) as ctx,
         ):
-            with self.assertRaises(SystemExit) as ctx:
-                fetch_quota.main([])
+            fetch_quota.main([])
         self.assertEqual(ctx.exception.code, 0)
         self.assertEqual(json.loads(out.getvalue())["error"], "config")
         self.assertIn("home directory", err.getvalue())
