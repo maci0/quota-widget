@@ -937,8 +937,9 @@ class CursorStateDbTest(unittest.TestCase):
             # cost an fsync per test and buys this suite nothing.
             con.execute("PRAGMA journal_mode = MEMORY")
             con.execute("PRAGMA synchronous = OFF")
-            # sqlite takes no placeholder for an identifier, so the table name
-            # is spliced in. It is a test literal, never provider input.
+            # An identifier cannot be a bound parameter, so the table name is
+            # the one part that has to be interpolated. It is a test literal
+            # ("ItemTable", "Other"), never input.
             con.execute(f"CREATE TABLE {table} (key TEXT, value BLOB)")
             # The table name is a literal the test itself passes; the values are
             # bound, so there is no injection surface here.
