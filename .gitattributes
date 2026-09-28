@@ -1,0 +1,3 @@
+# Keep every checkout LF: install.sh and the fetcher carry shebangs, which a
+# CRLF checkout turns into "\r" in the interpreter path.
+* text=auto eol=lf

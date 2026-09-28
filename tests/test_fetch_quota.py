@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 import fetch_quota
@@ -55,6 +55,34 @@ def tearDownModule() -> None:
         os.environ.pop(key, None)
     fetch_quota.load_config()
     _SANDBOX.cleanup()
+
+
+ConfigPathField = Literal[
+    "home",
+    "claude_cred",
+    "codex_auth",
+    "grok_auth",
+    "cursor_auth",
+    "cursor_state_db",
+    "cache_dir",
+]
+
+
+def point_config(case: unittest.TestCase, field: ConfigPathField, path: Path) -> None:
+    """Point one path of the active config elsewhere, then restore the config."""
+    cfg = fetch_quota.config()
+    fetch_quota._CONFIG = fetch_quota.Config(
+        home=path if field == "home" else cfg.home,
+        claude_cred=path if field == "claude_cred" else cfg.claude_cred,
+        codex_auth=path if field == "codex_auth" else cfg.codex_auth,
+        grok_auth=path if field == "grok_auth" else cfg.grok_auth,
+        cursor_auth=path if field == "cursor_auth" else cfg.cursor_auth,
+        cursor_state_db=path if field == "cursor_state_db" else cfg.cursor_state_db,
+        cache_dir=path if field == "cache_dir" else cfg.cache_dir,
+        http_timeout_s=cfg.http_timeout_s,
+        cache_max_age_s=cfg.cache_max_age_s,
+    )
+    case.addCleanup(fetch_quota.load_config)
 
 
 @contextlib.contextmanager
@@ -793,6 +821,11 @@ class DurableWriteTest(unittest.TestCase):
         self.assertEqual(json.loads(self.path.read_text()), {"a": 1})
         self.assertGreaterEqual(len(flushed), 2)  # file, then directory
 
+    def test_written_file_uses_lf_on_every_platform(self) -> None:
+        fetch_quota._atomic_write_json(self.path, {"a": 1})
+
+        self.assertNotIn(b"\r", self.path.read_bytes())
+
     def test_failed_write_keeps_previous_file_and_leaves_no_temp(self) -> None:
         fetch_quota._atomic_write_json(self.path, {"tokens": "first"})
 
@@ -884,6 +917,21 @@ class ConfigTest(unittest.TestCase):
             }
         )
         self.assertEqual(cfg.cache_dir, Path("/xdg/cache/quota-widget"))
+
+    def test_relative_xdg_dirs_are_ignored(self) -> None:
+        cfg = fetch_quota.load_config(
+            {
+                "QUOTA_WIDGET_HOME": "/home/widget",
+                "XDG_CACHE_HOME": "relative/cache",
+                "XDG_CONFIG_HOME": "relative/config",
+            }
+        )
+        self.assertEqual(cfg.cache_dir, Path("/home/widget/.cache/quota-widget"))
+        self.assertEqual(cfg.cursor_auth, Path("/home/widget/.config/cursor/auth.json"))
+        self.assertEqual(
+            cfg.cursor_state_db,
+            Path("/home/widget/.config/Cursor/User/globalStorage/state.vscdb"),
+        )
 
     def test_overrides_win_over_defaults(self) -> None:
         cfg = fetch_quota.load_config(
@@ -1085,24 +1133,41 @@ class ReplayTest(unittest.TestCase):
         os.environ[fetch_quota.NOW_MS_ENV] = str(PINNED_NOW_MS)
         self.addCleanup(lambda: os.environ.pop(fetch_quota.NOW_MS_ENV, None))
 
-        self._rebind("CLAUDE_CRED", {"claudeAiOauth": {"accessToken": _fake_jwt("s")}})
-        self._rebind("CODEX_AUTH", {"tokens": {"access_token": _fake_jwt("s")}})
-        self._rebind(
-            "GROK_AUTH",
-            {"x": {"key": "tok", "oidc_client_id": "c", "refresh_token": "r"}},
-        )
-        self._rebind(
-            "CURSOR_AUTH_JSON", {"accessToken": _fake_jwt("auth0|user_01TEST")}
-        )
-
-    def _rebind(self, name: str, obj: object) -> None:
         auth = self.root / "auth"
         auth.mkdir(exist_ok=True)
-        path = auth / f"{name.lower()}.json"
+        point_config(
+            self,
+            "claude_cred",
+            self._write(
+                auth / "claude.json", {"claudeAiOauth": {"accessToken": _fake_jwt("s")}}
+            ),
+        )
+        point_config(
+            self,
+            "codex_auth",
+            self._write(
+                auth / "codex.json", {"tokens": {"access_token": _fake_jwt("s")}}
+            ),
+        )
+        point_config(
+            self,
+            "grok_auth",
+            self._write(
+                auth / "grok.json",
+                {"x": {"key": "tok", "oidc_client_id": "c", "refresh_token": "r"}},
+            ),
+        )
+        point_config(
+            self,
+            "cursor_auth",
+            self._write(
+                auth / "cursor.json", {"accessToken": _fake_jwt("auth0|user_01TEST")}
+            ),
+        )
+
+    def _write(self, path: Path, obj: object) -> Path:
         path.write_text(json.dumps(obj))
-        original = getattr(fetch_quota, name)
-        setattr(fetch_quota, name, path)
-        self.addCleanup(setattr, fetch_quota, name, original)
+        return path
 
     def _fake_http(
         self,
@@ -1204,7 +1269,7 @@ class RefreshRunsOnceTest(unittest.TestCase):
                 }
             )
         )
-        self._point("CLAUDE_CRED", cred)
+        point_config(self, "claude_cred", cred)
         posts: list[str] = []
 
         def fake_json(
@@ -1263,7 +1328,7 @@ class RefreshRunsOnceTest(unittest.TestCase):
                 }
             )
         )
-        self._point("CLAUDE_CRED", cred)
+        point_config(self, "claude_cred", cred)
         posts: list[str] = []
         second_started = threading.Event()
         first_in_token_call = threading.Event()
@@ -1335,7 +1400,7 @@ class RefreshRunsOnceTest(unittest.TestCase):
                 }
             )
         )
-        self._point("CODEX_AUTH", auth)
+        point_config(self, "codex_auth", auth)
         posts: list[str] = []
         fresh = _jwt_with_exp(int(time.time()) + 3600)
 
@@ -1385,7 +1450,7 @@ class RefreshRunsOnceTest(unittest.TestCase):
                 }
             )
         )
-        self._point("GROK_AUTH", auth)
+        point_config(self, "grok_auth", auth)
         posts: list[str] = []
         billing = {
             "config": {
@@ -1429,6 +1494,48 @@ class RefreshRunsOnceTest(unittest.TestCase):
         saved = json.loads(auth.read_text())["cli::client-1"]
         self.assertEqual(saved["key"], "new-access")
         self.assertEqual(saved["refresh_token"], "new-refresh")
+
+    def test_refresh_still_runs_where_flock_is_absent(self) -> None:
+        auth = Path(self.tmp.name) / "codex-auth.json"
+        auth.write_text(
+            json.dumps(
+                {
+                    "tokens": {
+                        "access_token": _jwt_with_exp(0),
+                        "refresh_token": "old-refresh",
+                        "account_id": "acct-1",
+                    }
+                }
+            )
+        )
+        point_config(self, "codex_auth", auth)
+        fresh = _jwt_with_exp(int(time.time()) + 3600)
+
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            if url == fetch_quota.CODEX_TOKEN_URL:
+                return 200, {"access_token": fresh, "refresh_token": "new-refresh"}
+            return 200, {
+                "plan_type": "plus",
+                "rate_limit": {"allowed": True, "primary_window": {}},
+            }
+
+        with (
+            patch.object(fetch_quota, "fcntl", None),
+            patch.object(fetch_quota, "fetch_json", fake_json),
+        ):
+            result = fetch_quota.fetch_codex()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            json.loads(auth.read_text())["tokens"]["refresh_token"], "new-refresh"
+        )
 
 
 if __name__ == "__main__":

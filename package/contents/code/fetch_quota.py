@@ -27,7 +27,6 @@ import base64
 import contextlib
 import datetime as dt
 import email.utils
-import fcntl
 import hashlib
 import json
 import os
@@ -43,8 +42,17 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from email.message import Message
 from pathlib import Path
+from types import ModuleType
 from typing import Any, TypeAlias
 from urllib.request import pathname2url
+
+# flock is POSIX-only; on Windows the refresh lock degrades to no lock, which
+# costs a possible double refresh, not a broken poll.
+fcntl: ModuleType | None
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 # Unversioned HTTP JSON: keys and nesting change by plan, host, and API revision.
 JsonDict: TypeAlias = dict[str, Any]
@@ -229,14 +237,25 @@ def _env_number(
     return number
 
 
+def _xdg_dir(env: Mapping[str, str], name: str, default: Path) -> Path:
+    """XDG base directory; a relative value is invalid, so the default stands.
+
+    https://specifications.freedesktop.org/basedir-spec/latest/
+    """
+    raw = env.get(name)
+    if not raw:
+        return default
+    path = Path(raw)
+    return path if path.is_absolute() else default
+
+
 def _cursor_config_root(env: Mapping[str, str], home: Path) -> Path:
     if sys.platform == "darwin":
         return home / "Library" / "Application Support"
     if os.name == "nt":
         appdata = env.get("APPDATA")
         return Path(appdata) if appdata else home / "AppData" / "Roaming"
-    xdg = env.get("XDG_CONFIG_HOME")
-    return Path(xdg) if xdg else home / ".config"
+    return _xdg_dir(env, "XDG_CONFIG_HOME", home / ".config")
 
 
 def _cursor_state_db(env: Mapping[str, str], home: Path) -> Path:
@@ -256,8 +275,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     """Read and validate the environment. Raises ConfigError on bad values."""
     values = os.environ if env is None else env
     home = _env_path(values, "QUOTA_WIDGET_HOME", Path.home())
-    xdg_cache = values.get("XDG_CACHE_HOME")
-    cache_base = Path(xdg_cache) if xdg_cache else home / ".cache"
+    cache_base = _xdg_dir(values, "XDG_CACHE_HOME", home / ".cache")
     timeout = _env_number(
         values, "QUOTA_WIDGET_HTTP_TIMEOUT", DEFAULT_HTTP_TIMEOUT_S, MAX_HTTP_TIMEOUT_S
     )
@@ -378,7 +396,7 @@ def _atomic_write_json(path: Path, obj: Any) -> None:
         prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent)
     )
     try:
-        with os.fdopen(fd, "w", encoding=JSON_ENCODING) as f:
+        with os.fdopen(fd, "w", encoding=JSON_ENCODING, newline="\n") as f:
             json.dump(obj, f, indent=2)
             f.write("\n")
             f.flush()
@@ -522,6 +540,9 @@ def _refresh_lock() -> Iterator[None]:
     provider already retired. The lock spans the credential re-read too, so
     the second run sees the rotated state and skips the round trip.
     """
+    if fcntl is None:
+        yield  # no flock on this platform: refresh unguarded, not never
+        return
     try:
         folder = config().cache_dir
         folder.mkdir(parents=True, mode=CACHE_DIR_MODE, exist_ok=True)

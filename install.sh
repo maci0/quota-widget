@@ -18,7 +18,15 @@ find_root() {
 
 ROOT="$(find_root)"
 PKG_ID="com.maci.quota-widget"
-DEST="${XDG_DATA_HOME:-$HOME/.local/share}/plasma/plasmoids/${PKG_ID}"
+
+# XDG base dirs: a relative value is invalid, so the spec default stands.
+# https://specifications.freedesktop.org/basedir-spec/latest/
+xdg_data="$HOME/.local/share"
+[[ "${XDG_DATA_HOME:-}" = /* ]] && xdg_data="$XDG_DATA_HOME"
+xdg_cache="$HOME/.cache"
+[[ "${XDG_CACHE_HOME:-}" = /* ]] && xdg_cache="$XDG_CACHE_HOME"
+
+DEST="$xdg_data/plasma/plasmoids/${PKG_ID}"
 SCRATCH="$ROOT/.scratch"
 
 chmod +x "$ROOT/package/contents/code/fetch_quota.py"
@@ -42,7 +50,7 @@ rm -rf "$DEST"
 ln -sfn "$ROOT/package" "$DEST"
 echo "installed -> $DEST"
 
-rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/plasmashell/qmlcache" 2>/dev/null || true
+rm -rf "$xdg_cache/plasmashell/qmlcache" 2>/dev/null || true
 
 echo
 echo "Add the widget: right-click desktop or panel -> Add Widgets -> search \"AI Quota\""
