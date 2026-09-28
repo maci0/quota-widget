@@ -46,9 +46,10 @@ through `flock`, `_atomic_write_json`, and the re-read in `_merge_write_json`.
   symlinks that name it from outside the checkout. It never runs the install
   itself, which polls four providers.
 - `tests/test_fuzz_parsers.py`: seeded randomized fuzzing of the parsers fed
-  untrusted input (the Cursor usage-summary body, `ItemTable` cells, JWTs).
-  Generators are seeded so a failure reproduces; raise `ITERATIONS` or move
-  `BASE_SEED` to widen a run.
+  untrusted input (the Cursor and Grok bodies, the Claude usage body and its
+  `limits` array, the Codex rate-limit windows and reset credits, `ItemTable`
+  cells, JWTs). Generators are seeded so a failure reproduces; raise
+  `ITERATIONS` or move `BASE_SEED` to widen a run.
 - `scripts/print_smoke.py`: prints a fetched JSON dump (`install.sh` writes `.scratch/smoke.json`)
 - `install.sh`: root symlink installer. Its root walk starts at the script
   behind whatever symlink named it, since a distro package or a link in

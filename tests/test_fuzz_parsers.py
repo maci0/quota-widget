@@ -6,6 +6,12 @@ Three surfaces carry bytes or JSON that this process does not control:
   and out of ``~/.cache/quota-widget/cursor.json``.
 - ``_parse_grok_period`` reads the Grok billing config off the wire and out of
   the same cache.
+- ``_claude_weekly`` and ``_claude_session`` read the Claude usage body, whose
+  ``limits`` array is the one place a provider sends a list of unbounded
+  length and a variable shape.
+- ``_codex_window`` and ``_codex_reset_credits`` read the Codex usage body,
+  where the window's numbers are rescaled into an instant before they reach
+  the panel.
 - ``_vscdb_str`` and ``_jwt_payload`` read cells and tokens out of a Cursor
   SQLite state DB and a vendor credential file.
 
@@ -18,6 +24,7 @@ the generator can see.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import random
@@ -129,6 +136,12 @@ CELL_SEEDS: tuple[Any, ...] = (
     [],
     {},
 )
+
+
+def _b64url(payload: bytes) -> str:
+    """One JWT segment, so a claim a generator cannot reach by chance is
+    reachable on purpose."""
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
 def _rand_json(rng: random.Random, depth: int = 0) -> Any:
@@ -391,6 +404,382 @@ class TokenAndCellFuzz(unittest.TestCase):
         self.assertIsNone(fetch_quota._jwt_payload("no-dot-token"))
         self.assertEqual(fetch_quota._vscdb_str('"Ünïcodé"'), "Ünïcodé")
         self.assertIsNone(fetch_quota._vscdb_str(b"\xff\xfe not utf-8"))
+        # An exp the widget cannot place on a date is absent, not a raise:
+        # the millisecond product of 1e308 s overflows a double.
+        self.assertIsNone(
+            fetch_quota._jwt_exp_ms("h." + _b64url(b'{"exp":1e308}') + ".s")
+        )
+        self.assertEqual(
+            fetch_quota._jwt_exp_ms("h." + _b64url(b'{"exp":1778000000}') + ".s"),
+            1_778_000_000_000,
+        )
+
+
+CLAUDE_SEED_CORPUS: tuple[JsonDict, ...] = (
+    {
+        "five_hour": {"utilization": 42, "resets_at": "2026-05-02T14:11:55.000Z"},
+        "limits": [
+            {
+                "kind": "weekly_all",
+                "percent": 37,
+                "resets_at": "2026-05-09T14:11:55.000Z",
+                "scope": {"surface": "Claude Code"},
+            },
+            {
+                "kind": "weekly_model",
+                "percent": 12,
+                "resets_at": 1778401915000,
+                "scope": {"model": {"display_name": "Opus"}},
+            },
+            {
+                "kind": "session",
+                "percent": 8,
+                "resets_at": "2026-05-02T16:00:00Z",
+            },
+        ],
+        "extra_usage": {
+            "is_enabled": True,
+            "used_credits": 3.5,
+            "currency": "USD",
+            "monthly_limit": 100,
+        },
+        "spend": {"used": {"amount_minor": 1250, "exponent": 2}},
+    },
+    # The legacy shape, before `limits` existed.
+    {
+        "five_hour": {"utilization": 5, "resets_at": 1778000000000},
+        "seven_day": {"utilization": 61, "resets_at": "2026-05-09T00:00:00Z"},
+        "seven_day_opus": {"utilization": 20},
+        "seven_day_sonnet": {"utilization": None},
+        "seven_day_cowork": {"utilization": "not a number"},
+    },
+    # `limits` empty falls back to the legacy keys; a non-list `limits` is
+    # read as absent, so the session falls through to `five_hour`.
+    {"limits": [], "five_hour": {"utilization": 3}},
+    {"limits": {"kind": "weekly_all"}, "five_hour": {"utilization": 3}},
+    {"limits": ["not a dict", None, 7], "five_hour": {"utilization": 3}},
+    {"limits": [{"group": "session", "percent": float("inf")}], "five_hour": {}},
+    {"limits": [{"kind": "weekly_all", "percent": 1e308, "resets_at": 1e308}]},
+    # More entries than MAX_WEEKLY_LIMITS, so the cap has to be the reason a
+    # label is missing rather than the parser losing one.
+    {
+        "limits": [
+            {
+                "kind": "weekly_model",
+                "percent": i,
+                "scope": {"model": {"display_name": f"m{i}"}},
+            }
+            for i in range(40)
+        ]
+    },
+    {},
+)
+
+
+def _rand_claude(rng: random.Random) -> Any:
+    base = json.loads(json.dumps(rng.choice(CLAUDE_SEED_CORPUS)))
+    if not isinstance(base, dict):  # pragma: no cover - corpus is dicts
+        return _rand_json(rng)
+    for key in list(base) + rng.sample(
+        ["five_hour", "limits", "seven_day", "extra_usage", "spend"],
+        k=rng.randrange(4),
+    ):
+        if rng.random() < 0.5:
+            base[key] = _rand_json(rng)
+    if isinstance(base.get("limits"), list) and rng.random() < 0.5:
+        base["limits"] = [_rand_json(rng) for _ in range(rng.randrange(8))] + base[
+            "limits"
+        ]
+    return base
+
+
+def _check_period(period: JsonDict, where: str) -> None:
+    self_label = period["label"]
+    if not isinstance(self_label, str) or not self_label:
+        raise AssertionError(f"{where}: label {self_label!r} is not a name")
+    util = period["util"]
+    if util is not None and not math.isfinite(util):
+        raise AssertionError(f"{where}: util {util!r} not finite")
+    resets = period["resets_ms"]
+    if resets is not None and not isinstance(resets, int):
+        raise AssertionError(f"{where}: resets_ms {resets!r} is not an instant")
+
+
+class ClaudeUsageFuzz(unittest.TestCase):
+    """Invariants the Claude usage body must satisfy, whatever it holds.
+
+    The `limits` array is a list of variable-shape objects the vendor can grow
+    without bound, and both the weekly meters and the session read it.
+    """
+
+    def _check(self, data: Any) -> tuple[list[JsonDict], tuple[Any, Any]]:
+        parsed = data if isinstance(data, dict) else {}
+        weekly = fetch_quota._claude_weekly(parsed)
+        self.assertIsInstance(weekly, list)
+        self.assertLessEqual(len(weekly), fetch_quota.MAX_WEEKLY_LIMITS)
+        for period in weekly:
+            _check_period(period, "weekly")
+        util, resets = fetch_quota._claude_session(parsed)
+        if util is not None:
+            self.assertTrue(math.isfinite(util), f"session util {util!r} not finite")
+        if resets is not None:
+            self.assertIsInstance(resets, int)
+        # The panel parses this with JSON; a NaN or Infinity blanks the widget.
+        json.dumps({"weekly": weekly, "session": [util, resets]}, allow_nan=False)
+        return weekly, (util, resets)
+
+    def test_fuzz_usage_body(self) -> None:
+        for iteration in range(ITERATIONS):
+            rng = random.Random(BASE_SEED + 40_000 + iteration)
+            with self.subTest(iteration=iteration, seed=BASE_SEED + 40_000 + iteration):
+                self._check(_rand_claude(rng))
+
+    def test_known_shapes_parse_as_before(self) -> None:
+        weekly, (util, resets) = self._check(
+            json.loads(json.dumps(CLAUDE_SEED_CORPUS[0]))
+        )
+        by_label = {p["label"]: p for p in weekly}
+        self.assertEqual(by_label["All models"]["util"], 37)
+        self.assertEqual(by_label["Opus"]["util"], 12)
+        self.assertEqual(by_label["Opus"]["resets_ms"], 1778401915000)
+        self.assertEqual(util, 8)
+        self.assertEqual(resets, fetch_quota.iso_to_ms("2026-05-02T16:00:00Z"))
+        legacy, (legacy_util, _) = self._check(
+            json.loads(json.dumps(CLAUDE_SEED_CORPUS[1]))
+        )
+        self.assertEqual(
+            [p["label"] for p in legacy], ["All models", "Opus", "Sonnet", "Cowork"]
+        )
+        # A present block with an unreadable percentage is a meter with no
+        # reading, not a missing one.
+        self.assertIsNone(legacy[3]["util"])
+        self.assertEqual(legacy_util, 5)
+
+    def test_limits_array_is_capped(self) -> None:
+        weekly, _ = self._check(json.loads(json.dumps(CLAUDE_SEED_CORPUS[7])))
+        self.assertEqual(len(weekly), fetch_quota.MAX_WEEKLY_LIMITS)
+
+    def test_empty_limits_falls_back_to_legacy_keys(self) -> None:
+        weekly, (util, _) = self._check(json.loads(json.dumps(CLAUDE_SEED_CORPUS[2])))
+        self.assertEqual(weekly, [])
+        self.assertEqual(util, 3.0)
+
+
+CODEX_SEED_CORPUS: tuple[JsonDict, ...] = (
+    {
+        "plan_type": "pro_plus",
+        "rate_limit": {
+            "allowed": True,
+            "limit_reached": False,
+            "primary_window": {
+                "used_percent": 12.5,
+                "limit_window_seconds": 18_000,
+                "reset_at": 1_778_000_000,
+            },
+            "secondary_window": {
+                "used_percent": 61,
+                "limit_window_seconds": 604_800,
+                "reset_after_seconds": 86_400,
+            },
+        },
+        "rate_limit_reset_credits": {
+            "available_count": 0,
+            "applicable_available_count": 2,
+        },
+        "credits": {"has_credits": True, "balance": "12.34", "unlimited": False},
+    },
+    # A window that is a string percentage, and one that is not a number.
+    {
+        "rate_limit": {
+            "primary_window": {
+                "used_percent": "  42.5 ",
+                "limit_window_seconds": 172_800,
+            },
+            "secondary_window": {
+                "used_percent": "nan",
+                "limit_window_seconds": 604_800,
+            },
+        }
+    },
+    # Out-of-range and non-finite percentages: clamped, or no reading at all.
+    {
+        "rate_limit": {
+            "primary_window": {"used_percent": 1e308, "limit_window_seconds": 3600},
+            "secondary_window": {"used_percent": -5, "limit_window_seconds": 2_592_000},
+        }
+    },
+    # A reset so large the millisecond product overflows a double.
+    {
+        "rate_limit": {
+            "primary_window": {"used_percent": 10, "reset_at": 1e308},
+            "secondary_window": {"used_percent": 10, "reset_after_seconds": 1e308},
+        }
+    },
+    {"rate_limit": {"primary_window": None, "secondary_window": "not a dict"}},
+    {"rate_limit": {"primary_window": {"used_percent": None}}},
+    {"rate_limit": {"primary_window": {"used_percent": float("nan")}}},
+    # A reported zero balance, and one reported with nothing in it.
+    {"rate_limit_reset_credits": {}},
+    {"rate_limit_reset_credits": {"available_count": float("inf")}},
+    {},
+)
+
+
+def _rand_codex(rng: random.Random) -> Any:
+    base = json.loads(json.dumps(rng.choice(CODEX_SEED_CORPUS)))
+    if not isinstance(base, dict):  # pragma: no cover - corpus is dicts
+        return _rand_json(rng)
+    for key in list(base) + rng.sample(
+        ["rate_limit", "primary_window", "secondary_window", "code_review_rate_limit"],
+        k=rng.randrange(4),
+    ):
+        if rng.random() < 0.5:
+            base[key] = _rand_json(rng)
+    return base
+
+
+def _rand_window(rng: random.Random) -> Any:
+    if rng.random() < 0.2:
+        return rng.choice((None, "not a dict", [], 7))
+    if rng.random() < 0.4:
+        return _rand_json(rng)
+    block: JsonDict = {}
+    for key in (
+        "used_percent",
+        "limit_window_seconds",
+        "reset_at",
+        "reset_after_seconds",
+        "extra",
+    ):
+        if rng.random() < 0.6:
+            block[key] = rng.choice(HOSTILE_LEAVES)
+    return block
+
+
+class CodexWindowFuzz(unittest.TestCase):
+    """Invariants every Codex rate-limit window must satisfy.
+
+    A window is a handful of wire numbers that get rescaled: the percentage is
+    clamped into 0..100, and the reset is turned into an instant. Both are
+    places a value the panel's JSON parser rejects, or a raise, can come from.
+    """
+
+    def _check(self, block: Any, name: str) -> JsonDict | None:
+        window = fetch_quota._codex_window(block, name)
+        if window is None:
+            return None
+        label = window["label"]
+        if not isinstance(label, str) or not label:
+            raise AssertionError(f"{name}: label {label!r} is not a name")
+        util = window["util"]
+        if not isinstance(util, float) or not math.isfinite(util):
+            raise AssertionError(f"{name}: util {util!r} is not a finite float")
+        if not 0.0 <= util <= 100.0:
+            raise AssertionError(f"{name}: util {util!r} outside 0..100")
+        resets = window["resets_ms"]
+        if resets is not None and not isinstance(resets, int):
+            raise AssertionError(f"{name}: resets_ms {resets!r} is not an instant")
+        # The panel parses this with JSON; a NaN or Infinity blanks the widget.
+        json.dumps(window, allow_nan=False)
+        return window
+
+    def _one(self, block: Any, name: str) -> JsonDict:
+        """The window a case that must produce one produces."""
+        window = self._check(block, name)
+        self.assertIsNotNone(window, f"{name} produced no window for {block!r}")
+        assert window is not None
+        return window
+
+    def test_fuzz_window(self) -> None:
+        for iteration in range(ITERATIONS):
+            rng = random.Random(BASE_SEED + 50_000 + iteration)
+            block = _rand_window(rng)
+            with self.subTest(iteration=iteration, seed=BASE_SEED + 50_000 + iteration):
+                self._check(block, "primary_window")
+
+    def test_fuzz_usage_body(self) -> None:
+        for iteration in range(ITERATIONS):
+            rng = random.Random(BASE_SEED + 60_000 + iteration)
+            with self.subTest(iteration=iteration, seed=BASE_SEED + 60_000 + iteration):
+                self._check(_rand_codex(rng), "code_review")
+
+    def test_known_shapes_parse_as_before(self) -> None:
+        body = json.loads(json.dumps(CODEX_SEED_CORPUS[0]))
+        primary = self._one(body["rate_limit"]["primary_window"], "primary_window")
+        # A 5-hour window is the current session; the label is derived, so a
+        # different mapping has to fail here rather than on a user's panel.
+        self.assertEqual(primary["label"], "Current session")
+        self.assertEqual(primary["util"], 12.5)
+        self.assertEqual(primary["resets_ms"], 1_778_000_000_000)
+        secondary = self._one(
+            body["rate_limit"]["secondary_window"], "secondary_window"
+        )
+        self.assertEqual(secondary["label"], "Weekly")
+        self.assertEqual(secondary["util"], 61.0)
+        # A string percentage the panel must still be able to draw.
+        self.assertEqual(
+            self._one({"used_percent": "  42.5 "}, "primary_window")["util"], 42.5
+        )
+
+    def test_out_of_range_percentages_are_clamped_or_absent(self) -> None:
+        self.assertEqual(
+            self._one({"used_percent": 1e308}, "primary_window")["util"], 100.0
+        )
+        self.assertEqual(self._one({"used_percent": -5}, "primary_window")["util"], 0.0)
+        # NaN is no reading: not a clamped zero and not a full 100%.
+        self.assertIsNone(self._check({"used_percent": float("nan")}, "primary_window"))
+        self.assertIsNone(self._check({"used_percent": "nan"}, "primary_window"))
+        self.assertIsNone(self._check({"used_percent": None}, "primary_window"))
+        self.assertIsNone(self._check({"used_percent": True}, "primary_window"))
+        self.assertIsNone(self._check("not a dict", "primary_window"))
+
+    def test_out_of_range_reset_is_an_absent_date(self) -> None:
+        # 1e308 s overflows the millisecond product, and round() raises on the
+        # infinity it leaves: a raise here took the whole poll down.
+        window = self._one({"used_percent": 10, "reset_at": 1e308}, "primary_window")
+        self.assertIsNone(window["resets_ms"])
+        window = self._one(
+            {"used_percent": 10, "reset_after_seconds": 1e308}, "primary_window"
+        )
+        self.assertIsNone(window["resets_ms"])
+        self.assertEqual(
+            self._one({"used_percent": 10, "reset_at": 0}, "primary_window")[
+                "resets_ms"
+            ],
+            0,
+        )
+
+    def test_fuzz_reset_credits(self) -> None:
+        for iteration in range(ITERATIONS):
+            rng = random.Random(BASE_SEED + 70_000 + iteration)
+            data = _rand_codex(rng)
+            with self.subTest(iteration=iteration, seed=BASE_SEED + 70_000 + iteration):
+                reset_credits = fetch_quota._codex_reset_credits(
+                    data if isinstance(data, dict) else {}
+                )
+                self.assertIsInstance(reset_credits["reported"], bool)
+                for key in ("available", "applicable"):
+                    value = reset_credits[key]
+                    if isinstance(value, float):
+                        self.assertTrue(math.isfinite(value), f"{key}={value!r}")
+                json.dumps(reset_credits, allow_nan=False)
+
+    def test_known_reset_credit_shapes(self) -> None:
+        reported = fetch_quota._codex_reset_credits(CODEX_SEED_CORPUS[0])
+        self.assertIs(reported["reported"], True)
+        self.assertEqual(reported["available"], 0)
+        self.assertEqual(reported["applicable"], 2)
+        # A reported balance the wire left empty is a zero, not a missing card.
+        empty = fetch_quota._codex_reset_credits(CODEX_SEED_CORPUS[7])
+        self.assertEqual(empty, {"reported": True, "available": 0, "applicable": 0})
+        # A count the panel's JSON parser cannot read is the reported-zero path,
+        # the same as a count the wire left empty.
+        self.assertEqual(
+            fetch_quota._codex_reset_credits(CODEX_SEED_CORPUS[8])["available"], 0
+        )
+        absent = fetch_quota._codex_reset_credits({})
+        self.assertIs(absent["reported"], False)
+        self.assertIsNone(absent["available"])
 
 
 if __name__ == "__main__":

@@ -266,6 +266,19 @@ def ms_from_seconds(seconds: float) -> int:
     return round(seconds * 1000)
 
 
+def ms_from_seconds_or_none(seconds: float) -> int | None:
+    """Epoch-ms from a wire seconds value, or None when it is out of range.
+
+    A finite double can still overflow the millisecond product (1e308 s is
+    1e311 ms), and round() raises on the resulting infinity. A reset the
+    widget cannot place on a date is shown as absent, never as a bogus one.
+    """
+    try:
+        return ms_from_seconds(seconds)
+    except (OverflowError, ValueError):
+        return None
+
+
 def now_utc() -> dt.datetime:
     return EPOCH_UTC + dt.timedelta(milliseconds=now_ms())
 
@@ -1344,8 +1357,9 @@ def _refresh_claude(cred: JsonDict) -> tuple[JsonDict | None, bool]:
         if tok.get("refresh_token"):
             new_oauth["refreshToken"] = tok["refresh_token"]
         expires_in = _finite_number(tok.get("expires_in"))
-        if expires_in is not None:
-            new_oauth["expiresAt"] = now_ms() + ms_from_seconds(expires_in)
+        expires_at = ms_from_seconds_or_none(expires_in) if expires_in else None
+        if expires_at is not None:
+            new_oauth["expiresAt"] = now_ms() + expires_at
         new_cred = dict(cred)
         new_cred["claudeAiOauth"] = new_oauth
 
@@ -1656,8 +1670,9 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
         if tok.get("refresh_token"):
             new_entry["refresh_token"] = tok["refresh_token"]
         expires_in = _finite_number(tok.get("expires_in"))
-        if expires_in is not None:
-            exp = now_utc() + dt.timedelta(milliseconds=ms_from_seconds(expires_in))
+        expires_ms = ms_from_seconds_or_none(expires_in) if expires_in else None
+        if expires_ms is not None:
+            exp = now_utc() + dt.timedelta(milliseconds=expires_ms)
             new_entry["expires_at"] = exp.isoformat().replace("+00:00", "Z")
 
         # Persist so subsequent polls (and the Grok CLI) keep working.
@@ -1877,7 +1892,7 @@ def _jwt_claim(token: str, *path: str) -> Any:
 
 def _jwt_exp_ms(token: str) -> int | None:
     exp = _finite_number(_jwt_claim(token, "exp"))
-    return ms_from_seconds(exp) if exp is not None else None
+    return ms_from_seconds_or_none(exp) if exp is not None else None
 
 
 def _codex_window_label(window_seconds: int | None, name: str) -> str:
@@ -1918,9 +1933,10 @@ def _codex_window(block: JsonDict | None, name: str) -> JsonDict | None:
     reset_at = _finite_number(block.get("reset_at"))
     after = _finite_number(block.get("reset_after_seconds"))
     if reset_at is not None:
-        resets_ms = ms_from_seconds(reset_at)
+        resets_ms = ms_from_seconds_or_none(reset_at)
     elif after is not None:
-        resets_ms = now_ms() + ms_from_seconds(after)
+        after_ms = ms_from_seconds_or_none(after)
+        resets_ms = None if after_ms is None else now_ms() + after_ms
 
     return {
         "label": _codex_window_label(window_s_i, name),

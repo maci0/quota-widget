@@ -57,8 +57,10 @@ fails if a Breaking entry lands in this section without a matching next version.
   clamped to 30 to 3600), `utilWarnAt` (default 70, 1 to 99), and
   `utilCritAt` (default 90, 1 to 100). Documented in the README.
 - Seeded randomized fuzzing for the parsers that read untrusted input: the
-  Cursor usage-summary body, the Cursor `ItemTable` cells, and vendor JWTs
-  (`tests/test_fuzz_parsers.py`). A failure prints the seed that reproduces it.
+  Cursor usage-summary body, the Grok billing config, the Claude usage body and
+  its `limits` array, the Codex rate-limit windows and reset credits, the Cursor
+  `ItemTable` cells, and vendor JWTs (`tests/test_fuzz_parsers.py`). A failure
+  prints the seed that reproduces it.
 - `QUOTA_WIDGET_NOW_MS` pins the fetcher clock, so the same HTTP responses print
   byte-identical output on every run. Documented in the README, for tests and
   smoke runs.
@@ -77,6 +79,15 @@ fails if a Breaking entry lands in this section without a matching next version.
 
 ### Fixed
 
+- A rate-limit window whose `reset_at` or `reset_after_seconds` was a very
+  large number raised `OverflowError`: the seconds-to-milliseconds product of
+  any value past 1.8e305 overflows a double, and rounding the resulting
+  infinity raises. Codex sends the reset as a plain number, so one response
+  like that failed the whole Codex card for that poll even though its meters
+  had parsed. A reset the widget cannot place on a date is now reported as an
+  absent date, the same rule `iso_to_ms` already follows. The same overflow is
+  fixed on the other wire-fed conversions, a Claude or Grok refresh
+  `expires_in` and a JWT `exp` claim.
 - The account id the cache entries are scoped by was an unsalted 16-character
   SHA-256 of a short, guessable vendor id, so a copy of the cache directory
   gave up the WorkOS user id behind every entry in it. The digest is now taken
