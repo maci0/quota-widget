@@ -89,6 +89,13 @@ PlasmoidItem {
     readonly property color cursorMark: Kirigami.Theme.textColor
     readonly property color grokMark: Kirigami.Theme.neutralTextColor
 
+    // The roster, in panel order. A provider is one name here plus its
+    // `<name>Mark` color and its `property var <name>` above; every consumer
+    // that has to look at all of them (the merge, the error pick, noData)
+    // walks this list, so a fifth provider is a name and a card, not a
+    // rewrite of each.
+    readonly property var providerNames: ["claude", "cursor", "grok", "codex"]
+
     property var claude: null
     property var cursor: null
     property var grok: null
@@ -136,24 +143,28 @@ PlasmoidItem {
                 // ones, so merging them would rewind the cards and the age.
                 if (typeof p.fetched_ms === "number" && p.fetched_ms < root.fetchedMs)
                     return
-                root.claude = mergeProv(root.claude, p.claude)
-                root.cursor = mergeProv(root.cursor, p.cursor)
-                root.grok = mergeProv(root.grok, p.grok)
-                root.codex = mergeProv(root.codex, p.codex)
+                for (let i = 0; i < root.providerNames.length; i++) {
+                    const n = root.providerNames[i]
+                    root[n] = mergeProv(root[n], p[n])
+                }
                 root.fetchedMs = Math.max(root.fetchedMs,
                     p.fetched_ms || Date.now())
                 const keepS = p.cache_max_age_s
                 root.staleKeepMs = (typeof keepS === "number" && keepS > 0)
                     ? keepS * 1000 : root.defaultStaleKeepMs
                 root.configError = p.config_error || ""
-                const anyOk = (root.claude && root.claude.ok)
-                    || (root.cursor && root.cursor.ok)
-                    || (root.grok && root.grok.ok)
-                    || (root.codex && root.codex.ok)
-                root.errorMsg = anyOk ? "" : ((p.claude && p.claude.error)
-                    || (p.cursor && p.cursor.error)
-                    || (p.grok && p.grok.error)
-                    || (p.codex && p.codex.error) || "empty")
+                let anyOk = false
+                let firstError = ""
+                for (let i = 0; i < root.providerNames.length; i++) {
+                    const n = root.providerNames[i]
+                    if (root[n] && root[n].ok)
+                        anyOk = true
+                    // First failure in roster order, the same one the
+                    // hand-written chain picked.
+                    else if (!firstError && p[n] && p[n].error)
+                        firstError = p[n].error
+                }
+                root.errorMsg = anyOk ? "" : (firstError || "empty")
             } catch (e) {
                 if (root.noData())
                     root.errorMsg = "parse"
@@ -221,7 +232,11 @@ PlasmoidItem {
 
     // ── helpers ───────────────────────────────────────────────────────────
     function noData() {
-        return !root.claude && !root.cursor && !root.grok && !root.codex
+        for (let i = 0; i < root.providerNames.length; i++) {
+            if (root[root.providerNames[i]])
+                return false
+        }
+        return true
     }
     // Keep the last good reading on transient failures (429/5xx/net/exec) so a
     // blip doesn't blank a card. Replace on success or on auth/no-token errors,

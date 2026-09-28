@@ -367,6 +367,9 @@ fails if a Breaking entry lands in this section without a matching next version.
   had one site, now fixed. The `status` test in `_transient_failure` reads
   `status in {0, 429} or status >= 500`, and the installer test states its
   `check=False` rather than leaving it to the default.
+- The panel keeps its providers in one roster, `providerNames`, and the poll
+  merge, the error pick, and `noData()` walk it. A fifth provider is a name, a
+  mark, and a card; the wording, the codes, and the payloads are unchanged.
 - The panel widget can be opened by an assistive technology, not only by a
   click or a key: the compact reading carries an accessible press action, so a
   screen reader that lands on it has something to activate. The two readings it

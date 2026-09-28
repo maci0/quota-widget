@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import re
 import unittest
 from typing import TYPE_CHECKING, Final
@@ -11,8 +12,12 @@ if TYPE_CHECKING:
 
 QML_PATH: Final = project_root() / "package" / "contents" / "ui" / "main.qml"
 QML_SOURCE: Final = QML_PATH.read_text(encoding="utf-8")
+FETCHER_SOURCE: Final = (QML_PATH.parent.parent / "code" / "fetch_quota.py").read_text(
+    encoding="utf-8"
+)
 LABEL_OPEN: Final = "PlasmaComponents3.Label {"
 DIMMED_OPACITY: Final = re.compile(r"opacity:\s*0\.[0-7]\d*")
+ROSTER_RE: Final = re.compile(r"readonly property var providerNames: \[([^\]]*)\]")
 
 
 def label_blocks(source: str) -> Iterator[str]:
@@ -178,6 +183,59 @@ class MainQmlLocalizationTest(unittest.TestCase):
         # physical edge would grow the meter from the wrong side.
         self.assertNotIn("anchors.leftToRight", QML_SOURCE)
         self.assertIn("anchors.left: parent.left", QML_SOURCE)
+
+
+class MainQmlProviderRosterTest(unittest.TestCase):
+    """One roster, walked wherever the panel has to look at every provider."""
+
+    def setUp(self) -> None:
+        declared = re.search(ROSTER_RE, QML_SOURCE)
+        assert declared is not None, "the panel has no provider roster"
+        self.roster = re.findall(r'"([^"]+)"', declared.group(1))
+        self.assertTrue(self.roster, "the roster is empty")
+
+    def test_every_provider_property_is_on_the_roster(self) -> None:
+        # A `property var` the roster does not name is a provider the merge,
+        # the error pick, and noData all skip: it never refreshes and never
+        # ages out.
+        self.assertEqual(
+            sorted(re.findall(r"property var (\w+): null", QML_SOURCE)),
+            sorted(self.roster),
+        )
+
+    def test_a_poll_merges_every_provider_off_the_roster(self) -> None:
+        body = QML_SOURCE.split("onNewData: (sourceName, data) => {", 1)[1]
+        body = body.split("} catch (e) {", 1)[0]
+        self.assertIn("root.providerNames", body)
+        for name in self.roster:
+            self.assertNotIn(f"root.{name} =", body)
+            self.assertNotIn(f"p.{name}", body)
+
+    def test_the_roster_decides_whether_the_panel_has_data(self) -> None:
+        body = QML_SOURCE.split("function noData() {", 1)[1].split("}", 1)[0]
+        self.assertIn("root.providerNames", body)
+        for name in self.roster:
+            self.assertNotIn(f"root.{name}", body)
+
+    def test_the_roster_is_the_one_main_runs(self) -> None:
+        # The payload keys come from the fetcher's providers dict, so a
+        # provider added there and not here is a card that never fills.
+        tree = ast.parse(FETCHER_SOURCE)
+        main = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        table = next(
+            node.value
+            for node in ast.walk(main)
+            if isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "providers"
+        )
+        assert isinstance(table, ast.Dict)
+        emitted = [key.value for key in table.keys if isinstance(key, ast.Constant)]
+        self.assertEqual(sorted(emitted), sorted(self.roster))
 
 
 class MainQmlAccessibilityTest(unittest.TestCase):

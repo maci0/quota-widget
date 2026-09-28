@@ -82,6 +82,8 @@ as a build or test step.
 
 Provider marks: Claude and Codex use their published brand color. Cursor and Grok are monochrome brands, so they use `Kirigami.Theme` neutrals. Do not invent a hue for a vendor without one.
 
+`providerNames` in `main.qml` is the panel's roster, in panel order. Everything that has to look at every provider (the poll merge, the error pick, `noData()`) walks it instead of naming one, so a new provider is a name in that list, a `property var`, a mark, and a card.
+
 ## Accessibility
 
 The panel reading is a `MouseArea` with an accessible role, name, description, and press action: a `MouseArea` alone is invisible to a screen reader and cannot be activated by one. Anything a hover tooltip carries has to reach the accessible tree too, since a reader never hovers and a `Label` is not focusable. The popup takes focus when it opens, and a control smaller than `minTargetPx` is a target a finger cannot land on.

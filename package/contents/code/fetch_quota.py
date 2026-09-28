@@ -20,6 +20,13 @@ Codex:  GET https://chatgpt.com/backend-api/wham/usage
 Configuration is read once at startup from QUOTA_WIDGET_* environment
 variables and validated before any request; run with --print-config to see the
 active values. See README "Configuration".
+
+One module, in this order: environment names and their validation, the clock,
+Config and load_config, the emit/warn/redact output pair, JSON and filesystem
+helpers, the account digest and the two cache layers, HTTP, then one section
+per provider (Claude, Grok, Codex, Cursor) and main() at the foot. A provider
+section owns its credential lookup, its refresh, and its parser, and reaches
+for everything else through the helpers above it.
 """
 
 from __future__ import annotations
