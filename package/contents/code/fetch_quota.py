@@ -439,6 +439,12 @@ REFRESH_LOCK_POLL_S = 0.25
 # override reaches it; see staleKeepMs in package/contents/ui/main.qml.
 DEFAULT_CACHE_MAX_AGE_S = SECONDS_PER_DAY
 MAX_CACHE_MAX_AGE_S = SECONDS_PER_DAY
+# Shape of a cached reading, stamped into the entry that holds it. A poll
+# replays the payload straight into the panel, so an entry written by another
+# release of the QML is a value this one cannot read: it is dropped instead of
+# parsed. Raise it when a provider payload changes shape, and a downgrade then
+# leaves the panel without a reading rather than with a misread one.
+PAYLOAD_SCHEMA = 1
 DEFAULT_HTTP_TIMEOUT_S = 12.0
 MAX_HTTP_TIMEOUT_S = 300.0
 CACHE_DIR_MODE = 0o700
@@ -1184,6 +1190,12 @@ def _read_provider_cache(name: str, account: str | None) -> JsonDict | None:
         payload = obj.get("payload")
         if ts is None or not isinstance(payload, dict):
             return None
+        # An entry another release wrote is a payload this QML was not built
+        # against, and the panel reads it field by field. It is deleted rather
+        # than parsed, so an upgrade never serves the previous shape.
+        if obj.get("schema") != PAYLOAD_SCHEMA:
+            _discard_provider_cache(path)
+            return None
         if not payload.get("ok"):
             return None
         # The window is a retention rule, not a serving rule, so it is applied
@@ -1220,7 +1232,11 @@ def _cache_holds_newer(path: Path, taken_ms: int, account: str) -> bool:
     if obj is None:
         return False
     ts = _finite_number(obj.get("cached_ms"))
-    if ts is None or obj.get("account") != account:
+    if (
+        ts is None
+        or obj.get("account") != account
+        or obj.get("schema") != PAYLOAD_SCHEMA
+    ):
         return False
     return int(ts) >= taken_ms
 
@@ -1244,6 +1260,7 @@ def _write_provider_cache(name: str, payload: JsonDict, account: str | None) -> 
             _atomic_write_json(
                 path,
                 {
+                    "schema": PAYLOAD_SCHEMA,
                     "cached_ms": stamp,
                     "account": account,
                     "payload": payload,
@@ -1660,7 +1677,9 @@ def fetch_claude() -> JsonDict:
     `error` is "no-token" when the credential store holds no usable access
     token, "http-429" when a throttled refresh left the session unproven, and
     otherwise the status _http_error names. A transient status serves the
-    cached reading instead, marked "stale".
+    cached reading instead, marked "stale"; a 401 does so only while a
+    throttled refresh is what the call was made on top of, since a token the
+    provider rejected is a sign-out the card has to show.
     """
     if not config().claude_cred.is_file():
         return _failure("no-token")
@@ -1707,13 +1726,19 @@ def fetch_claude() -> JsonDict:
             status, data, hdrs = fetch_http(CLAUDE_URL, headers)
     account = _account_id(token)
     if status == 401:
-        cached = _stale_cache("claude", account)
-        if cached:
-            return cached
-        # A refresh the provider throttled is not a sign-out, and one it
-        # rejected is: only the card subtitle tells those apart, and a user
-        # whose session was revoked has to be told to log in again.
+        # Only a throttled refresh earns the cached reading. A 401 that
+        # followed a refresh the provider answered is the vendor rejecting a
+        # token it just minted, and the cached entry carries the same `sub`
+        # and so matches the account: serving it there would keep a revoked
+        # session looking healthy for the whole retention window, and the card
+        # would never ask the user to log in again.
         if rate_limited:
+            cached = _stale_cache("claude", account)
+            if cached:
+                return cached
+            # A refresh the provider throttled is not a sign-out, and one it
+            # rejected is: only the card subtitle tells those apart, and a user
+            # whose session was revoked has to be told to log in again.
             return _failure("http-429", account, transient=True)
         return _failure("http-401", account)
     if status != 200 or not isinstance(data, dict):

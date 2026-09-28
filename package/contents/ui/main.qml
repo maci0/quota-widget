@@ -153,15 +153,21 @@ PlasmoidItem {
                 // ones, so merging them would rewind the cards and the age.
                 if (typeof p.fetched_ms === "number" && p.fetched_ms < root.fetchedMs)
                     return
+                // The window this poll reports is in force for this poll. It is
+                // read before the merge, not after: mergeProv ages a kept
+                // reading against staleKeepMs, so taking the new value first is
+                // what makes a shortened QUOTA_WIDGET_CACHE_MAX_AGE_S drop a
+                // reading on the poll that carries it instead of one poll
+                // later, still holding the window it replaced.
+                const keepS = p.cache_max_age_s
+                root.staleKeepMs = (typeof keepS === "number" && keepS > 0)
+                    ? keepS * 1000 : root.defaultStaleKeepMs
                 for (let i = 0; i < root.providerNames.length; i++) {
                     const n = root.providerNames[i]
                     root[n] = mergeProv(root[n], p[n])
                 }
                 root.fetchedMs = Math.max(root.fetchedMs,
                     p.fetched_ms || Date.now())
-                const keepS = p.cache_max_age_s
-                root.staleKeepMs = (typeof keepS === "number" && keepS > 0)
-                    ? keepS * 1000 : root.defaultStaleKeepMs
                 root.configError = p.config_error || ""
                 let anyOk = false
                 let firstError = ""
@@ -523,7 +529,7 @@ PlasmoidItem {
             return errorMsg ? statusText() : qsTr("Loading")
         const failed = failedNames()
         if (failed.length)
-            lines.push(qsTr("No reading for: %1").arg(failed.join(", ")))
+            lines.push(qsTr("No reading for: %1").arg(joinSpoken(failed)))
         return lines.join("\n")
     }
 

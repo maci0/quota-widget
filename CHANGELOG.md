@@ -147,6 +147,20 @@ fails if a Breaking entry lands in this section without a matching next version.
 - A `Retry-After` of `inf`, `Infinity`, or `nan` was read as a number of
   seconds to wait: an infinity is a wait that never ends, and a NaN compares
   false against every bound. A header that names neither is no wait at all now.
+- A Claude 401 served the cached reading even when the session had been revoked.
+  The entry is scoped by the token's `sub`, which a revoked session still
+  carries, so the cache matched and the card kept showing the last good plan for
+  the whole 24 h window without ever asking the user to log in again. The reading
+  now stands in only when the 401 followed a refresh the provider throttled,
+  which is the expired access token and not the session, and the other three
+  providers already reported a 401 as one.
+- A poll's `cache_max_age_s` reached the panel one poll after the merge it
+  governs, so shortening `QUOTA_WIDGET_CACHE_MAX_AGE_S` kept a reading alive for
+  one more cycle under the window it replaced. The window is now in force before
+  the merge reads it.
+- A cached entry is stamped with `PAYLOAD_SCHEMA`, and one written under another
+  value is deleted rather than replayed into a panel built for a different
+  payload shape.
 - A Grok token refresh raised `OverflowError` when the new expiry fell past the
   last instant the calendar holds, which is what a `QUOTA_WIDGET_NOW_MS` at the
   ceiling the fetcher accepts, or a lifetime far longer than the calendar, both

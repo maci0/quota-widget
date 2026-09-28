@@ -607,6 +607,16 @@ class MainQmlStaleWindowTest(unittest.TestCase):
         self.assertIn('root.staleKeepMs = (typeof keepS === "number"', QML_SOURCE)
         self.assertIn("const keepS = p.cache_max_age_s", QML_SOURCE)
 
+    def test_the_window_is_in_force_before_the_merge_it_governs(self) -> None:
+        # mergeProv ages a kept reading against staleKeepMs, so taking the
+        # window after the merge leaves a shortened
+        # QUOTA_WIDGET_CACHE_MAX_AGE_S in force for one poll past the payload
+        # that reported it.
+        window = QML_SOURCE.index("root.staleKeepMs = (typeof keepS ===")
+        for prov in ("claude", "cursor", "grok", "codex"):
+            merge = QML_SOURCE.index(f"mergeProv(root.{prov}, p.{prov})")
+            self.assertLess(window, merge, f"{prov} merged before the window")
+
     def test_the_fallback_window_is_not_writable_state(self) -> None:
         # staleKeepMs is overwritten by every poll, so the default it falls
         # back to has to be a separate readonly property.

@@ -783,6 +783,87 @@ class ClaudeRateLimitTest(unittest.TestCase):
             _scoped(out), {"ok": False, "error": "http-401", "transient": False}
         )
 
+    def test_signed_out_with_a_cache_entry_still_reports_401(self) -> None:
+        # The cached reading is scoped by the token's `sub`, which a revoked
+        # session still carries, so a 401 that follows a successful refresh is
+        # that same account's own last good reading. Serving it would keep a
+        # revoked session looking healthy for the whole retention window and
+        # the card would never ask the user to log in again.
+        fetch_quota._write_provider_cache(
+            "claude",
+            {
+                "ok": True,
+                "plan": "Pro",
+                "session": {"util": 12, "resets_ms": 1},
+                "weekly": [],
+            },
+            fetch_quota._account_id(self.access_token),
+        )
+        cred_path = fetch_quota.config().claude_cred
+        payload = json.loads(cred_path.read_text())
+        payload["claudeAiOauth"]["refreshToken"] = "old-refresh"
+        payload["claudeAiOauth"]["expiresAt"] = 1
+        cred_path.write_text(json.dumps(payload))
+
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            self.assertIn("/oauth/token", url)
+            return 200, _NEW_TOKENS
+
+        usage = _http_returning(401, {"error": {"type": "authentication_error"}})
+        with (
+            patch.object(fetch_quota, "fetch_json", fake_json),
+            patch.object(fetch_quota, "fetch_http", usage),
+        ):
+            out = fetch_quota.fetch_claude()
+        usage.hit(self, fetch_quota.CLAUDE_URL)
+        # One call: the refresh already handed back a fresh token, and the 401
+        # is that new token being rejected. A second rotation on it would only
+        # burn the refresh token the user still holds.
+        self.assertEqual(len(usage.urls), 1)
+        self.assertEqual(
+            _scoped(out), {"ok": False, "error": "http-401", "transient": False}
+        )
+
+    def test_throttled_refresh_with_a_cache_entry_serves_it_stale(self) -> None:
+        # The 401 is the expired access token, not a revoked session: the
+        # provider throttled the refresh, so the cached reading stands in and
+        # the card is told the rate limit, not a sign-out.
+        fetch_quota._write_provider_cache(
+            "claude",
+            {
+                "ok": True,
+                "plan": "Pro",
+                "session": {"util": 12, "resets_ms": 1},
+                "weekly": [],
+            },
+            fetch_quota._account_id(self.access_token),
+        )
+        cred_path = fetch_quota.config().claude_cred
+        payload = json.loads(cred_path.read_text())
+        payload["claudeAiOauth"]["refreshToken"] = "old-refresh"
+        payload["claudeAiOauth"]["expiresAt"] = 1
+        cred_path.write_text(json.dumps(payload))
+
+        usage = _http_returning(401, {"error": {"type": "authentication_error"}})
+        with (
+            patch.object(
+                fetch_quota, "fetch_json", _http_returning_pair(429, _RATE_LIMIT)
+            ),
+            patch.object(fetch_quota, "fetch_http", usage),
+        ):
+            out = fetch_quota.fetch_claude()
+        usage.hit(self, fetch_quota.CLAUDE_URL)
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["stale"])
+        self.assertEqual(out["session"]["util"], 12)
+
     def test_spend_used_as_number_does_not_crash(self) -> None:
         body = {"five_hour": {"utilization": 4}, "spend": {"used": 12}}
         fake = _http_returning(200, body)
@@ -1738,6 +1819,29 @@ class ProviderCacheTest(unittest.TestCase):
         )
         self.assertIsNone(fetch_quota._read_provider_cache("grok", "acct-2"))
         self.assertIsNone(fetch_quota._stale_cache("grok", "acct-2"))
+
+    def test_an_entry_from_another_release_is_dropped(self) -> None:
+        # The panel reads a replayed payload field by field, so an entry a
+        # release with a different payload shape left behind is not a reading
+        # this one can serve. It is deleted, and the next write takes the file.
+        path = Path(self.tmp.name) / "grok.json"
+        fetch_quota._write_provider_cache(
+            "grok", {"ok": True, "plan": "Grok"}, self.account
+        )
+        entry = json.loads(path.read_text())
+        entry["schema"] = fetch_quota.PAYLOAD_SCHEMA + 1
+        path.write_text(json.dumps(entry))
+
+        self.assertIsNone(fetch_quota._read_provider_cache("grok", self.account))
+        self.assertFalse(path.exists())
+        self.assertFalse(fetch_quota._cache_holds_newer(path, 0, self.account))
+
+        fetch_quota._write_provider_cache(
+            "grok", {"ok": True, "plan": "Grok"}, self.account
+        )
+        got = fetch_quota._read_provider_cache("grok", self.account)
+        assert got is not None
+        self.assertEqual(got["plan"], "Grok")
 
     def test_unidentifiable_caller_reads_nothing(self) -> None:
         fetch_quota._write_provider_cache(

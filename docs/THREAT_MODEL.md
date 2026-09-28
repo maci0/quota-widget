@@ -145,7 +145,10 @@ No other host is contacted. `api.openai.com` appears in a JWT claim path
 - **Tampering.** A file that is replaced between the read and the refresh write
   is handled by the read-modify-write retry (`_merge_write_json`,
   `fetch_quota.py:850`), but the value written is whatever the fetcher holds in
-  memory.
+  memory. A cache entry written by another release is deleted unread
+  (`PAYLOAD_SCHEMA`, `fetch_quota.py`), so an upgrade never replays a payload
+  shape the current panel was not built against; the tradeoff is that a downgrade
+  and an upgrade in a row leave no reading to fall back on.
 - **Repudiation.** A failed credential write is journaled
   (`_write_rotated_tokens`, `fetch_quota.py:886`, and its three callers); a
   successful one is not, so a rotation cannot be traced to a run.
