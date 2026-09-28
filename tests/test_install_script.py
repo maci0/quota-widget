@@ -124,6 +124,20 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("not installed", result.stdout)
 
+    def test_a_second_argument_is_a_usage_error(self) -> None:
+        # The mode is whichever argument comes first, so a mistyped second one
+        # is dropped and `--uninstall typo` still removes the widget.
+        plugin_id = "com.example.widget"
+        dest = self.place(plugin_id, owned=True)
+
+        for args in (("--uninstall", "typo"), ("-u", "--help"), ("--help", "extra")):
+            with self.subTest(args=args):
+                result = self.run_script(self.checkout(plugin_id), *args)
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("unexpected argument", result.stderr)
+        self.assertTrue(dest.is_dir())
+
 
 class FindRootTest(unittest.TestCase):
     """The root walk starts at the script, not at the link that names it.

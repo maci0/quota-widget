@@ -305,6 +305,12 @@ fails if a Breaking entry lands in this section without a matching next version.
   mode. `mkdir`'s mode only applies to the directory it creates, so a cache
   folder left behind by an earlier run kept whatever mode it had and left the
   readings and account digests in it readable by every local account.
+- `install.sh` took its mode from the first argument and dropped the rest, so
+  `--uninstall typo` removed the widget with the mistyped flag silently
+  ignored. A second argument is a usage error now, naming it and exiting 2, as
+  the fetcher already did for its own flags.
+- The gate was red on a clean tree: `black` wanted the fetcher's argument check
+  on one line.
 
 ### Changed
 

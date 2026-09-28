@@ -155,6 +155,16 @@ uninstall() {
   echo "      $PLASMOID_CONFIG"
 }
 
+# Only one argument is a mode. `--uninstall --help` or `--uninstall typo` picks
+# the first and drops the rest, so a mistyped second flag removes the widget
+# without the word "uninstall" being wrong anywhere on the line. The fetcher
+# refuses a second argument for the same reason.
+if (( $# > 1 )); then
+  echo "error: unexpected argument ${2@Q}" >&2
+  usage >&2
+  exit 2
+fi
+
 case "${1:-}" in
   --uninstall | -u) uninstall; exit $? ;;
   -h | --help)
