@@ -1606,6 +1606,14 @@ class ProviderCacheTest(unittest.TestCase):
         )
         self.assertIsNone(fetch_quota._read_provider_cache("grok", None))
 
+    def test_an_entry_that_is_not_an_object_reads_as_absent(self) -> None:
+        path = Path(self.tmp.name) / "grok.json"
+        path.write_text("[1, 2]", encoding="utf-8")
+        self.assertIsNone(fetch_quota._read_provider_cache("grok", self.account))
+        self.assertFalse(
+            fetch_quota._cache_holds_newer(path, 0, self.account),
+        )
+
     def _write_expired_entry(self, name: str) -> Path:
         """Write a provider entry aged a minute past the retention window."""
         fetch_quota._write_provider_cache(

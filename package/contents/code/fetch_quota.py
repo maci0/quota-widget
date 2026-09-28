@@ -175,6 +175,17 @@ def _utf8_encodable(value: str) -> bool:
     return True
 
 
+def _read_json_dict(path: Path) -> JsonDict | None:
+    """The JSON object at path, or None if it is missing, unreadable, or not
+    an object. A store that holds a list reads as absent rather than raising on
+    the caller's first .get()."""
+    try:
+        obj = json.loads(_read_text(path))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
 def _transient_failure(status: int) -> bool:
     """Whether a cached reading beats reporting this failure.
 
@@ -1050,9 +1061,8 @@ def _reading(payload: JsonDict) -> JsonDict:
 
 def _read_provider_cache(name: str, account: str | None) -> JsonDict | None:
     path = config().cache_dir / f"{name}.json"
-    try:
-        obj = json.loads(_read_text(path))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    obj = _read_json_dict(path)
+    if obj is None:
         return None
     ts = _finite_number(obj.get("cached_ms"))
     payload = obj.get("payload")
@@ -1087,9 +1097,8 @@ def _cache_holds_newer(path: Path, taken_ms: int, account: str) -> bool:
     it holds, so a stamp at or past taken_ms means the file already carries a
     reading no older than the incoming one and writing again only rewinds it.
     """
-    try:
-        obj = json.loads(_read_text(path))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    obj = _read_json_dict(path)
+    if obj is None:
         return False
     ts = _finite_number(obj.get("cached_ms"))
     if ts is None or obj.get("account") != account:
@@ -1144,14 +1153,6 @@ def _fail_or_cached(name: str, account: str | None, status: int) -> JsonDict:
         if cached:
             return cached
     return _http_error(status, account)
-
-
-def _read_json_dict(path: Path) -> JsonDict | None:
-    try:
-        obj = json.loads(_read_text(path))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    return obj if isinstance(obj, dict) else None
 
 
 @contextlib.contextmanager
@@ -1255,7 +1256,6 @@ def fetch_http(
     url: str,
     headers: dict[str, str],
     *,
-    timeout: float | None = None,
     data: bytes | None = None,
     method: str | None = None,
 ) -> tuple[int, object, Message | None]:
@@ -1271,11 +1271,11 @@ def fetch_http(
     req = urllib.request.Request(  # noqa: S310
         url, data=data, headers=headers, method=method
     )
-    req_timeout = config().http_timeout_s if timeout is None else timeout
     attempts = 1 if data is not None or method not in (None, "GET") else 2
+    timeout = config().http_timeout_s
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=req_timeout) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
                 # One byte past the cap: reading exactly the cap cannot tell a
                 # body that fits from one that is only just over it.
                 body = resp.read(MAX_RESPONSE_BYTES + 1)
@@ -1323,24 +1323,21 @@ def fetch_json(
     url: str,
     headers: dict[str, str],
     *,
-    timeout: float | None = None,
     data: bytes | None = None,
     method: str | None = None,
 ) -> tuple[int, object]:
-    status, body, _hdrs = fetch_http(
-        url, headers, timeout=timeout, data=data, method=method
-    )
+    status, body, _hdrs = fetch_http(url, headers, data=data, method=method)
     return status, body
 
 
 # ── Claude ──────────────────────────────────────────────────────────────────
 
 
-def _claude_expired(oauth: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool:
+def _claude_expired(oauth: JsonDict) -> bool:
     exp = _finite_number(oauth.get("expiresAt"))
     if exp is None:
         return False
-    return epoch_ms(exp) <= now_ms() + skew_ms
+    return epoch_ms(exp) <= now_ms() + TOKEN_SKEW_MS
 
 
 def _refresh_claude(cred: JsonDict) -> tuple[JsonDict | None, bool]:
@@ -1619,14 +1616,14 @@ def _load_grok_auth() -> tuple[str, JsonDict] | None:
     return best_key, best_entry
 
 
-def _token_expired(entry: JsonDict, skew_s: int = TOKEN_SKEW_S) -> bool:
+def _token_expired(entry: JsonDict) -> bool:
     exp = entry.get("expires_at")
     if not exp:
         return False
     when = iso_to_utc(str(exp))
     if when is None:
         return False
-    return when <= now_utc() + dt.timedelta(seconds=skew_s)
+    return when <= now_utc() + dt.timedelta(seconds=TOKEN_SKEW_S)
 
 
 def _post_refresh(url: str, refresh: str, client_id: str) -> JsonDict | None:
@@ -1997,14 +1994,14 @@ def _codex_reset_credits(data: JsonDict) -> JsonDict:
     }
 
 
-def _codex_token_expired(tokens: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool:
+def _codex_token_expired(tokens: JsonDict) -> bool:
     access = tokens.get("access_token")
     if not isinstance(access, str) or not access:
         return True
     exp_ms = _jwt_exp_ms(access)
     if exp_ms is None:
         return False  # opaque token: the usage call is the only truth
-    return exp_ms <= now_ms() + skew_ms
+    return exp_ms <= now_ms() + TOKEN_SKEW_MS
 
 
 def _refresh_codex(auth: JsonDict) -> JsonDict | None:
