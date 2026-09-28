@@ -205,6 +205,9 @@ PlasmoidItem {
         return newv
     }
 
+    // Counts go through numStr: .arg() would splice a JS number, so an Arabic
+    // or Devanagari locale would read Latin digits next to a localized
+    // percentage on the same row.
     function remainStr(resetMs) {
         if (!resetMs) return qsTr("n/a")
         const ms = Math.max(0, resetMs - nowMs)
@@ -212,9 +215,9 @@ PlasmoidItem {
         const d = Math.floor(totalMin / 1440)
         const h = Math.floor((totalMin % 1440) / 60)
         const m = totalMin % 60
-        if (d > 0) return qsTr("%1d %2h").arg(d).arg(h)
-        if (h > 0) return qsTr("%1h %2m").arg(h).arg(m)
-        return qsTr("%1 min").arg(m)
+        if (d > 0) return qsTr("%1d %2h").arg(numStr(d, 0)).arg(numStr(h, 0))
+        if (h > 0) return qsTr("%1h %2m").arg(numStr(h, 0)).arg(numStr(m, 0))
+        return qsTr("%1 min").arg(numStr(m, 0))
     }
 
     // A fixed "ddd h:mm AP" pattern is English: it names the weekday in
@@ -238,6 +241,16 @@ PlasmoidItem {
         if (minDigits)
             opts.minimumFractionDigits = minDigits
         return Number(n).toLocaleString(Qt.locale().name, opts)
+    }
+
+    // "%1%" is the English spelling: French puts a space before the sign
+    // ("12 %") and a few locales lead with it. style: "percent" places the
+    // sign, the space, and the digits the way the locale writes them.
+    function percentStr(fraction, maxDigits) {
+        return Number(fraction).toLocaleString(Qt.locale().name, {
+            style: "percent",
+            maximumFractionDigits: maxDigits
+        })
     }
 
     // Vendor amounts arrive as strings of unknown precision. Group and
@@ -271,7 +284,7 @@ PlasmoidItem {
         if (u === undefined || u === null) return qsTr("n/a")
         const n = Number(u)
         if (isNaN(n)) return qsTr("n/a")
-        return qsTr("%1%").arg(numStr(Math.round(n * 10) / 10, 1))
+        return percentStr(Math.round(n * 10) / 1000, 1)
     }
 
     function periodSubdetail(p) {
@@ -281,10 +294,12 @@ PlasmoidItem {
             const spent = moneyFromCents(p.used, p.currency)
             const cap = p.limit != null
                 ? moneyFromCents(p.limit, p.currency) : qsTr("no cap")
-            return spent + " / " + cap + (when ? (" · " + when) : "")
+            return qsTr("%1 / %2").arg(spent).arg(cap)
+                + (when ? (" · " + when) : "")
         }
         if (p.used != null && p.limit != null)
-            return numStr(p.used, 0) + " / " + numStr(p.limit, 0)
+            return qsTr("%1 / %2")
+                .arg(numStr(p.used, 0)).arg(numStr(p.limit, 0))
                 + (when ? (" · " + when) : "")
         return when
     }
@@ -359,7 +374,7 @@ PlasmoidItem {
         if (u === undefined || u === null) return ""
         const n = Number(u)
         if (isNaN(n)) return ""
-        return qsTr("%1%").arg(numStr(Math.round(n), 0))
+        return percentStr(n / 100, 0)
     }
 
     function topByUtil(rows) {

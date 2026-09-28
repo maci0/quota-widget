@@ -13,14 +13,24 @@ DIMMED_LABEL: Final = re.compile(
 )
 
 
-UI_BINDING: Final = re.compile(
-    r"(?:^|\s)(?:text|subtitle|title|label|detail|Accessible\.name"
-    r"|Accessible\.description|ToolTip\.text|toolTip\w*Text)\s*:\s*(.*)$",
-    re.MULTILINE,
+PROSE_LITERAL: Final = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
+# A line comment, not the "//" inside a URL or a relative path: those sit
+# behind a ":" or a "." and must stay so the literals around them still pair up.
+LINE_COMMENT: Final = re.compile(r"(?:^|(?<=\s))//[^\n]*", re.MULTILINE)
+# String literals that are not prose: a vendor brand, a shell quote, or a key
+# the fetcher envelope uses. Anything else with a word in it is a sentence a
+# translator must reach.
+NOT_PROSE: Final = frozenset(
+    {
+        "Claude",
+        "Cursor",
+        "Codex",
+        "Grok",
+        "python3 '",
+        "'\\''",
+        "exit code",
+    }
 )
-PROSE_LITERAL: Final = re.compile(r'"([^"\\]*)"')
-# Fetcher payload keys and the shell prefix, not words a reader sees.
-NOT_PROSE: Final = frozenset({"exit code", "stdout", "python3 '"})
 
 
 class MainQmlLocalizationTest(unittest.TestCase):
@@ -33,14 +43,19 @@ class MainQmlLocalizationTest(unittest.TestCase):
         return re.sub(r"//[^\n]*", "", re.sub(r'qsTr\("[^"]*"\)', "", QML_SOURCE))
 
     @classmethod
-    def _untranslated_bindings(cls) -> list[str]:
+    def _untranslated_strings(cls) -> list[str]:
         # Drop every qsTr() call first, so what is left is text a translator
-        # would never see. Brand names ("Claude", "Cursor", "Codex", "Grok")
-        # and separators (" · ") carry no letters-plus-space, so they stay.
+        # would never see. Comments and single-character separators carry no
+        # letters-plus-space, so they stay out of the result on their own.
         source = re.sub(r'qsTr\("[^"]*"\)', "", QML_SOURCE)
+        source = re.sub(LINE_COMMENT, "", source)
         found: list[str] = []
-        for match in UI_BINDING.finditer(source):
-            found.extend(cls._prose(match.group(1)))
+        for literal in PROSE_LITERAL.findall(source):
+            stripped = literal.strip()
+            if stripped in NOT_PROSE:
+                continue
+            if " " in stripped and re.search(r"[A-Za-z]", stripped):
+                found.append(stripped)
         return found
 
     @staticmethod
@@ -56,10 +71,23 @@ class MainQmlLocalizationTest(unittest.TestCase):
                 found.append(stripped)
         return found
 
-    def test_ui_text_is_marked_for_translation(self) -> None:
+    def test_user_facing_strings_are_marked_for_translation(self) -> None:
         # A hardcoded label is a word a translator cannot reach, so the widget
-        # stays English in every locale.
-        self.assertEqual(self._untranslated_bindings(), [])
+        # stays English in every locale. The scan covers the whole file, not
+        # just one-line property bindings: a sentence returned from a helper
+        # or wrapped across lines is the same defect.
+        self.assertEqual(self._untranslated_strings(), [])
+
+    def test_returned_wording_is_marked_for_translation(self) -> None:
+        # A helper that answers in a hardcoded literal stays English wherever
+        # its result lands. One word is enough to be a sentence, so this does
+        # not wait for a space to appear. An empty return is the one way out.
+        found = [
+            literal
+            for literal in re.findall(r'return "([^"]*)"', QML_SOURCE)
+            if literal != ""
+        ]
+        self.assertEqual(found, [])
 
     def test_helper_returned_text_is_marked_for_translation(self) -> None:
         # errText() and the cached-card tooltip return their wording into a
@@ -97,6 +125,19 @@ class MainQmlLocalizationTest(unittest.TestCase):
         # German user reads "12.5" instead of "12,5".
         self.assertNotIn("toLocaleString(undefined", QML_SOURCE)
         self.assertIn("Qt.locale().name", QML_SOURCE)
+
+    def test_percentages_use_the_locale(self) -> None:
+        # "%1%" glues an English suffix on: French wants "12 %" with a space
+        # and its own digits, and some locales lead with the sign.
+        self.assertNotIn('qsTr("%1%")', QML_SOURCE)
+        self.assertIn('style: "percent"', QML_SOURCE)
+
+    def test_counts_in_durations_use_the_locale(self) -> None:
+        # qsTr().arg() on a raw number splices a JS number, so an Arabic
+        # locale would read Latin digits beside a localized percentage.
+        self.assertIn('qsTr("%1d %2h").arg(numStr(d, 0))', QML_SOURCE)
+        self.assertIn('qsTr("%1h %2m").arg(numStr(h, 0))', QML_SOURCE)
+        self.assertIn('qsTr("%1 min").arg(numStr(m, 0))', QML_SOURCE)
 
     def test_meter_fills_from_the_leading_edge(self) -> None:
         # Qt mirrors the left/right anchor lines in a right-to-left layout; a

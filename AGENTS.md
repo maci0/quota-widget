@@ -58,10 +58,13 @@ Provider marks: Claude and Codex use their published brand color. Cursor and Gro
 Every user-facing string in `main.qml` goes through `qsTr()` with `%1`-style
 placeholders, never concatenation, so a translator can reorder the sentence.
 Dates and times render through `Qt.DefaultLocaleShortDate`, amounts through
-`Number.toLocaleString(Qt.locale().name, { style: "currency" })`, and
-percentages and counts through `numStr()`. A hardcoded `"$"`, a `"ddd h:mm AP"`
-format, or a bare `toLocaleString()` with no locale argument all render English
-numbering in every locale; `tests/test_main_qml.py` fails on each of them.
+`Number.toLocaleString(Qt.locale().name, { style: "currency" })`, percentages
+through `percentStr()` (`style: "percent"`, so the sign and its spacing are the
+locale's), and counts through `numStr()`. Every value spliced with `.arg()` goes
+through one of those, since a raw number keeps Latin digits. A hardcoded `"$"`,
+a `"ddd h:mm AP"` format, a `qsTr("%1%")` suffix, or a bare `toLocaleString()`
+with no locale argument all render English numbering in every locale;
+`tests/test_main_qml.py` fails on each of them.
 
 `anchors.left`, `anchors.right`, and `anchors.horizontalCenter` are logical
 edges in QML and mirror themselves in a right-to-left layout, so the meter fill
