@@ -22,9 +22,14 @@ prints, so a fetcher and UI shipped together never break each other.
 - `--help` on the fetcher and on `print_smoke.py`, listing the flags, the
   environment variables, and the exit codes. Help is answered before the
   environment is read, so it works on a broken config.
+- `install.sh --uninstall` removes the installed widget and leaves the provider
+  cache and the plasmoid settings in place.
 
 ### Fixed
 
+- The install stops instead of deleting whatever sits at the plasmoid directory
+  when that is not this widget, so a copy from Plasma Discover, a distro
+  package, or a hand-unpacked archive survives an upgrade.
 - Non-finite readings (`NaN`, `1e400`) from a provider no longer reach the JSON
   the plasmoid parses, and no longer read as a clamped 0% or a full 100%.
 - Seconds-to-milliseconds conversion rounds instead of truncating, so a reset

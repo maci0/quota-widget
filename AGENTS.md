@@ -32,7 +32,11 @@ The QML owns the fetcher process. One run at a time: `exec.poll()` returns early
 Project marker: `package/metadata.json`. Scripts walk up to that file.
 
 `install.sh` deletes `~/.local/share/plasma/plasmoids/com.maci.quota-widget` before
-symlinking. Run it only when the user asks to install or upgrade, never as a build or test step.
+symlinking, but only when that path is a symlink or holds a `metadata.json` naming
+`com.maci.quota-widget`; anything else there is left alone and the run stops.
+`./install.sh --uninstall` removes the widget and keeps the cache and the plasmoid
+config. Run the script only when the user asks to install, upgrade, or remove, never
+as a build or test step.
 
 ## Look
 

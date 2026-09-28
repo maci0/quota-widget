@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install (or upgrade) the AI Quota plasmoid for the current user.
+# Install (or upgrade) the AI Quota plasmoid for the current user, or remove
+# it again with --uninstall.
 set -euo pipefail
 
 find_root() {
@@ -29,6 +30,54 @@ xdg_cache="$HOME/.cache"
 DEST="$xdg_data/plasma/plasmoids/${PKG_ID}"
 SCRATCH="$ROOT/.scratch"
 
+# DEST may hold a copy put there by Plasma Discover, by a distro package, or
+# unpacked by hand. Removing a directory this script did not create loses
+# whatever the user keeps in it, so both install and uninstall ask first.
+dest_is_ours() {
+  [[ -L "$DEST" ]] && return 0
+  [[ -f "$DEST/metadata.json" ]] || return 1
+  grep -q "$PKG_ID" "$DEST/metadata.json"
+}
+
+usage() {
+  cat <<'EOF'
+usage: install.sh [--uninstall]
+
+  (no argument)  link package/ into the user's Plasma plasmoid directory
+  --uninstall    remove the installed widget, keep the cache and settings
+EOF
+}
+
+uninstall() {
+  if [[ -e "$DEST" || -L "$DEST" ]]; then
+    if ! dest_is_ours; then
+      echo "error: $DEST is not this widget, left in place" >&2
+      return 1
+    fi
+    rm -rf "$DEST"
+    echo "removed -> $DEST"
+  else
+    echo "not installed -> $DEST"
+  fi
+  rm -rf "$xdg_cache/plasmashell/qmlcache" 2>/dev/null || true
+  echo "kept: $xdg_cache/quota-widget (last good readings)"
+  echo "      ~/.config/plasmoids/org.kde.plasma.plasmoid/com.maci.quota-widget.json"
+}
+
+case "${1:-}" in
+  --uninstall | -u) uninstall; exit $? ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  "") ;;
+  *)
+    echo "error: unknown argument ${1@Q}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
 chmod +x "$ROOT/package/contents/code/fetch_quota.py"
 mkdir -p "$SCRATCH"
 
@@ -44,6 +93,11 @@ fi
 # Bytecode caches are build residue, not content: the whole package/ tree is
 # what gets linked into the plasmoid dir.
 find "$ROOT/package" -type d -name __pycache__ -prune -exec rm -rf {} +
+
+if [[ -e "$DEST" || -L "$DEST" ]] && ! dest_is_ours; then
+  echo "error: $DEST exists and is not this widget; remove it by hand" >&2
+  exit 1
+fi
 
 mkdir -p "$(dirname "$DEST")"
 rm -rf "$DEST"

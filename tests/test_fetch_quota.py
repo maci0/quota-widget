@@ -37,6 +37,9 @@ _NEW_TOKENS: dict[str, object] = {
 
 JsonDict = dict[str, Any]
 
+# Test-side names for the credential files the config owns.
+Credential = Literal["CLAUDE_CRED", "CODEX_AUTH", "GROK_AUTH", "CURSOR_AUTH_JSON"]
+
 _CREDENTIAL_FIELD: Final[dict[str, str]] = {
     "CLAUDE_CRED": "claude_cred",
     "CODEX_AUTH": "codex_auth",
@@ -60,7 +63,7 @@ _CRED_ENV = {
 
 
 @contextlib.contextmanager
-def point_credential(name: str, path: Path) -> Iterator[None]:
+def point_credential(name: Credential, path: Path) -> Iterator[None]:
     """Point one credential file at a temp path, then restore the config.
 
     The fetcher reads credential paths from its Config, so a test swaps the
@@ -1000,16 +1003,18 @@ class ErrorBodyTest(unittest.TestCase):
     def test_error_body_is_not_emitted(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        os.environ["QUOTA_WIDGET_CACHE"] = tmp.name
-        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
         cred = Path(tmp.name) / "cred.json"
         cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
         os.environ["QUOTA_WIDGET_CLAUDE_CREDENTIALS"] = str(cred)
         self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CLAUDE_CREDENTIALS", None))
         body = b"account user_01ABC@example.com not found"
         out = io.StringIO()
+        # main() reloads the config, so the credential path travels as env.
         with (
-            credential_env("CLAUDE_CRED", cred),
+            config_env(
+                QUOTA_WIDGET_CACHE=tmp.name,
+                QUOTA_WIDGET_CLAUDE_CREDENTIALS=str(cred),
+            ),
             patch.object(urllib.request, "urlopen", side_effect=self._error(body)),
             contextlib.redirect_stdout(out),
             self.assertRaises(SystemExit),
