@@ -2789,6 +2789,15 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn("usage: fetch_quota.py", stderr.getvalue())
 
+    def test_a_usage_error_points_at_help(self) -> None:
+        # The fetcher, the installer, and print_smoke answer the same mistake
+        # the same way, so the closing line is one string in each.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                fetch_quota.main(["--nope"])
+        self.assertIn("try 'fetch_quota.py --help'", stderr.getvalue())
+
     def test_unknown_argument_outranks_a_broken_config(self) -> None:
         # A typo is the operator's to fix, so it stays a usage error even when
         # the environment is bad: the config payload exits 0, and a script

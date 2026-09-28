@@ -573,9 +573,10 @@ PlasmoidItem {
         return percentStr(n / 100, 0)
     }
 
-    // The parts of a meter's spoken summary, joined by a catalog separator.
-    // A comma written in QML is a comma in every locale, and a language that
-    // lists with a semicolon, a middle dot, or a full stop cannot say so.
+    // The parts of a meter's spoken summary, and the providers a panel reading
+    // has no number for, joined by a catalog separator. A comma written in QML
+    // is a comma in every locale, and a language that lists with a semicolon,
+    // a middle dot, or a full stop cannot say so.
     function joinSpoken(parts) {
         return parts.filter(s => s !== "").reduce(
             (a, b) => qsTr("%1, %2").arg(a).arg(b))

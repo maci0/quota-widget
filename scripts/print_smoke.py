@@ -107,7 +107,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(0)
     if len(args) > 1:
         print(
-            f"print_smoke: unexpected argument {args[1]!r}\n{USAGE_LINE}",
+            f"print_smoke: unexpected argument {args[1]!r}\n{USAGE_LINE}\n"
+            "try 'print_smoke.py --help' for more information.",
             file=sys.stderr,
         )
         raise SystemExit(2)

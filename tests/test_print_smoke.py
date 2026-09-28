@@ -85,6 +85,7 @@ class PrintSmokeTest(unittest.TestCase):
                 print_smoke.main(["a", "b"])
         self.assertEqual(caught.exception.code, 2)
         self.assertIn("usage: print_smoke.py", stderr.getvalue())
+        self.assertIn("try 'print_smoke.py --help'", stderr.getvalue())
 
 
 class PrintSmokeSummaryTest(unittest.TestCase):

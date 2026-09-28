@@ -74,11 +74,15 @@ python3 package/contents/code/fetch_quota.py > .scratch/smoke.json
 python3 scripts/print_smoke.py .scratch/smoke.json
 ```
 
-Both take `--help`. The fetcher prints one JSON object on stdout and keeps
-diagnostics on stderr, so `fetch_quota.py > dump.json` is safe; `--print-config`
+All three scripts take `--help`, and `install.sh` also takes `--version`, which
+prints the released version from `package/metainfo.xml`. The fetcher prints one
+JSON object on stdout and keeps diagnostics on stderr, so
+`fetch_quota.py > dump.json` is safe; `--print-config`
 shows the paths and knobs it resolved, without reading a token, and
 `--clear-cache` deletes the cached readings and the key they are scoped by (see
-[Data and privacy](#data-and-privacy)).
+[Data and privacy](#data-and-privacy)). An argument none of them lists is a
+usage error: exit 2, the error and the usage line on stderr, and nothing on
+stdout.
 
 ## Development
 

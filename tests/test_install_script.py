@@ -46,6 +46,15 @@ class InstallScriptTest(unittest.TestCase):
         (root / "package" / "metadata.json").write_text(
             json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
         )
+        (root / "package" / "metainfo.xml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<component type="desktop-application">\n'
+            "  <releases>\n"
+            '    <release version="1.2.3" date="2026-09-28"/>\n'
+            "  </releases>\n"
+            "</component>\n",
+            encoding="utf-8",
+        )
         return root
 
     def run_script(self, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -125,8 +134,8 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn("not installed", result.stdout)
 
     def test_a_second_argument_is_a_usage_error(self) -> None:
-        # The mode is whichever argument comes first, so a mistyped second one
-        # is dropped and `--uninstall typo` still removes the widget.
+        # A mistyped or misplaced second argument stops the run, so the
+        # destructive one cannot fire on a line nobody read to the end.
         plugin_id = "com.example.widget"
         dest = self.place(plugin_id, owned=True)
 
@@ -137,6 +146,42 @@ class InstallScriptTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("unexpected argument", result.stderr)
         self.assertTrue(dest.is_dir())
+
+    def test_a_usage_error_points_at_help(self) -> None:
+        result = self.run_script(self.checkout("com.example.widget"), "--instal")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unknown argument", result.stderr)
+        self.assertIn("try 'install.sh --help'", result.stderr)
+
+    def test_help_lists_every_flag_and_exits_zero(self) -> None:
+        result = self.run_script(self.checkout("com.example.widget"), "--help")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        for flag in ("--uninstall", "--help", "--version"):
+            self.assertIn(flag, result.stdout)
+
+    def test_version_prints_the_released_version(self) -> None:
+        for flag in ("--version", "-V"):
+            with self.subTest(flag=flag):
+                result = self.run_script(self.checkout("com.example.widget"), flag)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "com.example.widget 1.2.3\n")
+
+    def test_version_fails_when_no_release_is_named(self) -> None:
+        # A manifest with no release has no version to answer with, and an
+        # empty line would read as one the operator mistyped.
+        root = self.checkout("com.example.widget")
+        (root / "package" / "metainfo.xml").write_text(
+            '<component type="desktop-application"/>\n', encoding="utf-8"
+        )
+
+        result = self.run_script(root, "--version")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("metainfo.xml", result.stderr)
 
 
 class FindRootTest(unittest.TestCase):

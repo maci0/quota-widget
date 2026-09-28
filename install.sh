@@ -129,13 +129,34 @@ check_python() {
 }
 
 usage() {
+  # Same shape as the fetcher's help: a one-line summary, a usage line, then
+  # the flags. Progress and results go to stdout, errors to stderr.
   cat <<'EOF'
-usage: install.sh [-u | --uninstall]
+usage: install.sh [-u | --uninstall] [-h | --help] [-V | --version]
 
-  (no argument)      link package/ into the user's Plasma plasmoid directory
-  -u, --uninstall    remove the installed widget, keep the cache and settings
-  -h, --help         print this help and exit
+Link this checkout's package/ into the user's Plasma plasmoid directory, or
+remove it again. The link is followed by a smoke poll of the four providers,
+whose summary is printed here and kept in .scratch/smoke.json.
+
+options:
+  -u, --uninstall  remove the installed widget, keep the cache and settings
+  -h, --help       print this help and exit
+  -V, --version    print the plasmoid version from package/metainfo.xml and exit
 EOF
+}
+
+version() {
+  # The released version lives in metainfo.xml, the same file Discover and
+  # KNewStuff read, so the answer is a run-time read and not a second literal
+  # that a release bumps without. The first <release> is the newest one.
+  local release
+  release="$(sed -n 's/.*<release[[:space:]][^>]*version="\([^"]*\)".*/\1/p' \
+    "$ROOT/package/metainfo.xml" | head -n 1)"
+  if [[ -z "$release" ]]; then
+    echo "error: no <release version=...> in $ROOT/package/metainfo.xml" >&2
+    return 1
+  fi
+  echo "$PKG_ID $release"
 }
 
 uninstall() {
@@ -155,13 +176,15 @@ uninstall() {
   echo "      $PLASMOID_CONFIG"
 }
 
-# Only one argument is a mode. `--uninstall --help` or `--uninstall typo` picks
-# the first and drops the rest, so a mistyped second flag removes the widget
-# without the word "uninstall" being wrong anywhere on the line. The fetcher
-# refuses a second argument for the same reason.
+# One argument is a mode, and a second one is always a mistake. `--uninstall
+# --help` is the case that matters: the mode is the destructive one, so a
+# mistyped or misplaced flag on that line must not remove the widget while the
+# word "uninstall" goes unread. Refusing is what the fetcher does too, and the
+# two then answer the same line the same way.
 if (( $# > 1 )); then
   echo "error: unexpected argument ${2@Q}" >&2
   usage >&2
+  echo "try 'install.sh --help' for more information." >&2
   exit 2
 fi
 
@@ -171,10 +194,15 @@ case "${1:-}" in
     usage
     exit 0
     ;;
+  -V | --version)
+    version
+    exit $?
+    ;;
   "") ;;
   *)
     echo "error: unknown argument ${1@Q}" >&2
     usage >&2
+    echo "try 'install.sh --help' for more information." >&2
     exit 2
     ;;
 esac

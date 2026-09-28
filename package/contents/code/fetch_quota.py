@@ -2723,7 +2723,10 @@ HELP = f"""{USAGE_LINE}
 
 Poll each configured provider's usage endpoint and print one JSON object on
 stdout. Plasmashell polls this script every 2 minutes, so stdout stays pure
-JSON: diagnostics go to stderr.
+JSON: diagnostics go to stderr. The exit code is 0 whenever JSON was printed,
+including a config error (the JSON then carries "error": "config"). An
+argument this help does not list is a usage error: it exits 2, prints nothing
+on stdout, and names the offending argument on stderr.
 
 options:
   --print-config  print the resolved config (paths, knobs, key source) and exit
@@ -2817,10 +2820,13 @@ def main(argv: list[str] | None = None) -> None:
         # would otherwise print the config payload and exit 0, and a script
         # reading stdout would never learn its argument was wrong. The name
         # printed is the offending one, so `--print-config extra` does not
-        # report a valid flag as unknown.
+        # report a valid flag as unknown. The closing hint is the one the
+        # installer and print_smoke print, so a mistyped flag in this project
+        # says the same thing wherever it was typed.
         unexpected = args[1] if len(args) > 1 else args[0]
         print(
-            f"fetch_quota: unexpected argument {unexpected!r}\n{USAGE_LINE}",
+            f"fetch_quota: unexpected argument {unexpected!r}\n{USAGE_LINE}\n"
+            "try 'fetch_quota.py --help' for more information.",
             file=sys.stderr,
         )
         raise SystemExit(2)

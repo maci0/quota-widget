@@ -106,6 +106,10 @@ fails if a Breaking entry lands in this section without a matching next version.
   The key goes with the entries because it outlives them, and an entry restored
   from a backup is still readable under a key that stayed behind. It runs after
   the config check and before any provider, like `--print-config`.
+- `install.sh --version` prints the plugin id and the released version, read from
+  `package/metainfo.xml` at run time so the answer cannot drift from what
+  Discover and KNewStuff list. `install.sh --help` gained a summary and now
+  names every flag it accepts, like the other two scripts.
 
 ### Changed
 
@@ -161,6 +165,15 @@ fails if a Breaking entry lands in this section without a matching next version.
 - A cached entry is stamped with `PAYLOAD_SCHEMA`, and one written under another
   value is deleted rather than replayed into a panel built for a different
   payload shape.
+- The panel tooltip listed the providers with no reading joined them on a comma
+  written in QML, so a language that lists with a semicolon or a full stop
+  could not say so. The list goes through the same catalog separator as a
+  meter's spoken summary.
+- A mistyped or misplaced second argument to `install.sh` was dropped, so
+  `install.sh --uninstall typo` removed the widget on a line nobody read to the
+  end. A second argument is a usage error now, exit 2, and all three scripts
+  answer the same line the same way. The comment describing the old behavior
+  described behavior the script did not have.
 - A Grok token refresh raised `OverflowError` when the new expiry fell past the
   last instant the calendar holds, which is what a `QUOTA_WIDGET_NOW_MS` at the
   ceiling the fetcher accepts, or a lifetime far longer than the calendar, both
