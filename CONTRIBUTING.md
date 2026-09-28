@@ -14,16 +14,17 @@ Do not commit to `main`.
 Two tools come from the system, not from `pyproject.toml`: `uv` 0.12.13 or newer
 (CI pins `setup-uv` to that release, and `[tool.uv] required-version` in
 `pyproject.toml` makes an older one fail on the first command) and `shellcheck`,
-which the last step below needs. Everything else installs into `.venv` with the
-first command.
+which the last step of the gate needs. Everything else installs into `.venv`
+with the first command. `.python-version` names the interpreter.
 
 ```bash
 uv sync --extra dev --locked
-uv run black --check . && uv run ruff check . && uv run mypy && uv run pytest && shellcheck install.sh
+./scripts/gate.sh
 ```
 
-That is the whole gate, in CI order (`.github/workflows/test.yml` runs exactly
-these steps, and the workflow grants the token read-only access). Every step
+`scripts/gate.sh` is the whole gate in CI order, and `.github/workflows/test.yml`
+runs exactly that script, so a step belongs in the script rather than in a list
+maintained twice. The workflow grants the token read-only access. Every step
 must be green before a push.
 
 Adding a dependency: `uv add <pkg>` (or `uv add --optional dev <pkg>`), which

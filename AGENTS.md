@@ -67,6 +67,9 @@ through `flock`, `_atomic_write_json`, and the re-read in `_merge_write_json`.
 - `scripts/print_smoke.py`: prints a fetched JSON dump (`install.sh` writes
   `.scratch/smoke.json`). `install.sh` runs it as a standalone script, so it
   keeps its own `project_root()` walk instead of importing the test helper.
+- `scripts/gate.sh`: the gate, and the only copy of it. The workflow runs this
+  script rather than restating the steps, so a step added here is a step CI
+  runs. It pins `TZ` and `LC_ALL` and shellchecks itself.
 - `install.sh`: root symlink installer. Its root walk starts at the script
   behind whatever symlink named it, since a distro package or a link in
   `~/bin` runs it from outside the checkout.
@@ -174,13 +177,14 @@ Nothing personal reaches a log, a cache, or the emitted JSON: no email or sessio
 ## Gate
 
 ```bash
-uv sync --extra dev --locked
-uv run black --check .
-uv run ruff check .
-uv run mypy
-uv run pytest
-shellcheck install.sh
+./scripts/gate.sh
 ```
+
+That is the whole gate, in CI order, and `.github/workflows/test.yml` runs
+exactly that script: a step added to the gate belongs in `scripts/gate.sh`, not
+in a second list in this file and another in the workflow. The script pins
+`TZ=UTC` and `LC_ALL=C.UTF-8` for the same reason the job does, so a local run
+and a CI run answer the same questions.
 
 `ruff` selects its groups in `[tool.ruff.lint]`, defect groups (bugbear, blind
 except, builtin shadowing, bandit, comprehensions, datetime, type-checking
@@ -190,6 +194,11 @@ ones, and every gate step is blocking in CI. `mypy` is strict over the
 fetcher, `tests/`, and `scripts/`, with `warn_unreachable` on. A
 `noqa` carries its rule and a reason (`PGH` fails a bare one); the per-file
 ignores in `pyproject.toml` are scoped to `tests/` and say why.
+
+The interpreter the gate runs on is `.python-version`, at a full patch version:
+uv installs exactly that, so a new 3.12.x cannot change what the gate says
+without a commit. The lint and type targets are `py311` in `pyproject.toml`,
+which is the floor `requires-python` declares and `install.sh` reads.
 
 `.github/workflows/test.yml` pins each third-party action to the commit behind
 its version tag; `.github/dependabot.yml` opens the bump. Do not repin one to a

@@ -39,12 +39,8 @@ jobs:
           # uv sync is the slowest step; the cache key is uv.lock.
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-      # --locked, not --frozen: it asserts uv.lock still matches pyproject.toml,
-      # so a declared gate tool that never reached the lock fails here instead
-      # of running the previous one.
-      - run: uv sync --extra dev --locked
-      - run: uv run black --check .
-      - run: uv run ruff check .
-      - run: uv run mypy
-      - run: uv run pytest
-      - run: shellcheck install.sh
+      # The gate lives in scripts/gate.sh, so a step added there runs here too
+      # instead of in one of the two places it was written down. The script
+      # re-exports TZ and LC_ALL, which is what a local run needs to answer
+      # the same questions this run does.
+      - run: ./scripts/gate.sh

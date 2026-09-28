@@ -540,7 +540,7 @@ PlasmoidItem {
             return errorMsg ? statusText() : qsTr("Loading")
         const failed = failedNames()
         if (failed.length)
-            lines.push(qsTr("No reading for: %1").arg(joinSpoken(failed)))
+            lines.push(qsTr("No reading for: %1").arg(joinList(failed)))
         return lines.join("\n")
     }
 
@@ -594,7 +594,7 @@ PlasmoidItem {
     // has no number for, joined by a catalog separator. A comma written in QML
     // is a comma in every locale, and a language that lists with a semicolon,
     // a middle dot, or a full stop cannot say so.
-    function joinSpoken(parts) {
+    function joinList(parts) {
         return parts.filter(s => s !== "").reduce(
             (a, b) => qsTr("%1, %2").arg(a).arg(b))
     }
@@ -1337,7 +1337,7 @@ PlasmoidItem {
         // label, value, severity and reset time are not read twice.
         Accessible.role: Accessible.ProgressBar
         Accessible.name: row.label
-        Accessible.description: joinSpoken([
+        Accessible.description: joinList([
             qsTr("%1, %2 usage").arg(pct(row.util)).arg(utilSeverity(row.util)),
             row.detail,
             row.subdetail

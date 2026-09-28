@@ -339,7 +339,7 @@ class MainQmlAccessibilityTest(unittest.TestCase):
 
     def test_meters_expose_a_spoken_summary(self) -> None:
         self.assertIn("Accessible.role: Accessible.ProgressBar", QML_SOURCE)
-        self.assertIn("Accessible.description: joinSpoken([", QML_SOURCE)
+        self.assertIn("Accessible.description: joinList([", QML_SOURCE)
 
     def test_panel_widget_is_keyboard_operable(self) -> None:
         self.assertIn("Keys.onSpacePressed: root.expanded = !root.expanded", QML_SOURCE)

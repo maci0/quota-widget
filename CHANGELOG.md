@@ -140,9 +140,21 @@ fails if a Breaking entry lands in this section without a matching next version.
 - A vendor currency that is not an ISO 4217 code falls back to the default
   currency instead of raising a `RangeError` out of `toLocaleString`, which
   blanked the label that asked for it.
+- The gate lives in `scripts/gate.sh` and the workflow runs that script, so the
+  step list is written once instead of in the workflow, the README, and
+  `AGENTS.md` separately. The script pins `TZ=UTC` and `LC_ALL=C.UTF-8` the way
+  the job does, so a local run and a CI run answer the same questions.
+- `.python-version` names a full patch version. `3.12` left the interpreter
+  the gate type checks and tests under at whatever the latest 3.12.x was, so a
+  new patch could change what the gate says with no commit to point at.
 
 ### Fixed
 
+- The tooltip's "No reading for:" line joined the provider names on a literal
+  `", "`, a comma in every locale, and failed the gate's own rule that no
+  sentence is assembled from a translated phrase and a separator written in
+  QML. The names go through the catalog separator now, the one the meter's
+  spoken summary already used.
 - The traceback a crashing provider writes to the session journal spelled the
   home directory out. `traceback.print_exc` writes to stderr itself, past the
   redaction every `warn` line goes through, and each frame names a file under

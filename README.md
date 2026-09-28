@@ -102,12 +102,18 @@ uv sync --extra dev --locked
 
 `--locked` is what CI uses: it fails when `uv.lock` no longer matches
 `pyproject.toml`, so a stale lock is caught here rather than after a push.
+`.python-version` names the interpreter, at a full patch version, so the gate
+runs the same Python on every machine.
 
-The full gate, same order as CI:
+The full gate, which is the same script CI runs:
 
 ```bash
-uv run black --check . && uv run ruff check . && uv run mypy && uv run pytest && shellcheck install.sh
+./scripts/gate.sh
 ```
+
+It syncs the locked dev environment, then black, ruff, mypy, pytest, and
+shellcheck, with `TZ=UTC` and `LC_ALL=C.UTF-8` so a local run and a CI run
+answer the same questions.
 
 While iterating, one file or one test at a time:
 
@@ -116,7 +122,7 @@ uv run pytest tests/test_fetch_quota.py -k cursor
 uv run pytest tests/test_fetch_quota.py::IsoToMsTest
 ```
 
-Tests are hermetic: no network, no credentials, no home-directory state. `tests/conftest.py` points the fetcher at a temp home and cache before collection, and fails any test that leaves it configured against the real one. `uv run pytest` alone runs the whole suite in a few seconds.
+Tests are hermetic: no network, no credentials, no home-directory state. `tests/conftest.py` points the fetcher at a temp home and cache before collection, and fails any test that leaves it configured against the real one. `uv run pytest` alone runs the whole suite; the seeded fuzzer is most of the minute.
 
 Conventions, branching, and how to add a test or a dependency: [CONTRIBUTING.md](CONTRIBUTING.md).
 What changed in each release, and what breaks when upgrading: [CHANGELOG.md](CHANGELOG.md).
