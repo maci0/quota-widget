@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime as dt
+import io
 import json
 import os
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import fetch_quota
 import print_smoke
+
+# Fixed clock for every test that cares about expiry or replay.
+PINNED_NOW_MS = 1_777_000_000_000
 
 
 class CodexWindowTest(unittest.TestCase):
@@ -83,14 +87,54 @@ class RetryAfterTest(unittest.TestCase):
         self.assertIsNone(fetch_quota.parse_retry_after(None))
         self.assertIsNone(fetch_quota.parse_retry_after("nope"))
 
-    def test_parses_http_date(self) -> None:
-        when = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=8)
+    def test_parses_http_date_against_the_pinned_clock(self) -> None:
+        when = fetch_quota.now_utc() + dt.timedelta(seconds=8)
         header = when.strftime("%a, %d %b %Y %H:%M:%S GMT")
         got = fetch_quota.parse_retry_after(header)
         self.assertIsNotNone(got)
         assert got is not None
         self.assertGreater(got, 5)
         self.assertLess(got, 12)
+
+    def test_http_date_in_the_past_is_zero(self) -> None:
+        when = fetch_quota.now_utc() - dt.timedelta(seconds=30)
+        header = when.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        self.assertEqual(fetch_quota.parse_retry_after(header), 0.0)
+
+
+class ClockTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.addCleanup(os.environ.pop, fetch_quota.NOW_MS_ENV, None)
+        os.environ[fetch_quota.NOW_MS_ENV] = str(PINNED_NOW_MS)
+
+    def test_env_pins_the_clock(self) -> None:
+        self.assertEqual(fetch_quota.now_ms(), PINNED_NOW_MS)
+        self.assertEqual(
+            fetch_quota.now_utc(),
+            dt.datetime.fromtimestamp(PINNED_NOW_MS / 1000, dt.UTC),
+        )
+
+    def test_malformed_override_fails_loud(self) -> None:
+        os.environ[fetch_quota.NOW_MS_ENV] = "yesterday"
+        with self.assertRaises(ValueError) as ctx:
+            fetch_quota.now_ms()
+        self.assertIn(fetch_quota.NOW_MS_ENV, str(ctx.exception))
+
+    def test_cache_expires_exactly_at_the_max_age(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        os.environ["QUOTA_WIDGET_CACHE"] = tmp.name
+        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
+        fetch_quota._write_provider_cache("grok", {"ok": True, "plan": "Grok"})
+
+        os.environ[fetch_quota.NOW_MS_ENV] = str(
+            PINNED_NOW_MS + fetch_quota.CACHE_MAX_AGE_S * 1000
+        )
+        self.assertIsNotNone(fetch_quota._read_provider_cache("grok"))
+        os.environ[fetch_quota.NOW_MS_ENV] = str(
+            PINNED_NOW_MS + (fetch_quota.CACHE_MAX_AGE_S + 1) * 1000
+        )
+        self.assertIsNone(fetch_quota._read_provider_cache("grok"))
 
 
 def _fake_jwt(sub: str) -> str:
@@ -208,7 +252,7 @@ class ClaudeRateLimitTest(unittest.TestCase):
             return 200, {"five_hour": {"utilization": 3, "resets_at": None}}, None
 
         with (
-            patch.object(time, "sleep", sleeps.append),
+            patch.object(fetch_quota, "sleep", sleeps.append),
             patch.object(fetch_quota, "fetch_http", fake_http),
         ):
             out = fetch_quota.fetch_claude()
@@ -570,6 +614,96 @@ class PrintSmokeTest(unittest.TestCase):
         self.assertEqual(
             print_smoke._load(dump), {"claude": {"ok": True, "plan": "Pro"}}
         )
+
+
+class ReplayTest(unittest.TestCase):
+    """One pinned clock value plus one fixed HTTP script must reproduce the
+    poll byte-for-byte, cache writes included."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        os.environ["QUOTA_WIDGET_CACHE"] = str(self.root)
+        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
+        os.environ[fetch_quota.NOW_MS_ENV] = str(PINNED_NOW_MS)
+        self.addCleanup(lambda: os.environ.pop(fetch_quota.NOW_MS_ENV, None))
+
+        self._rebind("CLAUDE_CRED", {"claudeAiOauth": {"accessToken": _fake_jwt("s")}})
+        self._rebind("CODEX_AUTH", {"tokens": {"access_token": _fake_jwt("s")}})
+        self._rebind(
+            "GROK_AUTH",
+            {"x": {"key": "tok", "oidc_client_id": "c", "refresh_token": "r"}},
+        )
+        self._rebind(
+            "CURSOR_AUTH_JSON", {"accessToken": _fake_jwt("auth0|user_01TEST")}
+        )
+
+    def _rebind(self, name: str, obj: object) -> None:
+        auth = self.root / "auth"
+        auth.mkdir(exist_ok=True)
+        path = auth / f"{name.lower()}.json"
+        path.write_text(json.dumps(obj))
+        original = getattr(fetch_quota, name)
+        setattr(fetch_quota, name, path)
+        self.addCleanup(setattr, fetch_quota, name, original)
+
+    def _fake_http(
+        self,
+        url: str,
+        headers: dict[str, str],
+        *,
+        timeout: float = 12.0,
+        data: bytes | None = None,
+        method: str | None = None,
+    ) -> tuple[int, object, object]:
+        if "anthropic" in url:
+            return 200, {"limits": [{"kind": "weekly_all", "percent": 12}]}, None
+        if "cursor.com" in url:
+            return 200, {"membershipType": "pro", "individualUsage": {}}, None
+        return 200, {"rate_limit": {"primary_window": {"used_percent": 5}}}, None
+
+    def _fake_json(
+        self,
+        url: str,
+        headers: dict[str, str],
+        *,
+        timeout: float = 12.0,
+        data: bytes | None = None,
+        method: str | None = None,
+    ) -> tuple[int, object]:
+        if "grok.com" not in url:
+            return 200, None
+        cfg = (
+            {"isUnifiedBillingUser": True, "currentPeriod": {"type": "WEEKLY"}}
+            if "format=credits" in url
+            else {"used": 250, "monthlyLimit": 1000}
+        )
+        return 200, {"config": cfg}
+
+    def _poll(self) -> str:
+        out = io.StringIO()
+        with (
+            patch.object(fetch_quota, "fetch_http", self._fake_http),
+            patch.object(fetch_quota, "fetch_json", self._fake_json),
+            contextlib.redirect_stdout(out),
+            self.assertRaises(SystemExit),
+        ):
+            fetch_quota.main()
+        return out.getvalue()
+
+    def test_same_inputs_replay_byte_for_byte(self) -> None:
+        first = self._poll()
+        second = self._poll()
+        self.assertEqual(first, second)
+        self.assertEqual(json.loads(first)["fetched_ms"], PINNED_NOW_MS)
+
+    def test_replay_does_not_depend_on_a_running_cache(self) -> None:
+        first = self._poll()
+        for cached in self.root.glob("*.json"):
+            if cached.name.startswith(("claude", "cursor", "grok", "codex")):
+                cached.unlink()
+        self.assertEqual(self._poll(), first)
 
 
 if __name__ == "__main__":

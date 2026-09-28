@@ -40,6 +40,9 @@ from urllib.request import pathname2url
 # Unversioned HTTP JSON: keys and nesting change by plan, host, and API revision.
 JsonDict: TypeAlias = dict[str, Any]
 
+# Overrides every wall-clock read in this module; see now_ms().
+NOW_MS_ENV = "QUOTA_WIDGET_NOW_MS"
+
 
 def _as_dict(value: object) -> JsonDict:
     return value if isinstance(value, dict) else {}
@@ -47,6 +50,28 @@ def _as_dict(value: object) -> JsonDict:
 
 def _http_retryable(status: int) -> bool:
     return status in (429, 503) or status >= 500
+
+
+def now_ms() -> int:
+    """Epoch milliseconds. QUOTA_WIDGET_NOW_MS pins the clock to a fixed value,
+    so a whole poll replays byte-for-byte; unset in production, real clock."""
+    override = os.environ.get(NOW_MS_ENV)
+    if override is None:
+        return int(time.time() * 1000)
+    try:
+        return int(override)
+    except ValueError:
+        raise ValueError(
+            f"{NOW_MS_ENV}={override!r} is not an integer epoch-ms value"
+        ) from None
+
+
+def now_utc() -> dt.datetime:
+    return dt.datetime.fromtimestamp(now_ms() / 1000, dt.UTC)
+
+
+def sleep(seconds: float) -> None:
+    time.sleep(seconds)
 
 
 CLAUDE_CRED = Path.home() / ".claude" / ".credentials.json"
@@ -145,7 +170,7 @@ def parse_retry_after(value: str | None) -> float | None:
         when = email.utils.parsedate_to_datetime(s)
         if when.tzinfo is None:
             when = when.replace(tzinfo=dt.UTC)
-        return max(0.0, (when - dt.datetime.now(dt.UTC)).total_seconds())
+        return max(0.0, (when - now_utc()).total_seconds())
     except (TypeError, ValueError, OverflowError):
         return None  # HTTP-date present but not parseable
 
@@ -173,7 +198,7 @@ def _read_provider_cache(
         return None
     if not payload.get("ok"):
         return None
-    now = int(time.time() * 1000)
+    now = now_ms()
     if now - int(ts) > max_age_s * 1000:
         return None
     return payload
@@ -191,7 +216,7 @@ def _write_provider_cache(name: str, payload: JsonDict) -> None:
             with os.fdopen(fd, "w") as f:
                 json.dump(
                     {
-                        "cached_ms": int(dt.datetime.now(dt.UTC).timestamp() * 1000),
+                        "cached_ms": now_ms(),
                         "payload": payload,
                     },
                     f,
@@ -276,8 +301,7 @@ def _claude_expired(oauth: JsonDict, skew_ms: int = TOKEN_SKEW_MS) -> bool:
     if not isinstance(exp, (int, float)):
         return False
     ts_ms = int(exp if exp > MS_EPOCH_CUTOFF else exp * 1000)
-    now_ms = int(dt.datetime.now(dt.UTC).timestamp() * 1000)
-    return ts_ms <= now_ms + skew_ms
+    return ts_ms <= now_ms() + skew_ms
 
 
 def _refresh_claude(cred: JsonDict) -> JsonDict | None:
@@ -324,9 +348,7 @@ def _refresh_claude(cred: JsonDict) -> JsonDict | None:
         new_oauth["refreshToken"] = tok["refresh_token"]
     expires_in = tok.get("expires_in")
     if isinstance(expires_in, (int, float)):
-        new_oauth["expiresAt"] = int(
-            (dt.datetime.now(dt.UTC).timestamp() + int(expires_in)) * 1000
-        )
+        new_oauth["expiresAt"] = now_ms() + int(expires_in) * 1000
     new_cred = dict(cred)
     new_cred["claudeAiOauth"] = new_oauth
     try:
@@ -378,7 +400,7 @@ def fetch_claude() -> JsonDict:
     if status in (429, 503):
         wait = parse_retry_after(hdrs.get("Retry-After") if hdrs else None)
         if wait is not None and RETRY_AFTER_MIN_S <= wait <= RETRY_AFTER_MAX_S:
-            time.sleep(wait)
+            sleep(wait)
             status, data, hdrs = fetch_http(CLAUDE_URL, headers)
     if status == 401:
         cached = _stale_cache("claude")
@@ -525,8 +547,7 @@ def _token_expired(entry: JsonDict, skew_s: int = TOKEN_SKEW_S) -> bool:
         return False
     try:
         when = dt.datetime.fromisoformat(str(exp).replace("Z", "+00:00"))
-        now = dt.datetime.now(dt.UTC)
-        return when <= now + dt.timedelta(seconds=skew_s)
+        return when <= now_utc() + dt.timedelta(seconds=skew_s)
     except (TypeError, ValueError, OSError):
         return False
 
@@ -576,7 +597,7 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
         new_entry["refresh_token"] = tok["refresh_token"]
     expires_in = tok.get("expires_in")
     if isinstance(expires_in, (int, float)):
-        exp = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=int(expires_in))
+        exp = now_utc() + dt.timedelta(seconds=int(expires_in))
         new_entry["expires_at"] = exp.isoformat().replace("+00:00", "Z")
 
     # Persist so subsequent polls (and the Grok CLI) keep working.
@@ -842,7 +863,7 @@ def _codex_window(block: JsonDict | None, name: str) -> JsonDict | None:
     else:
         after = block.get("reset_after_seconds")
         if isinstance(after, (int, float)):
-            resets_ms = int((dt.datetime.now(dt.UTC).timestamp() + float(after)) * 1000)
+            resets_ms = now_ms() + int(float(after) * 1000)
 
     return {
         "label": _codex_window_label(window_s_i, name),
@@ -902,7 +923,7 @@ def _refresh_codex(auth: JsonDict) -> JsonDict | None:
 
     new_auth = dict(auth)
     new_auth["tokens"] = new_tokens
-    new_auth["last_refresh"] = dt.datetime.now(dt.UTC).isoformat()
+    new_auth["last_refresh"] = now_utc().isoformat()
 
     try:
         _atomic_write_json(CODEX_AUTH, new_auth)
@@ -932,8 +953,7 @@ def fetch_codex() -> JsonDict:
     )
 
     exp_ms = _jwt_exp_ms(access)
-    now_ms = int(dt.datetime.now(dt.UTC).timestamp() * 1000)
-    if exp_ms is not None and exp_ms <= now_ms + TOKEN_SKEW_MS:
+    if exp_ms is not None and exp_ms <= now_ms() + TOKEN_SKEW_MS:
         refreshed = _refresh_codex(auth)
         if refreshed:
             auth = refreshed
@@ -1353,7 +1373,7 @@ def main() -> None:
             "cursor": cursor,
             "grok": grok,
             "codex": codex,
-            "fetched_ms": int(dt.datetime.now(dt.UTC).timestamp() * 1000),
+            "fetched_ms": now_ms(),
         }
     )
 

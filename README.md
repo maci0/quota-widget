@@ -66,6 +66,10 @@ python3 scripts/print_smoke.py .scratch/smoke.json
 
 Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.11+ (`uv` installs it).
 
+Two env vars make a run reproducible. `QUOTA_WIDGET_CACHE` relocates the payload cache, and `QUOTA_WIDGET_NOW_MS` pins the clock to a fixed epoch-milliseconds value, so the same HTTP responses produce byte-identical output on every run. Both are for tests and smoke runs; production leaves them unset.
+
+Dev gate (`uv`):
+
 ```bash
 uv sync --extra dev --frozen
 ```

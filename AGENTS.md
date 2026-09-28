@@ -10,6 +10,8 @@ KDE Plasma 6 plasmoid (`com.maci.quota-widget`). QML UI in `package/contents/ui/
 
 Plasmashell runs `python3 package/contents/code/fetch_quota.py`. That path is system Python on purpose: the widget has no venv at display time. Do not switch the QML command to `uv run`.
 
+Every wall-clock read goes through `now_ms()` / `now_utc()`; `QUOTA_WIDGET_NOW_MS` pins the clock so a poll replays byte-for-byte. Call `time.time()` or `datetime.now()` directly anywhere else in the fetcher and the replay guarantee is gone.
+
 Dev and CI use `uv` (`uv run pytest`, `uv run black`, `uv run ruff`, `uv run mypy`).
 
 ## Layout
