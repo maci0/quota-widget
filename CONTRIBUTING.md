@@ -32,9 +32,9 @@ review can follow. Never hand-edit it.
 
 The fetcher plasmashell runs is stdlib only, so a new runtime dependency lands on
 a machine with no venv. Do not add one for a single function. Every dev tool
-carries an upper bound below its next major (`black>=24.10.0,<27` and its
-siblings), because `uv add` writes an uncapped range; restore the cap in the same
-commit.
+is floored at the release the tree was last verified against and capped below its
+next major (`black>=26.5,<27` and its siblings), because `uv add` writes an
+uncapped range; restore both ends in the same commit, then `uv lock`.
 
 ## Releasing
 

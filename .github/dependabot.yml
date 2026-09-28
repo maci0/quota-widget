@@ -8,3 +8,13 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "ci"
+  # The gate tools are the only third-party code in the tree, and a CVE in one
+  # of them surfaces only as a failing gate step. Dependabot bumps them inside
+  # the floor and cap `pyproject.toml` declares and refreshes `uv.lock` with
+  # the review that a lock change needs.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build"

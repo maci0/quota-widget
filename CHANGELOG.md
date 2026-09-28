@@ -155,6 +155,12 @@ prints, so a fetcher and UI shipped together never break each other.
 - A Cursor `403` is reported as `http-403` instead of `http-401`. A 401 renders
   as "Sign in to Cursor", which a rejected request is not; a 403 renders as
   "Unavailable".
+- The dev tools are floored at the release the tree was verified against
+  (`black>=26.5,<27`, `mypy>=2.3,<3`, `pytest>=9.1,<10`, `ruff>=0.16,<1`). The
+  old ranges admitted black 24 and 25, mypy 1.x, and pytest 8, so a re-lock
+  could swap the formatter, type checker, or test runner under a green gate.
+  Dependabot now watches the `uv` ecosystem too, and a test fails when a
+  requirement loses its floor or its cap.
 
 ## [1.1.0] - 2026-09-28
 

@@ -7,14 +7,17 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 
 # The fetcher that plasmashell runs is stdlib only, so every dependency here is
-# a gate tool and none of it ships. Each is capped below its next major so a
-# re-lock cannot pull an unreviewed major into the gate.
+# a gate tool and none of it ships. Each is floored at the reviewed release and
+# capped below its next major, so a re-lock cannot pull an unreviewed major into
+# the gate: black 25 and 26 restyle code, mypy 2 drops 1.x defaults, and pytest
+# 9 changes collection and warning behavior, so a wide range resolves to a tool
+# that fails or silently rewrites the gate.
 [project.optional-dependencies]
 dev = [
-    "black>=24.10.0,<27",
-    "mypy>=1.13.0,<3",
-    "pytest>=8.3.0,<10",
-    "ruff>=0.8.0,<1",
+    "black>=26.5,<27",
+    "mypy>=2.3,<3",
+    "pytest>=9.1,<10",
+    "ruff>=0.16,<1",
 ]
 
 [tool.black]
