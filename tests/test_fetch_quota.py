@@ -918,10 +918,12 @@ class CursorStateDbTest(unittest.TestCase):
             # cost an fsync per test and buys this suite nothing.
             con.execute("PRAGMA journal_mode = MEMORY")
             con.execute("PRAGMA synchronous = OFF")
+            # sqlite takes no placeholder for an identifier, so the table name
+            # is spliced in. It is a test literal, never provider input.
             con.execute(f"CREATE TABLE {table} (key TEXT, value BLOB)")
             con.executemany(
-                f"INSERT INTO {table} (key, value) VALUES (?, ?)",
-                [(k, v) for k, v in rows.items()],
+                f"INSERT INTO {table} (key, value) VALUES (?, ?)",  # noqa: S608
+                list(rows.items()),
             )
         con.close()
 

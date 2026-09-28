@@ -16,7 +16,7 @@ A provider timestamp without an offset is UTC. Parse it with `iso_to_utc()`, nev
 
 Every credential, cache, and state file is UTF-8 JSON, read through `fetch_quota._read_text()` and written by `_atomic_write_json()`. Never `Path.read_text()` bare: plasmashell can start under a C locale where `open()` defaults to ASCII, and the merge-write fallback would then rewrite a shared store without the fields it could not decode.
 
-Dev and CI use `uv` (`uv run pytest`, `uv run black`, `uv run ruff`, `uv run mypy`).
+Dev and CI use `uv`. The gate is at the end of this file; run it after any edit.
 
 ## Polling
 
@@ -24,7 +24,7 @@ The QML owns the fetcher process. One run at a time: `exec.poll()` returns early
 
 ## Layout
 
-- `package/`: plasmoid (metadata, QML, fetcher, `contents/icons/com.maci.quota-widget.svg`)
+- `package/`: plasmoid (metadata, QML, fetcher, `contents/config/main.xml` defaults, `contents/icons/com.maci.quota-widget.svg`)
 - `docs/THREAT_MODEL.md`: entry points, trust boundaries, assets, and the threats per boundary
 - `tests/`: pytest
 - `tests/test_fuzz_parsers.py`: seeded randomized fuzzing of the parsers fed
@@ -72,7 +72,12 @@ Fetcher talks to each vendor's own usage endpoint with credentials already on di
 
 ## Caches
 
-Two layers hold a last good reading. `~/.cache/quota-widget/<provider>.json` is written by the fetcher and read only by `_read_provider_cache`; the plasmoid keeps its own copy in `mergeProv` for the same window. Every payload carries the instant the reading was taken in `fetched_ms`, and both layers age a value by that stamp, not by when it arrived, so replaying a cached payload never buys a second window. Both expire at `DEFAULT_CACHE_MAX_AGE_S` (24 h, overridable through `QUOTA_WIDGET_CACHE_MAX_AGE_S`), an expired fetcher entry is deleted when it is read, and the entries are scoped to one account id (`_account_id`, hashed) so a second account signing in on the same machine never reads the first one's numbers. Change the window in one place: `DEFAULT_CACHE_MAX_AGE_S` in `fetch_quota.py` and `staleKeepMs` in `main.qml`.
+Two layers hold a last good reading: the fetcher writes `~/.cache/quota-widget/<provider>.json` and reads it back only through `_read_provider_cache`, and the plasmoid keeps its own copy in `mergeProv` for the same window.
+
+- Age a value by `fetched_ms`, the instant the reading was taken, never by when the payload arrived. Replaying a cached payload must not buy a second window.
+- Both layers expire at 24 h: `DEFAULT_CACHE_MAX_AGE_S` in `fetch_quota.py` (overridable through `QUOTA_WIDGET_CACHE_MAX_AGE_S`) and `staleKeepMs` in `main.qml`. Change the window in both places, never one.
+- An expired fetcher entry is deleted when it is read.
+- Entries are scoped to one account id (`_account_id`, hashed), so a second account signing in on the same machine never reads the first one's numbers.
 
 Nothing personal reaches a log, a cache, or the emitted JSON: no email or session token leaves the function that reads it, and a failed HTTP body is discarded rather than kept. The provider cache holds only what the UI renders, plus the hashed account id used to scope it. README's "Data and privacy" section is the user-facing statement of this; change it with the code.
 
