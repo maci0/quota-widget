@@ -178,6 +178,17 @@ prints, so a fetcher and UI shipped together never break each other.
 
 ### Changed
 
+- The three text sizes the widget draws (the panel reading, a card title, the
+  number inside a gauge) are named steps in the `main.qml` token block instead
+  of three unrelated factors typed at their call sites, and the panel reading is
+  now the largest of the three. The panel rule and the tightest gap in a meter
+  row are named there too, beside `markThickness`.
+- A poll that produced no payload reads "Quota poll did not run" rather than
+  "Offline": a missing `python3`, an unreadable fetcher, and a crash are none of
+  them a network condition.
+- The panel reads "n/a" (the word a meter already uses for a missing value)
+  instead of a bare "!", and drops the label under it when no provider answered,
+  so it no longer claims a reading it does not have.
 - `pyproject.toml` declares `[tool.uv] required-version = ">=0.12.13"`, the
   release CI pins, so a uv too old for the lockfile's revision 3 stops with a
   version message on the first command.

@@ -59,6 +59,20 @@ PlasmoidItem {
     readonly property int markThickness: 3
     readonly property int barThickness: 8
 
+    // Type scale, as multiples of the theme body size. The panel reading is
+    // the largest text the widget draws (it is the only text a panel shows),
+    // a card title sits one step below it, and the number inside a gauge
+    // matches the label under it. Three unrelated factors typed at three call
+    // sites are what a flat hierarchy looks like, so the steps are named here.
+    readonly property real panelValueScale: 1.3
+    readonly property real cardTitleScale: 1.15
+    readonly property real gaugeValueScale: 1.05
+
+    // The panel's rule under the reading, and the tightest gap inside a
+    // meter row.
+    readonly property int ruleThickness: 2
+    readonly property int tightSpacing: 2
+
     // Minor-unit amounts reach the UI without a currency code (the Cursor
     // usage API sends bare cents). Every number they came from is a USD
     // amount; the locale still decides the symbol, its side, and the grouping.
@@ -376,7 +390,10 @@ PlasmoidItem {
         if (code === "no-token" || code === "http-401")
             return signIn
         if (code === "net") return qsTr("Network error")
-        if (code === "exec") return qsTr("Offline")
+        // "exec" is a run that never produced a payload: python3 missing, the
+        // fetcher unreadable, a crash on the way in. The network is not what
+        // failed, so the panel must not say it did.
+        if (code === "exec") return qsTr("Quota poll did not run")
         if (code === "http-429") return qsTr("Rate-limited")
         if (code === "empty") return qsTr("No provider data returned")
         if (code === "config" && root.configError !== "")
@@ -478,7 +495,7 @@ PlasmoidItem {
         ColumnLayout {
             id: compactCol
             anchors.centerIn: parent
-            spacing: 2
+            spacing: root.tightSpacing
 
             PlasmaComponents3.Label {
                 Layout.alignment: Qt.AlignHCenter
@@ -502,7 +519,7 @@ PlasmoidItem {
                         var g = compactPct(gp.util)
                         if (g) return g
                     }
-                    return root.errorMsg ? "!" : "…"
+                    return root.errorMsg ? qsTr("n/a") : "…"
                 }
                 color: root.firstLoad
                     ? Kirigami.Theme.neutralTextColor
@@ -510,12 +527,17 @@ PlasmoidItem {
                         ? Kirigami.Theme.negativeTextColor
                         : utilColor(maxUtil()))
                 font.bold: true
-                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.1
+                font.pointSize: Kirigami.Theme.defaultFont.pointSize * root.panelValueScale
                 font.features: { "tnum": 1 }
                 horizontalAlignment: Text.AlignHCenter
             }
             PlasmaComponents3.Label {
                 Layout.alignment: Qt.AlignHCenter
+                // With no provider answered there is no countdown to show, and
+                // the generic "quota" label under an "n/a" would claim a
+                // reading the panel does not have. The tooltip names the
+                // failure; the panel says it has no number.
+                visible: !(root.errorMsg !== "" && root.noData())
                 text: {
                     if (root.claude && root.claude.ok && root.claude.session)
                         return remainStr(root.claude.session.resets_ms)
@@ -536,8 +558,8 @@ PlasmoidItem {
             }
             Rectangle {
                 Layout.fillWidth: true
-                Layout.topMargin: 1
-                Layout.preferredHeight: 2
+                Layout.topMargin: root.tightSpacing
+                Layout.preferredHeight: root.ruleThickness
                 color: root.primaryMarkColor()
             }
         }
@@ -1006,7 +1028,7 @@ PlasmoidItem {
             PlasmaComponents3.Label {
                 text: card.title
                 font.bold: true
-                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.15
+                font.pointSize: Kirigami.Theme.defaultFont.pointSize * root.cardTitleScale
                 Accessible.role: Accessible.Heading
                 Accessible.name: card.title
             }
@@ -1068,7 +1090,7 @@ PlasmoidItem {
         readonly property real startDeg: 135
         readonly property real maxSweep: 270
 
-        spacing: root.gaugeView ? Kirigami.Units.smallSpacing : 2
+        spacing: root.gaugeView ? Kirigami.Units.smallSpacing : root.tightSpacing
         width: root.gaugeView ? gaugeSize : (parent ? parent.width : gaugeSize)
         implicitWidth: root.gaugeView ? gaugeSize : (parent ? parent.width : gaugeSize)
         Layout.alignment: root.gaugeView ? Qt.AlignHCenter : Qt.AlignLeft
@@ -1208,7 +1230,7 @@ PlasmoidItem {
                 anchors.verticalCenterOffset: row.ring * 0.15
                 text: pct(row.util)
                 font.bold: true
-                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.05
+                font.pointSize: Kirigami.Theme.defaultFont.pointSize * root.gaugeValueScale
                 font.features: { "tnum": 1 }
                 color: utilColor(row.util)
                 Accessible.ignored: true

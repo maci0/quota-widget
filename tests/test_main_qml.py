@@ -188,6 +188,20 @@ class MainQmlAccessibilityTest(unittest.TestCase):
         self.assertIn("root.fetching = false", QML_SOURCE)
         self.assertIn("PlasmaComponents3.BusyIndicator", QML_SOURCE)
 
+    def test_a_run_that_produced_no_payload_is_not_called_offline(self) -> None:
+        # "exec" covers a missing python3, an unreadable fetcher, and a crash
+        # on the way in. None of those is a network condition, so saying
+        # "Offline" points the reader at the wrong thing to check.
+        self.assertNotIn("Offline", QML_SOURCE)
+        self.assertIn('qsTr("Quota poll did not run")', QML_SOURCE)
+
+    def test_the_panel_says_it_has_no_reading(self) -> None:
+        # A bare "!" in a 40 pixel panel is punctuation, not a status, and no
+        # translator can read it. "n/a" is what the meter already says when a
+        # value is missing, so the panel and the popup use one word for it.
+        self.assertNotIn('root.errorMsg ? "!"', QML_SOURCE)
+        self.assertIn('root.errorMsg ? qsTr("n/a")', QML_SOURCE)
+
     def test_failures_use_one_wording(self) -> None:
         # The banner and the cards described the same failure differently
         # ("Error" vs "Rate-limited"); both go through errText now.
@@ -280,6 +294,37 @@ class MainQmlStaleWindowTest(unittest.TestCase):
             QML_SOURCE,
         )
         self.assertIn("property int staleKeepMs: defaultStaleKeepMs", QML_SOURCE)
+
+
+class MainQmlTokenTest(unittest.TestCase):
+    """The token block is the widget's type scale. A factor typed at a call
+    site is a fourth scale nobody chose, so the steps are pinned here."""
+
+    def test_no_type_size_is_a_literal_factor(self) -> None:
+        # The panel reading, the card titles, and the gauge numbers each
+        # carried their own factor (1.1, 1.15, 1.05). None of them related to
+        # the next, which is what a hierarchy looks like when no one picked
+        # one: the card title was nearly the size of the panel's only number.
+        self.assertEqual(
+            re.findall(r"pointSize:\s*[^,\n]*\*\s*[0-9.]+", QML_SOURCE), []
+        )
+
+    def test_the_scale_names_every_level_it_draws(self) -> None:
+        for token in ("panelValueScale", "cardTitleScale", "gaugeValueScale"):
+            self.assertIn(f"readonly property real {token}:", QML_SOURCE)
+        # The panel reading leads: it is the only text a panel shows.
+        self.assertIn("* root.panelValueScale", QML_SOURCE)
+        self.assertIn("* root.cardTitleScale", QML_SOURCE)
+        self.assertIn("* root.gaugeValueScale", QML_SOURCE)
+
+    def test_the_panel_rule_has_no_width_of_its_own(self) -> None:
+        # The rule under the panel reading is the same mark as a card's accent
+        # bar, at a smaller weight; a literal 2 next to markThickness is two
+        # places to change it.
+        self.assertIn("readonly property int ruleThickness: 2", QML_SOURCE)
+        self.assertIn("readonly property int tightSpacing: 2", QML_SOURCE)
+        self.assertNotIn("Layout.preferredHeight: 2", QML_SOURCE)
+        self.assertNotIn("spacing: 2", QML_SOURCE)
 
 
 if __name__ == "__main__":

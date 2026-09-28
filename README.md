@@ -122,8 +122,8 @@ Right-click the widget, Configure, General. Stored by plasmashell in
 | --- | --- | --- | --- |
 | `gaugeView` | `false` | | draw circular gauges instead of bars |
 | `pollSeconds` | `120` | 30 to 3600 | how often the fetcher runs |
-| `utilWarnAt` | `70` | 1 to 99 | percent used before a meter turns amber |
-| `utilCritAt` | `90` | 1 to 100 | percent used before a meter turns red |
+| `utilWarnAt` | `70` | 1 to 99 | percent used before a meter is labelled "high" |
+| `utilCritAt` | `90` | 1 to 100 | percent used before a meter is labelled "critical" |
 
 Out-of-range values in that file are clamped to the range above, not rejected.
 
