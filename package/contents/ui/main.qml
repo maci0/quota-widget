@@ -46,14 +46,8 @@ PlasmoidItem {
     readonly property int pollTimeoutMs: 10 * 60 * 1000
 
     // ── tokens ───────────────────────────────────────────────────────────
-    // Type scale, dimming steps, and meter geometry. Every view reads these
-    // so the panel, the popup, and the gauges stay on one scale.
-    readonly property real scaleTitle: 1.15
-    readonly property real scaleReading: 1.1
-    readonly property real scaleGaugeRead: 1.05
-    readonly property real dim: 0.8
-    readonly property real dimMuted: 0.7
-    readonly property real dimFaint: 0.55
+    // Meter geometry and opacity. Every view reads these so the panel, the
+    // popup, and the gauges stay on one scale.
     readonly property real trackOpacity: 0.2
     readonly property real inactiveMarkOpacity: 0.35
     readonly property int markThickness: 3
@@ -370,31 +364,20 @@ PlasmoidItem {
 
     function maxUtil() {
         let m = 0
+        const take = (u) => {
+            const n = Number(u)
+            if (isFinite(n)) m = Math.max(m, n)
+        }
         if (claude && claude.ok && claude.session && claude.session.util != null)
-            m = Math.max(m, Number(claude.session.util) || 0)
-        if (claude && claude.ok && claude.weekly) {
-            for (let i = 0; i < claude.weekly.length; i++) {
-                const u = Number(claude.weekly[i].util)
-                if (isFinite(u)) m = Math.max(m, u)
-            }
-        }
-        if (cursor && cursor.ok && cursor.periods) {
-            for (let i = 0; i < cursor.periods.length; i++) {
-                const u = Number(cursor.periods[i].util)
-                if (isFinite(u)) m = Math.max(m, u)
-            }
-        }
-        if (codex && codex.ok && codex.windows) {
-            for (let i = 0; i < codex.windows.length; i++) {
-                const u = Number(codex.windows[i].util)
-                if (isFinite(u)) m = Math.max(m, u)
-            }
-        }
-        if (grok && grok.ok && grok.periods) {
-            for (let i = 0; i < grok.periods.length; i++) {
-                const u = Number(grok.periods[i].util)
-                if (isFinite(u)) m = Math.max(m, u)
-            }
+            take(claude.session.util)
+        const groups = []
+        if (claude && claude.ok) groups.push(claude.weekly)
+        if (cursor && cursor.ok) groups.push(cursor.periods)
+        if (codex && codex.ok) groups.push(codex.windows)
+        if (grok && grok.ok) groups.push(grok.periods)
+        for (const rows of groups) {
+            if (!rows) continue
+            for (let i = 0; i < rows.length; i++) take(rows[i].util)
         }
         return m
     }

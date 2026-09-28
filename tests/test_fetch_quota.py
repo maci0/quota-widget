@@ -93,31 +93,24 @@ def tearDownModule() -> None:
     _SANDBOX.cleanup()
 
 
-ConfigPathField = Literal[
-    "home",
-    "claude_cred",
-    "codex_auth",
-    "grok_auth",
-    "cursor_auth",
-    "cursor_state_db",
-    "cache_dir",
-]
+PathSetter = Callable[[fetch_quota.Config, Path], fetch_quota.Config]
+
+# Each config path field, paired with the call that rebuilds the config with
+# that one field repointed. Keeps point_config free of a field-by-field rebuild.
+_CONFIG_PATH_SETTERS: dict[str, PathSetter] = {
+    "home": lambda cfg, path: dataclasses.replace(cfg, home=path),
+    "claude_cred": lambda cfg, path: dataclasses.replace(cfg, claude_cred=path),
+    "codex_auth": lambda cfg, path: dataclasses.replace(cfg, codex_auth=path),
+    "grok_auth": lambda cfg, path: dataclasses.replace(cfg, grok_auth=path),
+    "cursor_auth": lambda cfg, path: dataclasses.replace(cfg, cursor_auth=path),
+    "cursor_state_db": lambda cfg, path: dataclasses.replace(cfg, cursor_state_db=path),
+    "cache_dir": lambda cfg, path: dataclasses.replace(cfg, cache_dir=path),
+}
 
 
-def point_config(case: unittest.TestCase, field: ConfigPathField, path: Path) -> None:
+def point_config(case: unittest.TestCase, field: str, path: Path) -> None:
     """Point one path of the active config elsewhere, then restore the config."""
-    cfg = fetch_quota.config()
-    fetch_quota._CONFIG = fetch_quota.Config(
-        home=path if field == "home" else cfg.home,
-        claude_cred=path if field == "claude_cred" else cfg.claude_cred,
-        codex_auth=path if field == "codex_auth" else cfg.codex_auth,
-        grok_auth=path if field == "grok_auth" else cfg.grok_auth,
-        cursor_auth=path if field == "cursor_auth" else cfg.cursor_auth,
-        cursor_state_db=path if field == "cursor_state_db" else cfg.cursor_state_db,
-        cache_dir=path if field == "cache_dir" else cfg.cache_dir,
-        http_timeout_s=cfg.http_timeout_s,
-        cache_max_age_s=cfg.cache_max_age_s,
-    )
+    fetch_quota._CONFIG = _CONFIG_PATH_SETTERS[field](fetch_quota.config(), path)
     case.addCleanup(fetch_quota.load_config)
 
 

@@ -205,7 +205,6 @@ RETRY_AFTER_MAX_S = 10.0
 NETWORK_RETRY_BACKOFF_S = 0.5
 # Unix seconds vs milliseconds: values above this are treated as ms.
 MS_EPOCH_CUTOFF = 10_000_000_000
-ERROR_BODY_PREVIEW = 200
 SECONDS_PER_HOUR = 3600
 SECONDS_PER_DAY = 86400
 CODEX_SESSION_MAX_S = 6 * SECONDS_PER_HOUR
@@ -401,8 +400,7 @@ def iso_to_ms(value: str | None) -> int | None:
     if not value:
         return None
     try:
-        s = value.replace("Z", "+00:00")
-        return ms_from_seconds(dt.datetime.fromisoformat(s).timestamp())
+        return ms_from_seconds(dt.datetime.fromisoformat(value).timestamp())
     except (TypeError, ValueError, OSError):
         return None
 
@@ -556,7 +554,6 @@ def _read_provider_cache(
     name: str, account: str | None, max_age_s: int | None = None
 ) -> JsonDict | None:
     path = config().cache_dir / f"{name}.json"
-    limit_s = config().cache_max_age_s if max_age_s is None else max_age_s
     try:
         obj = json.loads(_read_text(path))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -573,7 +570,7 @@ def _read_provider_cache(
     if account is None or obj.get("account") != account:
         return None
     now = now_ms()
-    if now - int(ts) > limit_s * 1000:
+    if now - int(ts) > config().cache_max_age_s * 1000:
         # Past the retention window, so drop it rather than leave it on disk.
         _discard_provider_cache(path)
         return None
@@ -997,7 +994,7 @@ def _token_expired(entry: JsonDict, skew_s: int = TOKEN_SKEW_S) -> bool:
     if not exp:
         return False
     try:
-        when = dt.datetime.fromisoformat(str(exp).replace("Z", "+00:00"))
+        when = dt.datetime.fromisoformat(str(exp))
         return when <= now_utc() + dt.timedelta(seconds=skew_s)
     except (TypeError, ValueError, OSError):
         return False
@@ -1600,20 +1597,14 @@ def _read_cursor_state_db(path: Path) -> tuple[str, str] | None:
 def _load_cursor_auth() -> dict[str, str] | None:
     """Return {token, plan} from the cursor-agent auth.json, or the IDE DB."""
     cfg = config()
-    candidates: list[tuple[Path, str]] = [
-        (cfg.cursor_auth, "json"),
-        (cfg.cursor_state_db, "vscdb"),
+    candidates: list[tuple[Path, Callable[[Path], tuple[str, str] | None]]] = [
+        (cfg.cursor_auth, _read_cursor_auth_json),
+        (cfg.cursor_state_db, _read_cursor_state_db),
     ]
 
-    for path, kind in candidates:
+    for path, read in candidates:
         try:
-            if not path.is_file():
-                continue
-            loaded = (
-                _read_cursor_auth_json(path)
-                if kind == "json"
-                else _read_cursor_state_db(path)
-            )
+            loaded = read(path)
         except PermissionError:
             continue
         if not loaded:
