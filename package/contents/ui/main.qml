@@ -740,6 +740,18 @@ PlasmoidItem {
         Layout.preferredHeight: scroll.contentHeight
             + Kirigami.Units.largeSpacing * 2
 
+        // The popup takes the focus with it (the view switch below claims it),
+        // so the panel button's Escape handler is no longer on the key path:
+        // a keyboard user who opened the popup had no key that closed it
+        // (WCAG 2.1.2). Key events reach here from whichever control inside
+        // the popup holds the focus, so one handler covers the whole view.
+        Keys.onEscapePressed: {
+            root.expanded = false
+            // Focus left the panel button to open the popup, so hand it back to
+            // where the keyboard user came from (WCAG 2.4.3).
+            compact.forceActiveFocus()
+        }
+
         PlasmaComponents3.ScrollView {
             id: scroll
             anchors.fill: parent
@@ -767,6 +779,11 @@ PlasmoidItem {
                         // by Tab. This is the first control in reading order
                         // and takes focus with the popup.
                         focus: true
+                        // The two controls below are the whole of the popup's
+                        // keyboard reach, so each one says it joins the tab
+                        // chain rather than leaning on a control default
+                        // (WCAG 2.1.1).
+                        activeFocusOnTab: true
                         Layout.minimumWidth: root.minTargetPx
                         Layout.minimumHeight: root.minTargetPx
                         // The two views look identical from the button, so the
@@ -807,6 +824,7 @@ PlasmoidItem {
                             root.userRefreshing = true
                             exec.poll()
                         }
+                        activeFocusOnTab: true
                         Layout.minimumWidth: root.minTargetPx
                         Layout.minimumHeight: root.minTargetPx
                         PlasmaComponents3.ToolTip.text: root.fetching
@@ -1209,6 +1227,15 @@ PlasmoidItem {
     // every pollSeconds and a rate limit outlasts several of them.
     property string announced: ""
     onErrorMsgChanged: root.announceStatus()
+    onFirstLoadChanged: {
+        // The first reading lands where the reader is not looking too: the
+        // loading label goes away and the cards appear in silence (WCAG
+        // 4.1.3). Only the way out of loading announces; the way into it is
+        // the label itself, and announceStatus() would name a reading that is
+        // not there yet.
+        if (!root.firstLoad)
+            root.announceStatus()
+    }
     function announceStatus() {
         const msg = root.errorMsg === "" ? qsTr("Quota updated") : statusText()
         if (msg === root.announced)
@@ -1323,7 +1350,12 @@ PlasmoidItem {
             PlasmaComponents3.Label {
                 text: row.label
                 Layout.fillWidth: true
-                elide: Text.ElideRight
+                // A period label is a sentence ("Weekly limits · Opus 4.5
+                // (2026-09-08 to 2026-09-15)"), and eliding it drops the part
+                // that says which window the meter is. The row grows instead:
+                // the popup's height follows its content, so a larger font
+                // makes it taller rather than clipping the name (WCAG 1.4.4).
+                wrapMode: Text.WordWrap
                 Accessible.ignored: true
             }
             PlasmaComponents3.Label {
@@ -1368,15 +1400,17 @@ PlasmoidItem {
                 text: row.detail
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
                 Layout.fillWidth: true
-                elide: Text.ElideRight
+                wrapMode: Text.WordWrap
                 Accessible.ignored: true
             }
             PlasmaComponents3.Label {
                 text: row.subdetail
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
                 font.features: { "tnum": 1 }
-                elide: Text.ElideRight
                 horizontalAlignment: Text.AlignRight
+                Layout.preferredWidth: implicitWidth
+                Layout.maximumWidth: implicitWidth
+                wrapMode: Text.WordWrap
                 Accessible.ignored: true
             }
         }

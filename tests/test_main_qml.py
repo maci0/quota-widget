@@ -385,6 +385,45 @@ class MainQmlAccessibilityTest(unittest.TestCase):
         self.assertIn("readonly property int minTargetPx: 24", QML_SOURCE)
         self.assertEqual(QML_SOURCE.count("Layout.minimumHeight: root.minTargetPx"), 2)
 
+    def test_the_popup_closes_on_escape(self) -> None:
+        # The popup takes the focus with it, so the panel button's Escape
+        # handler is off the key path and a keyboard user who opened the popup
+        # had no key that closed it (WCAG 2.1.2). The handler sits on the view
+        # so it covers every control inside, and the focus goes back to the
+        # panel button the keyboard came from (WCAG 2.4.3).
+        full = QML_SOURCE.split("fullRepresentation:", 1)[1]
+        escape = full.split("Keys.onEscapePressed:", 1)[1].split("}", 1)[0]
+        self.assertIn("root.expanded = false", escape)
+        self.assertIn("compact.forceActiveFocus()", escape)
+
+    def test_meter_labels_are_not_elided(self) -> None:
+        # Eliding the label, the countdown, or the reset time drops the part
+        # that says which window the meter is. The popup's height follows its
+        # content, so the text can wrap instead of disappearing when the user's
+        # font is larger (WCAG 1.4.4).
+        self.assertNotIn("elide: Text.ElideRight", QML_SOURCE)
+
+    def test_the_first_reading_is_announced(self) -> None:
+        # The first poll answers into a widget the reader is not looking at: the
+        # loading label goes away and the cards appear in silence (WCAG 4.1.3).
+        # Only the way out of loading announces, or the way into it would
+        # announce a reading that is not there yet.
+        first = QML_SOURCE.split("onFirstLoadChanged:", 1)[1].split("}", 1)[0]
+        self.assertIn("if (!root.firstLoad)", first)
+        self.assertIn("root.announceStatus()", first)
+
+    def test_every_popup_control_joins_the_tab_chain(self) -> None:
+        # The view switch and the refresh button are the whole keyboard reach of
+        # the popup, so each says it is in the tab chain instead of leaning on
+        # the control default (WCAG 2.1.1).
+        popup = QML_SOURCE.split("fullRepresentation:", 1)[1]
+        buttons = popup.split("PlasmaComponents3.ToolButton {")[1:]
+        self.assertEqual(len(buttons), 2)
+        for button in buttons:
+            self.assertIn(
+                "activeFocusOnTab: true", button.split("\n                    }", 1)[0]
+            )
+
     def test_a_failure_is_announced_when_it_arrives(self) -> None:
         # A poll answers into a widget the reader is not looking at, so the
         # banner and the cards change in silence (WCAG 4.1.3). A repeated

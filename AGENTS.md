@@ -96,7 +96,9 @@ Provider marks: Claude and Codex use their published brand color. Cursor and Gro
 
 The panel reading is a `MouseArea` with an accessible role, name, description, and press action: a `MouseArea` alone is invisible to a screen reader and cannot be activated by one. Anything a hover tooltip carries has to reach the accessible tree too, since a reader never hovers and a `Label` is not focusable. The popup takes focus when it opens, and a control smaller than `minTargetPx` is a target a finger cannot land on.
 
-A poll answers where a screen reader is not looking, so a change in `errorMsg` is announced with `Accessible.announce` (Qt 6.8; the call is guarded, as Kirigami guards it). Repeat the same wording only when it changes, since a poll runs every `pollSeconds`. Severity is a text channel (`utilSeverity`), never the meter color alone.
+The popup claims the focus the panel button hands it, so the panel's Escape handler is no longer on the key path: `fullRepresentation` carries the one that closes the popup and returns the focus to the panel button, and it stays there because a key event reaches an ancestor from whichever control holds the focus. The view switch and the refresh button are the popup's whole keyboard reach, so each says `activeFocusOnTab`. A meter label, countdown, or reset time wraps rather than elides: the popup's height follows its content, so a larger font makes it taller instead of dropping which window the meter is.
+
+A poll answers where a screen reader is not looking, so a change in `errorMsg` is announced with `Accessible.announce` (Qt 6.8; the call is guarded, as Kirigami guards it), and so is the end of the first load, which is the other moment the reading appears in silence. Repeat the same wording only when it changes, since a poll runs every `pollSeconds`. Severity is a text channel (`utilSeverity`), never the meter color alone.
 
 `tests/test_main_qml.py` holds the contract these rules name; a new control, meter, or status belongs in that class.
 
