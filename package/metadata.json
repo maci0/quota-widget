@@ -13,7 +13,7 @@
         "Id": "com.maci.quota-widget",
         "License": "MIT",
         "Name": "AI Quota",
-        "Version": "1.0.0",
+        "Version": "1.1.0",
         "Website": "https://github.com/maci0/quota-widget"
     },
     "X-Plasma-API-Minimum-Version": "6.0"
