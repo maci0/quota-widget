@@ -249,10 +249,12 @@ def _pinned_ms(raw: str) -> int:
     # "now + expiry" calculation in a refresh. A pin past datetime's range
     # raises there, mid-poll, after the token POST has already retired the old
     # refresh token: the credential is rotated away and never written back.
-    if not MIN_PINNED_MS <= pinned <= MAX_PINNED_MS:
+    # _shifted() holds the sums that would raise, so the ceiling here is the
+    # last instant now_utc() itself can represent.
+    if pinned > MAX_PINNED_MS:
         raise ConfigError(
-            f"{NOW_MS_ENV}={raw!r} is outside the representable date range "
-            f"[{MIN_PINNED_MS}, {MAX_PINNED_MS}] epoch-ms"
+            f"{NOW_MS_ENV}={raw!r} is past the representable date range, "
+            f"0..{MAX_PINNED_MS} epoch-ms"
         )
     return pinned
 
@@ -294,6 +296,32 @@ def ms_from_seconds_or_none(seconds: float) -> int | None:
 
 def now_utc() -> dt.datetime:
     return EPOCH_UTC + dt.timedelta(milliseconds=now_ms())
+
+
+# The last instant datetime holds, used where "now + something" runs off the end
+# of the calendar. It is the end itself, not a second calendar: the sums below
+# are the only ones that can reach it, and a value past it has no earlier
+# instant to compare against.
+LAST_UTC = dt.datetime.max.replace(tzinfo=dt.UTC)
+
+
+def _shifted(seconds: float) -> dt.datetime:
+    """now_utc() plus a lifetime in seconds, saturating at the end of the
+    calendar.
+
+    A pinned clock and a token lifetime each reach this sum on their own: a pin
+    at the ceiling the validator accepts, an `expires_in` past datetime's own
+    range (timedelta raises on the value, before the sum is ever taken), or a
+    lifetime so long the sum lands past the last instant. The plain expression
+    raises OverflowError in all three, and on a refresh path that is after the
+    token POST has retired the old refresh token, so the credential is rotated
+    away and never written back. Past the last instant every lifetime is the
+    same instant, so the result saturates instead.
+    """
+    try:
+        return now_utc() + dt.timedelta(seconds=seconds)
+    except OverflowError:
+        return LAST_UTC
 
 
 def _finite_number(value: object) -> float | None:
@@ -1623,7 +1651,7 @@ def _token_expired(entry: JsonDict) -> bool:
     when = iso_to_utc(str(exp))
     if when is None:
         return False
-    return when <= now_utc() + dt.timedelta(seconds=TOKEN_SKEW_S)
+    return when <= _shifted(TOKEN_SKEW_S)
 
 
 def _post_refresh(url: str, refresh: str, client_id: str) -> JsonDict | None:
@@ -1706,7 +1734,7 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
         expires_in = _finite_number(tok.get("expires_in"))
         expires_ms = ms_from_seconds_or_none(expires_in) if expires_in else None
         if expires_ms is not None:
-            exp = now_utc() + dt.timedelta(milliseconds=expires_ms)
+            exp = _shifted(expires_ms / 1000)
             new_entry["expires_at"] = exp.isoformat().replace("+00:00", "Z")
 
         # Persist so subsequent polls (and the Grok CLI) keep working.

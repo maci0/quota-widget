@@ -363,6 +363,42 @@ class ClockTest(unittest.TestCase):
         self.assertIsNone(fetch_quota._read_provider_cache("grok", account))
         self.assertFalse(entry.exists())
 
+    def test_a_clock_at_the_calendar_ceiling_stays_inside_it(self) -> None:
+        # The ceiling the validator accepts is the last instant now_utc() can
+        # represent, and every "now + lifetime" sum runs off the end there.
+        # The sums saturate: an OverflowError on a refresh path raises after the
+        # token POST retired the old refresh token, so the rotated credential is
+        # never written back and the user is signed out of the vendor CLI.
+        os.environ[fetch_quota.NOW_MS_ENV] = str(fetch_quota.MAX_PINNED_MS)
+        # The pin itself is representable: it is the sums past it that are not.
+        self.assertEqual(fetch_quota.now_utc().year, 9999)
+        self.assertEqual(fetch_quota._shifted(3600), fetch_quota.LAST_UTC)
+        # A lifetime past what timedelta holds raises on the delta itself,
+        # before the sum is ever taken.
+        self.assertEqual(fetch_quota._shifted(1e18), fetch_quota.LAST_UTC)
+        self.assertTrue(
+            fetch_quota._token_expired({"expires_at": "2030-01-01T00:00:00Z"})
+        )
+        # A lifetime the calendar can hold still lands on the real sum, so the
+        # saturation is not a clamp on ordinary values.
+        os.environ[fetch_quota.NOW_MS_ENV] = str(PINNED_NOW_MS)
+        self.assertEqual(
+            fetch_quota._shifted(3600),
+            fetch_quota.now_utc() + dt.timedelta(seconds=3600),
+        )
+
+    def test_the_pin_reports_the_range_it_accepts(self) -> None:
+        # The old message printed a range whose lower bound the next check
+        # rejected, so the value it named as acceptable was the one thing the
+        # operator must not pass.
+        os.environ[fetch_quota.NOW_MS_ENV] = str(fetch_quota.MAX_PINNED_MS + 1)
+        with self.assertRaises(fetch_quota.ConfigError) as ctx:
+            fetch_quota.load_config(
+                {fetch_quota.NOW_MS_ENV: os.environ[fetch_quota.NOW_MS_ENV]}
+            )
+        self.assertIn(str(fetch_quota.MAX_PINNED_MS), str(ctx.exception))
+        self.assertNotIn("-62135596800000", str(ctx.exception))
+
 
 class TimeSeamTest(unittest.TestCase):
     """A wait never reaches the real clock on its own.

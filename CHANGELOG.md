@@ -79,6 +79,17 @@ fails if a Breaking entry lands in this section without a matching next version.
 
 ### Fixed
 
+- A Grok token refresh raised `OverflowError` when the new expiry fell past the
+  last instant the calendar holds, which is what a `QUOTA_WIDGET_NOW_MS` at the
+  ceiling the fetcher accepts, or a lifetime far longer than the calendar, both
+  produce. On that path the exception came after the token POST had retired the
+  old refresh token, so the rotated credential was never written back and the
+  user was signed out of the Grok CLI with the widget showing a network error.
+  The expiry sums saturate at the last representable instant now.
+- The configuration error for a clock override past the representable range
+  printed a range whose lower bound the next check rejected, naming the one
+  value the operator must not pass as an acceptable one. It names the range it
+  accepts.
 - A rate-limit window whose `reset_at` or `reset_after_seconds` was a very
   large number raised `OverflowError`: the seconds-to-milliseconds product of
   any value past 1.8e305 overflows a double, and rounding the resulting
