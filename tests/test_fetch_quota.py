@@ -42,30 +42,13 @@ _NEW_TOKENS: dict[str, object] = {
 
 JsonDict = dict[str, Any]
 
-_SANDBOX = tempfile.TemporaryDirectory()
-_SANDBOX_ENV = {
-    "QUOTA_WIDGET_HOME": _SANDBOX.name,
-    "QUOTA_WIDGET_CACHE": str(Path(_SANDBOX.name) / "cache"),
-}
-
 # The Cursor state.vscdb tables a fixture may build: the one the reader looks
 # in, and any other name for the test that proves a missing table reads empty.
 _FIXTURE_TABLES = ("ItemTable", "Other")
 
-
-def setUpModule() -> None:
-    """Point every test at a sandbox home and cache, never the real ones."""
-    for key, value in _SANDBOX_ENV.items():
-        os.environ[key] = value
-    fetch_quota.load_config()
-
-
-def tearDownModule() -> None:
-    for key in _SANDBOX_ENV:
-        os.environ.pop(key, None)
-    fetch_quota.load_config()
-    _SANDBOX.cleanup()
-
+# The sandbox home and cache belong to the suite, not to this module;
+# tests/conftest.py installs them before any test module is imported and drops
+# them at session end, so nothing here has to restore the real environment.
 
 PathSetter = Callable[[fetch_quota.Config, Path], fetch_quota.Config]
 
@@ -2963,8 +2946,7 @@ class ReplayTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        os.environ["QUOTA_WIDGET_CACHE"] = str(self.root)
-        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
+        self.enterContext(config_env(QUOTA_WIDGET_CACHE=str(self.root)))
         os.environ[fetch_quota.NOW_MS_ENV] = str(PINNED_NOW_MS)
         self.addCleanup(lambda: os.environ.pop(fetch_quota.NOW_MS_ENV, None))
 
@@ -3148,8 +3130,7 @@ class RefreshRunsOnceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        os.environ["QUOTA_WIDGET_CACHE"] = self.tmp.name
-        self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
+        self.enterContext(config_env(QUOTA_WIDGET_CACHE=self.tmp.name))
 
     def _point(self, name: str, path: Path) -> None:
         env = credential_env(name, path)

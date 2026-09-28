@@ -63,9 +63,15 @@ above the version in `package/metadata.json`.
 `tests/test_fetch_quota.py` holds the fetcher tests, grouped in
 `unittest.TestCase` classes named after the function or provider they cover
 (`CodexWindowTest`, `ProviderCacheTest`). Copy the setup of the closest class:
-tests point `QUOTA_WIDGET_CACHE` at a `tempfile.TemporaryDirectory()` and patch
+point `QUOTA_WIDGET_CACHE` at a `tempfile.TemporaryDirectory()` with
+`config_env`, which restores the previous value, and patch
 `fetch_quota.fetch_json` instead of touching the network. A test that reaches the
-network or the real home directory does not belong here.
+network or the real home directory does not belong here, and the suite's
+`tests/conftest.py` fails the one that leaves the fetcher's config pointing at
+the real home, so never `os.environ.pop` a sandbox variable: the suite's
+`QUOTA_WIDGET_HOME` and `QUOTA_WIDGET_CACHE` are set before any test module is
+imported and a test that removed them would leave every later module polling
+`~/.cache/quota-widget`.
 `tests/test_release.py` covers the version metadata, which is not fetcher
 behavior, and `tests/test_print_smoke.py` covers `scripts/print_smoke.py`. One
 test file per module under test; a module's tests do not live in another

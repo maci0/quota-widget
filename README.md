@@ -112,7 +112,7 @@ uv run pytest tests/test_fetch_quota.py -k cursor
 uv run pytest tests/test_fetch_quota.py::IsoToMsTest
 ```
 
-Tests are hermetic: no network, no credentials, no home-directory state. `uv run pytest` alone runs the whole suite in a few seconds.
+Tests are hermetic: no network, no credentials, no home-directory state. `tests/conftest.py` points the fetcher at a temp home and cache before collection, and fails any test that leaves it configured against the real one. `uv run pytest` alone runs the whole suite in a few seconds.
 
 Conventions, branching, and how to add a test or a dependency: [CONTRIBUTING.md](CONTRIBUTING.md).
 What changed in each release, and what breaks when upgrading: [CHANGELOG.md](CHANGELOG.md).

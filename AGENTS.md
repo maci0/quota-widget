@@ -45,6 +45,14 @@ through `flock`, `_atomic_write_json`, and the re-read in `_merge_write_json`.
   `test_main_qml.py`, `test_package_metadata.py`, `test_print_smoke.py`,
   `test_release.py`, `test_install_script.py`); `project_paths.py` is the only
   shared helper and holds `project_root()`.
+- `tests/conftest.py`: the suite's sandbox. It sets `QUOTA_WIDGET_HOME` and
+  `QUOTA_WIDGET_CACHE` at import, before pytest collects a test module, and
+  drops them at session end, so no test module may set them itself: a
+  `tearDownModule` that popped them left every module collected after it
+  running against the real `~/.cache/quota-widget`, where `_account_id`
+  installs the account salt. The autouse `_outside_the_real_home` check fails
+  the test that leaves the fetcher's config pointing at the real home, naming
+  the node id and the fields that escaped.
 - `tests/test_install_script.py`: runs `install.sh` against a checkout copied
   into a temp dir, over the paths that decide a directory's fate, and through
   symlinks that name it from outside the checkout. It never runs the install
