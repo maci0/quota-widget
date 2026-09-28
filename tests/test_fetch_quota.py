@@ -178,16 +178,17 @@ class ClockTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         os.environ["QUOTA_WIDGET_CACHE"] = tmp.name
         self.addCleanup(lambda: os.environ.pop("QUOTA_WIDGET_CACHE", None))
-        fetch_quota._write_provider_cache("grok", {"ok": True, "plan": "Grok"})
+        account = fetch_quota._account_id(_fake_jwt("user_01GROK"))
+        fetch_quota._write_provider_cache("grok", {"ok": True, "plan": "Grok"}, account)
 
         os.environ[fetch_quota.NOW_MS_ENV] = str(
             PINNED_NOW_MS + fetch_quota.DEFAULT_CACHE_MAX_AGE_S * 1000
         )
-        self.assertIsNotNone(fetch_quota._read_provider_cache("grok"))
+        self.assertIsNotNone(fetch_quota._read_provider_cache("grok", account))
         os.environ[fetch_quota.NOW_MS_ENV] = str(
             PINNED_NOW_MS + (fetch_quota.DEFAULT_CACHE_MAX_AGE_S + 1) * 1000
         )
-        self.assertIsNone(fetch_quota._read_provider_cache("grok"))
+        self.assertIsNone(fetch_quota._read_provider_cache("grok", account))
 
 
 def _fake_jwt(sub: str) -> str:
@@ -219,11 +220,12 @@ class ClaudeRateLimitTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         cred = Path(self.tmp.name) / "cred.json"
+        self.access_token = _fake_jwt("user_01CLAUDE")
         cred.write_text(
             json.dumps(
                 {
                     "claudeAiOauth": {
-                        "accessToken": "test-token",
+                        "accessToken": self.access_token,
                         "subscriptionType": "pro",
                         "rateLimitTier": "default_claude_pro",
                     }
@@ -266,6 +268,7 @@ class ClaudeRateLimitTest(unittest.TestCase):
                 "session": {"util": 12, "resets_ms": 1},
                 "weekly": [],
             },
+            fetch_quota._account_id(self.access_token),
         )
 
         with patch.object(
@@ -277,6 +280,53 @@ class ClaudeRateLimitTest(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertTrue(out["stale"])
         self.assertEqual(out["session"]["util"], 12)
+
+    def test_429_never_serves_another_accounts_payload(self) -> None:
+        fetch_quota._write_provider_cache(
+            "claude",
+            {
+                "ok": True,
+                "plan": "Max",
+                "session": {"util": 88, "resets_ms": 1},
+                "weekly": [],
+            },
+            fetch_quota._account_id(_fake_jwt("user_01OTHER")),
+        )
+
+        def fake_http(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object, object]:
+            return 429, {"error": {"type": "rate_limit_error"}}, {"Retry-After": "0"}
+
+        with patch.object(fetch_quota, "fetch_http", fake_http):
+            out = fetch_quota.fetch_claude()
+        self.assertEqual(out, {"ok": False, "error": "http-429"})
+
+    def test_credential_without_account_id_writes_no_cache(self) -> None:
+        cred_path = fetch_quota.CLAUDE_CRED
+        payload = json.loads(cred_path.read_text())
+        payload["claudeAiOauth"]["accessToken"] = "opaque-token"
+        cred_path.write_text(json.dumps(payload))
+
+        def fake_http(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object, object]:
+            return 200, {"five_hour": {"utilization": 5}}, None
+
+        with patch.object(fetch_quota, "fetch_http", fake_http):
+            out = fetch_quota.fetch_claude()
+        self.assertTrue(out["ok"])
+        self.assertFalse((Path(self.tmp.name) / "claude.json").exists())
 
     def test_429_without_cache_is_error(self) -> None:
         with patch.object(
@@ -601,21 +651,80 @@ class ProviderCacheTest(unittest.TestCase):
         self.env = config_env(QUOTA_WIDGET_CACHE=self.tmp.name)
         self.env.__enter__()
         self.addCleanup(self.env.__exit__, None, None, None)
+        self.account = "acct-1"
 
     def test_round_trip_and_stale_flag(self) -> None:
-        fetch_quota._write_provider_cache("grok", {"ok": True, "plan": "Grok"})
-        got = fetch_quota._read_provider_cache("grok")
+        fetch_quota._write_provider_cache(
+            "grok", {"ok": True, "plan": "Grok"}, self.account
+        )
+        got = fetch_quota._read_provider_cache("grok", self.account)
         self.assertIsNotNone(got)
         assert got is not None
         self.assertEqual(got["plan"], "Grok")
-        stale = fetch_quota._stale_cache("grok")
+        stale = fetch_quota._stale_cache("grok", self.account)
         self.assertIsNotNone(stale)
         assert stale is not None
         self.assertTrue(stale["stale"])
 
     def test_does_not_write_failed_payloads(self) -> None:
-        fetch_quota._write_provider_cache("grok", {"ok": False, "error": "net"})
-        self.assertIsNone(fetch_quota._read_provider_cache("grok"))
+        fetch_quota._write_provider_cache(
+            "grok", {"ok": False, "error": "net"}, self.account
+        )
+        self.assertIsNone(fetch_quota._read_provider_cache("grok", self.account))
+
+    def test_other_account_cannot_read_the_entry(self) -> None:
+        fetch_quota._write_provider_cache(
+            "grok", {"ok": True, "plan": "Grok"}, self.account
+        )
+        self.assertIsNone(fetch_quota._read_provider_cache("grok", "acct-2"))
+        self.assertIsNone(fetch_quota._stale_cache("grok", "acct-2"))
+
+    def test_unidentifiable_caller_reads_nothing(self) -> None:
+        fetch_quota._write_provider_cache(
+            "grok", {"ok": True, "plan": "Grok"}, self.account
+        )
+        self.assertIsNone(fetch_quota._read_provider_cache("grok", None))
+
+    def test_entry_older_than_the_stale_window_is_ignored(self) -> None:
+        fetch_quota._write_provider_cache(
+            "grok", {"ok": True, "plan": "Grok"}, self.account
+        )
+        path = Path(self.tmp.name) / "grok.json"
+        entry = json.loads(path.read_text())
+        entry["cached_ms"] = int(
+            (
+                dt.datetime.now(dt.UTC).timestamp()
+                - fetch_quota.config().cache_max_age_s
+                - 60
+            )
+            * 1000
+        )
+        path.write_text(json.dumps(entry))
+        self.assertIsNone(fetch_quota._stale_cache("grok", self.account))
+
+
+class AccountIdTest(unittest.TestCase):
+    def test_survives_access_token_rotation(self) -> None:
+        first = fetch_quota._account_id(_fake_jwt("user_01CLAUDE"))
+        second = fetch_quota._account_id(_fake_jwt("user_01CLAUDE"))
+        self.assertIsNotNone(first)
+        self.assertEqual(first, second)
+
+    def test_distinguishes_accounts(self) -> None:
+        self.assertNotEqual(
+            fetch_quota._account_id(_fake_jwt("user_01A")),
+            fetch_quota._account_id(_fake_jwt("user_01B")),
+        )
+
+    def test_opaque_token_falls_back_to_provider_account_id(self) -> None:
+        self.assertEqual(
+            fetch_quota._account_id("opaque", "acct-9"),
+            fetch_quota._digest("acct-9"),
+        )
+
+    def test_nothing_identifiable_is_none(self) -> None:
+        self.assertIsNone(fetch_quota._account_id("opaque"))
+        self.assertIsNone(fetch_quota._account_id(None))
 
 
 class DurableWriteTest(unittest.TestCase):

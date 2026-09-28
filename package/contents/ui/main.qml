@@ -38,6 +38,8 @@ PlasmoidItem {
         Plasmoid.configuration.utilWarnAt, 70, 1, 99)
     readonly property int utilCritAt: Math.max(utilWarnAt, intSetting(
         Plasmoid.configuration.utilCritAt, 90, 1, 100))
+    // Mirrors DEFAULT_CACHE_MAX_AGE_S in package/contents/code/fetch_quota.py.
+    readonly property int staleKeepMs: 24 * 60 * 60 * 1000
 
     property var claude: null
     property var cursor: null
@@ -117,13 +119,23 @@ PlasmoidItem {
     }
     // Keep the last good reading on transient failures (429/5xx/net/exec) so a
     // blip doesn't blank a card. Replace on success or on auth/no-token errors.
+    // A kept reading is dropped once it is older than the fetcher's own stale
+    // window (DEFAULT_CACHE_MAX_AGE_S), so an offline widget cannot show
+    // week-old meters as if they were live.
     function mergeProv(oldv, newv) {
         if (!newv) return oldv
-        if (newv.ok) return newv
+        if (newv.ok) {
+            newv._at = Date.now()
+            return newv
+        }
         const e = newv.error || ""
         const transient = e === "net" || e === "exec"
             || e.indexOf("429") >= 0 || e.indexOf("http-5") === 0
-        if (transient && oldv && oldv.ok) return oldv
+        if (transient && oldv && oldv.ok && oldv._at
+                && Date.now() - oldv._at <= root.staleKeepMs) {
+            oldv.stale = true
+            return oldv
+        }
         return newv
     }
 

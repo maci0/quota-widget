@@ -31,6 +31,10 @@ symlinking. Run it only when the user asks to install or upgrade, never as a bui
 
 Fetcher talks to each vendor's own usage endpoint with credentials already on disk (Claude Code, Cursor IDE / cursor-agent, Codex CLI, Grok CLI). Tokens stay on the machine except those HTTPS calls.
 
+## Caches
+
+Two layers hold a last good reading. `~/.cache/quota-widget/<provider>.json` is written by the fetcher and read only by `_stale_cache`; the plasmoid keeps its own copy in `mergeProv` for the same window. Both expire at `STALE_MAX_AGE_S` (2 h), and the fetcher's entries are scoped to one account id (`_account_id`, hashed) so a second account signing in on the same machine never reads the first one's numbers. Change the window in one place: `STALE_MAX_AGE_S` in `fetch_quota.py` and `staleKeepMs` in `main.qml`.
+
 ## Gate
 
 ```bash

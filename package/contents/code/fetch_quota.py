@@ -28,6 +28,7 @@ import contextlib
 import datetime as dt
 import email.utils
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -111,6 +112,9 @@ REFRESH_LOCK_NAME = "refresh.lock"
 # the holder died, and the caller refreshes anyway rather than never.
 REFRESH_LOCK_WAIT_S = 20.0
 REFRESH_LOCK_POLL_S = 0.25
+# Longest a cached reading may be shown after the vendor API fails, unless
+# QUOTA_WIDGET_CACHE_MAX_AGE_S says otherwise. The plasmoid keeps its own copy
+# for the same window; see staleKeepMs in package/contents/ui/main.qml.
 DEFAULT_CACHE_MAX_AGE_S = 24 * 3600
 DEFAULT_HTTP_TIMEOUT_S = 12.0
 MAX_HTTP_TIMEOUT_S = 300.0
@@ -397,10 +401,28 @@ def _merge_write_json(
     # tokens in memory stay usable for this poll.
 
 
-def _read_provider_cache(name: str, max_age_s: int | None = None) -> JsonDict | None:
+def _digest(value: str | None) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return hashlib.sha256(value.encode()).hexdigest()[:16]
+
+
+def _account_id(access_token: str | None, fallback: str | None = None) -> str | None:
+    """Account id the provider cache is scoped to, or None if unknowable.
+
+    The token's `sub` claim survives access-token rotation, so a refresh does
+    not orphan the entry; a digest of the token itself would. `fallback` is
+    only for providers that publish an account id outside the token.
+    """
+    sub = _jwt_claim(access_token, "sub") if isinstance(access_token, str) else None
+    return _digest(sub if isinstance(sub, str) and sub else fallback)
+
+
+def _read_provider_cache(
+    name: str, account: str | None, max_age_s: int | None = None
+) -> JsonDict | None:
     path = config().cache_dir / f"{name}.json"
     limit_s = config().cache_max_age_s if max_age_s is None else max_age_s
-
     try:
         obj = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -411,14 +433,19 @@ def _read_provider_cache(name: str, max_age_s: int | None = None) -> JsonDict | 
         return None
     if not payload.get("ok"):
         return None
+    # An entry belongs to the account whose credential produced it. Reading
+    # another account's plan and usage is worse than showing nothing, so an
+    # unidentifiable caller reads nothing.
+    if account is None or obj.get("account") != account:
+        return None
     now = now_ms()
     if now - int(ts) > limit_s * 1000:
         return None
     return payload
 
 
-def _write_provider_cache(name: str, payload: JsonDict) -> None:
-    if not payload.get("ok"):
+def _write_provider_cache(name: str, payload: JsonDict, account: str | None) -> None:
+    if not payload.get("ok") or account is None:
         return
     folder = config().cache_dir
     try:
@@ -427,6 +454,7 @@ def _write_provider_cache(name: str, payload: JsonDict) -> None:
             folder / f"{name}.json",
             {
                 "cached_ms": now_ms(),
+                "account": account,
                 "payload": payload,
             },
         )
@@ -434,8 +462,8 @@ def _write_provider_cache(name: str, payload: JsonDict) -> None:
         pass  # cache is best-effort; a full disk must not fail the poll
 
 
-def _stale_cache(name: str) -> JsonDict | None:
-    cached = _read_provider_cache(name)
+def _stale_cache(name: str, account: str | None) -> JsonDict | None:
+    cached = _read_provider_cache(name, account)
     if not cached:
         return None
     out = dict(cached)
@@ -723,8 +751,9 @@ def fetch_claude() -> JsonDict:
         if wait is not None and RETRY_AFTER_MIN_S <= wait <= RETRY_AFTER_MAX_S:
             sleep(wait)
             status, data, hdrs = fetch_http(CLAUDE_URL, headers)
+    account = _account_id(token)
     if status == 401:
-        cached = _stale_cache("claude")
+        cached = _stale_cache("claude", account)
         if cached:
             return cached
         # Refresh 429 with a still-valid refresh token is not a sign-out.
@@ -733,7 +762,7 @@ def fetch_claude() -> JsonDict:
         return {"ok": False, "error": "http-401"}
     if status != 200 or not isinstance(data, dict):
         if _http_retryable(status):
-            cached = _stale_cache("claude")
+            cached = _stale_cache("claude", account)
             if cached:
                 return cached
         return {"ok": False, "error": f"http-{status}" if status else "net"}
@@ -768,7 +797,7 @@ def fetch_claude() -> JsonDict:
             "exponent": spend_used.get("exponent", 2),
         },
     }
-    _write_provider_cache("claude", result)
+    _write_provider_cache("claude", result, account)
     return result
 
 
@@ -1001,18 +1030,19 @@ def fetch_grok() -> JsonDict:
         seen.add(key)
         periods.append(p)
 
+    account = _account_id(state["entry"].get("key"), auth_key)
     if not periods:
         status = st_week or st_month or 0
         if status == 401:
             return {"ok": False, "error": "http-401"}
         if _http_retryable(status):
-            cached = _stale_cache("grok")
+            cached = _stale_cache("grok", account)
             if cached:
                 return cached
         return {"ok": False, "error": f"http-{status}" if status else "net"}
 
     result = {"ok": True, "plan": "Grok", "periods": periods}
-    _write_provider_cache("grok", result)
+    _write_provider_cache("grok", result, account)
     return result
 
 
@@ -1229,9 +1259,10 @@ def fetch_codex() -> JsonDict:
             return {"ok": False, "error": "http-401"}
         status, data = call(access)
 
+    account = _account_id(access, str(account_id) if account_id else None)
     if status != 200 or not isinstance(data, dict):
         if _http_retryable(status):
-            cached = _stale_cache("codex")
+            cached = _stale_cache("codex", account)
             if cached:
                 return cached
         return {"ok": False, "error": f"http-{status}" if status else "net"}
@@ -1278,7 +1309,7 @@ def fetch_codex() -> JsonDict:
         },
         "reset_credits": reset_credits,
     }
-    _write_provider_cache("codex", result)
+    _write_provider_cache("codex", result, account)
     return result
 
 
@@ -1533,10 +1564,11 @@ def fetch_cursor() -> JsonDict:
         "Referer": "https://cursor.com/dashboard/usage",
     }
     status, data = fetch_json(CURSOR_SUMMARY_URL, headers)
+    account = _account_id(auth["token"], auth["sub"])
     if status in (401, 403):
         return {"ok": False, "error": "http-401"}
     if _http_retryable(status):
-        cached = _stale_cache("cursor")
+        cached = _stale_cache("cursor", account)
         if cached:
             return cached
         return {"ok": False, "error": f"http-{status}"}
@@ -1544,7 +1576,7 @@ def fetch_cursor() -> JsonDict:
         return {"ok": False, "error": f"http-{status}" if status else "net"}
 
     result = parse_cursor_summary(data, auth.get("plan"))
-    _write_provider_cache("cursor", result)
+    _write_provider_cache("cursor", result, account)
     return result
 
 
