@@ -709,6 +709,44 @@ class IsoToMsTest(unittest.TestCase):
         self.assertIsNone(fetch_quota.iso_to_ms(None))
         self.assertIsNone(fetch_quota.iso_to_ms("nope"))
 
+    def test_offset_free_timestamp_is_utc_not_host_local(self) -> None:
+        # A payload timestamp with no offset means UTC. Resolving it against
+        # the host zone put the same reading an hour or nine off depending on
+        # where plasmashell ran, and the DST offset made it move twice a year.
+        expected = int(
+            dt.datetime(2026, 5, 2, 14, 11, 55, tzinfo=dt.UTC).timestamp() * 1000
+        )
+        for zone in ("UTC", "America/New_York", "Europe/Warsaw", "Asia/Kolkata"):
+            with self.subTest(tz=zone), _local_tz(zone):
+                self.assertEqual(fetch_quota.iso_to_ms("2026-05-02T14:11:55"), expected)
+
+    def test_explicit_offset_wins_over_the_host_zone(self) -> None:
+        expected = int(
+            dt.datetime(2026, 5, 2, 12, 11, 55, tzinfo=dt.UTC).timestamp() * 1000
+        )
+        with _local_tz("America/Los_Angeles"):
+            self.assertEqual(
+                fetch_quota.iso_to_ms("2026-05-02T14:11:55+02:00"), expected
+            )
+
+
+@contextlib.contextmanager
+def _local_tz(zone: str) -> Iterator[None]:
+    """Run a block with the process in `zone`, the way a user's shell is."""
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = zone
+    if hasattr(time, "tzset"):
+        time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = previous
+        if hasattr(time, "tzset"):
+            time.tzset()
+
 
 class SecondsToMsTest(unittest.TestCase):
     def test_keeps_the_millisecond_a_truncating_cast_drops(self) -> None:
@@ -880,6 +918,60 @@ class GrokNoPeriodTest(unittest.TestCase):
     def test_offline_reports_net(self) -> None:
         out = self._fetch(0, None, 0)
         self.assertEqual(out, {"ok": False, "error": "net"})
+
+
+class GrokAuthStoreTest(unittest.TestCase):
+    """The store is written by several tools, so the selection cannot assume
+    one expires_at spelling."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.auth = Path(tmp.name) / "grok.json"
+        self.env = config_env(
+            QUOTA_WIDGET_CACHE=tmp.name, QUOTA_WIDGET_GROK_AUTH=str(self.auth)
+        )
+        self.env.__enter__()
+        self.addCleanup(self.env.__exit__, None, None, None)
+        os.environ[fetch_quota.NOW_MS_ENV] = str(PINNED_NOW_MS)
+        self.addCleanup(os.environ.pop, fetch_quota.NOW_MS_ENV, None)
+
+    def _write(self, store: JsonDict) -> None:
+        self.auth.write_text(json.dumps(store))
+
+    def test_longest_lived_entry_wins_across_offsets(self) -> None:
+        # As text, "2026-04-22T09:00:00+01:00" > "2026-04-22T08:30:00Z", but
+        # that entry expires an hour earlier. Lexicographic order picked the
+        # shorter-lived token and the request then 401'd.
+        self._write(
+            {
+                "cli::short": {
+                    "key": "tok-short",
+                    "expires_at": "2026-04-22T08:30:00Z",
+                },
+                "cli::long": {
+                    "key": "tok-long",
+                    "expires_at": "2026-04-22T09:00:00+01:00",
+                },
+            }
+        )
+        loaded = fetch_quota._load_grok_auth()
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded[1]["key"], "tok-short")
+
+    def test_offset_free_expiry_is_read_as_utc(self) -> None:
+        # A naive value used to raise against the aware clock, and the except
+        # branch reported the token as never expiring.
+        now = dt.datetime.fromtimestamp(PINNED_NOW_MS / 1000, tz=dt.UTC)
+        stale = (now - dt.timedelta(hours=1)).replace(tzinfo=None).isoformat()
+        fresh = (now + dt.timedelta(hours=1)).replace(tzinfo=None).isoformat()
+        self.assertTrue(fetch_quota._token_expired({"expires_at": stale}))
+        self.assertFalse(fetch_quota._token_expired({"expires_at": fresh}))
+
+    def test_unparseable_expiry_is_not_read_as_expired(self) -> None:
+        self.assertFalse(fetch_quota._token_expired({"expires_at": "whenever"}))
+        self.assertFalse(fetch_quota._token_expired({}))
 
 
 class JwtGuardTest(unittest.TestCase):

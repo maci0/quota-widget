@@ -396,12 +396,32 @@ def warn(message: str) -> None:
     print(f"fetch_quota: {message}", file=sys.stderr)
 
 
+def iso_to_utc(value: str) -> dt.datetime | None:
+    """Parse an ISO 8601 timestamp to an aware UTC datetime, or None.
+
+    A payload timestamp without an offset is UTC: that is what the providers
+    write. fromisoformat returns it naive, and .timestamp() on a naive value
+    resolves it in the host's zone, so the same reading lands hours off on a
+    plasmashell running anywhere west of Greenwich.
+    """
+    try:
+        when = dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        return when.replace(tzinfo=dt.UTC)
+    return when.astimezone(dt.UTC)
+
+
 def iso_to_ms(value: str | None) -> int | None:
     if not value:
         return None
+    when = iso_to_utc(value)
+    if when is None:
+        return None
     try:
-        return ms_from_seconds(dt.datetime.fromisoformat(value).timestamp())
-    except (TypeError, ValueError, OSError):
+        return ms_from_seconds(when.timestamp())
+    except (OSError, OverflowError, ValueError):
         return None
 
 
@@ -974,15 +994,22 @@ def _load_grok_auth() -> tuple[str, JsonDict] | None:
         return None
     if not isinstance(store, dict) or not store:
         return None
-    # Prefer the entry with the latest expires_at
-    best_key = None
+    # Prefer the entry whose token lives longest
+    best_key: str | None = None
     best_entry: JsonDict | None = None
-    best_exp = ""
+    best_exp: dt.datetime | None = None
     for key, entry in store.items():
         if not isinstance(entry, dict) or "key" not in entry:
             continue
-        exp = str(entry.get("expires_at") or "")
-        if best_entry is None or exp > best_exp:
+        # Compare instants, not text: entries written at different times carry
+        # different offsets and fractional widths, and "2026-01-01T09:00:00+01:00"
+        # sorts after "2026-01-01T08:30:00Z" as a string while it expires earlier.
+        exp = iso_to_utc(str(entry.get("expires_at") or ""))
+        if exp is None and best_entry is not None:
+            continue
+        if best_entry is None or (
+            exp is not None and (best_exp is None or exp > best_exp)
+        ):
             best_key, best_entry, best_exp = key, entry, exp
     if best_key is None or best_entry is None:
         return None
@@ -993,11 +1020,10 @@ def _token_expired(entry: JsonDict, skew_s: int = TOKEN_SKEW_S) -> bool:
     exp = entry.get("expires_at")
     if not exp:
         return False
-    try:
-        when = dt.datetime.fromisoformat(str(exp))
-        return when <= now_utc() + dt.timedelta(seconds=skew_s)
-    except (TypeError, ValueError, OSError):
+    when = iso_to_utc(str(exp))
+    if when is None:
         return False
+    return when <= now_utc() + dt.timedelta(seconds=skew_s)
 
 
 def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
@@ -1366,7 +1392,7 @@ def _refresh_codex(auth: JsonDict) -> JsonDict | None:
 
         new_auth = dict(auth)
         new_auth["tokens"] = new_tokens
-        new_auth["last_refresh"] = now_utc().isoformat()
+        new_auth["last_refresh"] = now_utc().isoformat().replace("+00:00", "Z")
 
         def put_tokens(store: JsonDict) -> tuple[str, Any]:
             store["tokens"] = new_tokens
