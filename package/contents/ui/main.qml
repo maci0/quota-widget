@@ -492,13 +492,25 @@ PlasmoidItem {
         return m
     }
 
-    // The provider the compact reading is showing, in priority order.
-    function primaryMarkColor() {
-        if (claude && claude.ok && claude.session) return claudeMark
-        if (cursorTopPeriod()) return cursorMark
-        if (codexTopWindow()) return codexMark
-        if (grokTopPeriod()) return grokMark
-        return Kirigami.Theme.disabledTextColor
+    // The provider the compact reading describes, in priority order: the
+    // first one that has a percentage to show. The number, the countdown, and
+    // the rule under them all answer this one walk, so a meter that carries a
+    // reset time but no percentage (a Cursor block reporting a spend and no
+    // cap) can never put one provider's number next to another's countdown.
+    function primaryReading() {
+        if (claude && claude.ok && claude.session
+                && compactPct(claude.session.util) !== "")
+            return { util: claude.session.util, resets_ms: claude.session.resets_ms, mark: claudeMark }
+        const cp = cursorTopPeriod()
+        if (cp && compactPct(cp.util) !== "")
+            return { util: cp.util, resets_ms: cp.resets_ms, mark: cursorMark }
+        const xp = codexTopWindow()
+        if (xp && compactPct(xp.util) !== "")
+            return { util: xp.util, resets_ms: xp.resets_ms, mark: codexMark }
+        const gp = grokTopPeriod()
+        if (gp && compactPct(gp.util) !== "")
+            return { util: gp.util, resets_ms: gp.resets_ms, mark: grokMark }
+        return null
     }
 
     // ── compact (panel) ───────────────────────────────────────────────────
@@ -543,25 +555,9 @@ PlasmoidItem {
             PlasmaComponents3.Label {
                 Layout.alignment: Qt.AlignHCenter
                 text: {
-                    if (root.claude && root.claude.ok && root.claude.session) {
-                        var p = compactPct(root.claude.session.util)
-                        if (p) return p
-                    }
-                    var cp = root.cursorTopPeriod()
-                    if (cp) {
-                        var c = compactPct(cp.util)
-                        if (c) return c
-                    }
-                    var xp = root.codexTopWindow()
-                    if (xp) {
-                        var x = compactPct(xp.util)
-                        if (x) return x
-                    }
-                    var gp = root.grokTopPeriod()
-                    if (gp) {
-                        var g = compactPct(gp.util)
-                        if (g) return g
-                    }
+                    const p = root.primaryReading()
+                    if (p)
+                        return compactPct(p.util)
                     return root.errorMsg ? qsTr("n/a") : "…"
                 }
                 color: root.firstLoad
@@ -586,17 +582,9 @@ PlasmoidItem {
                 // failure; the panel says it has no number.
                 visible: !(root.errorMsg !== "" && root.noData())
                 text: {
-                    if (root.claude && root.claude.ok && root.claude.session)
-                        return remainStr(root.claude.session.resets_ms)
-                    var cp = root.cursorTopPeriod()
-                    if (cp)
-                        return remainStr(cp.resets_ms)
-                    var xp = root.codexTopWindow()
-                    if (xp)
-                        return remainStr(xp.resets_ms)
-                    var gp = root.grokTopPeriod()
-                    if (gp)
-                        return remainStr(gp.resets_ms)
+                    const p = root.primaryReading()
+                    if (p)
+                        return remainStr(p.resets_ms)
                     return qsTr("quota")
                 }
                 font.pointSize: Kirigami.Theme.smallFont.pointSize
@@ -608,7 +596,10 @@ PlasmoidItem {
                 Layout.fillWidth: true
                 Layout.topMargin: root.tightSpacing
                 Layout.preferredHeight: root.ruleThickness
-                color: root.primaryMarkColor()
+                color: {
+                    const p = root.primaryReading()
+                    return p ? p.mark : Kirigami.Theme.disabledTextColor
+                }
                 Accessible.ignored: true
             }
         }

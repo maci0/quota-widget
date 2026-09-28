@@ -195,7 +195,7 @@ def _transient_failure(status: int) -> bool:
     otherwise show a blank card where the same reading is sitting on disk.
     A 401 or 403 is a decision by the vendor and is reported as one.
     """
-    return status == 0 or status in (429, 503) or status >= 500
+    return status == 0 or status == 429 or status >= 500
 
 
 def _failure(
@@ -1089,13 +1089,13 @@ def _read_provider_cache(name: str, account: str | None) -> JsonDict | None:
 
 
 def _cache_holds_newer(path: Path, taken_ms: int, account: str) -> bool:
-    """True when the entry on disk was written no earlier than taken_ms.
+    """True when the entry on disk holds a reading no older than taken_ms.
 
     A run the panel dropped for outliving pollTimeoutMs can still land its
     write after the poll that replaced it, and its reading is the older one.
-    An entry is stamped when it was written, which is never before the reading
-    it holds, so a stamp at or past taken_ms means the file already carries a
-    reading no older than the incoming one and writing again only rewinds it.
+    An entry is stamped with the instant its reading was taken, so a stamp at
+    or past taken_ms names a reading no older than the incoming one and
+    writing again only rewinds it.
     """
     obj = _read_json_dict(path)
     if obj is None:
@@ -1113,6 +1113,10 @@ def _write_provider_cache(name: str, payload: JsonDict, account: str | None) -> 
     path = folder / f"{name}.json"
     try:
         _private_dir(folder)
+        # The stamp is the instant the reading was taken, not the one the write
+        # happened at: the entry is read back under this number, so stamping it
+        # later would age the reading by its own arrival and let it outlive the
+        # retention window.
         taken = _finite_number(payload.get("fetched_ms"))
         stamp = int(taken) if taken is not None else now_ms()
         if _cache_holds_newer(path, stamp, account):
@@ -1120,7 +1124,7 @@ def _write_provider_cache(name: str, payload: JsonDict, account: str | None) -> 
         _atomic_write_json(
             path,
             {
-                "cached_ms": now_ms(),
+                "cached_ms": stamp,
                 "account": account,
                 "payload": payload,
             },
@@ -1486,11 +1490,10 @@ def fetch_claude() -> JsonDict:
     if not config().claude_cred.is_file():
         return _failure("no-token")
 
-    try:
-        cred = json.loads(_read_text(config().claude_cred))
-        oauth = cred["claudeAiOauth"]
-        token = oauth["accessToken"]
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
+    cred = _read_json_dict(config().claude_cred) or {}
+    oauth = _as_dict(cred.get("claudeAiOauth"))
+    token = oauth.get("accessToken")
+    if token is None:
         return _failure("no-token")
 
     refreshed_already = False
@@ -1588,11 +1591,8 @@ def fetch_claude() -> JsonDict:
 def _load_grok_auth() -> tuple[str, JsonDict] | None:
     if not config().grok_auth.is_file():
         return None
-    try:
-        store = json.loads(_read_text(config().grok_auth))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    if not isinstance(store, dict) or not store:
+    store = _read_json_dict(config().grok_auth)
+    if not store:
         return None
     # Prefer the entry whose token lives longest, by the instant it expires.
     best_key: str | None = None
@@ -2052,11 +2052,8 @@ def fetch_codex() -> JsonDict:
     if not config().codex_auth.is_file():
         return _failure("no-token")
 
-    try:
-        auth = json.loads(_read_text(config().codex_auth))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return _failure("no-token")
-    if not isinstance(auth, dict):
+    auth = _read_json_dict(config().codex_auth)
+    if auth is None:
         return _failure("no-token")
 
     tokens = _as_dict(auth.get("tokens"))
