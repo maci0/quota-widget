@@ -90,6 +90,26 @@ fails if a Breaking entry lands in this section without a matching next version.
   printed a range whose lower bound the next check rejected, naming the one
   value the operator must not pass as an acceptable one. It names the range it
   accepts.
+- A response the fetcher reported as anything but `no-token`, `http-401`,
+  `http-429`, or `net` read as "Unavailable" on both the panel and its cards: a
+  `403` (a vendor decision about the account, the same one a `401` is) and a
+  `500` (the vendor's own server, which the next poll usually clears) said the
+  same thing, and neither said what a user could do. A `403` now asks for the
+  provider's sign-in step, a `5xx` states that the provider is unavailable and
+  a retry is running, and a remaining `4xx` reads as a rejected request.
+- The refresh button is disabled while a poll is out, and a disabled item
+  takes no hover, so the tooltip that explained it never opened and a poll
+  running in the background greyed the button with nothing on screen saying
+  why. The header spinner now runs for every poll, not only one a user asked
+  for.
+- The panel tooltip listed the providers that answered and dropped the ones
+  that did not, so a failed provider disappeared from the summary without a
+  trace while the popup still showed its card. The tooltip now names the
+  providers it has no reading for, and marks a reading it is holding from
+  cache the way its card does.
+- Gauge view carried a meter's sub-detail (the spend of a cap, the absolute
+  reset time) in a hover tooltip only, so it had no visible place at all. The
+  gauge now states it under the dial, as the list row does.
 - A rate-limit window whose `reset_at` or `reset_after_seconds` was a very
   large number raised `OverflowError`: the seconds-to-milliseconds product of
   any value past 1.8e305 overflows a double, and rounding the resulting

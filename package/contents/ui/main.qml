@@ -390,21 +390,37 @@ PlasmoidItem {
         })
     }
 
+    // The providers a poll answered for but that have no reading to show. The
+    // tooltip below names the ones that did answer, so without this a failed
+    // provider simply vanished from the panel summary and the number on the
+    // panel read as the whole of what is there.
+    function failedNames() {
+        const names = []
+        if (claude && !claude.ok) names.push("Claude")
+        if (cursor && !cursor.ok) names.push("Cursor")
+        if (codex && !codex.ok) names.push("Codex")
+        if (grok && !grok.ok) names.push("Grok")
+        return names
+    }
+
     function tooltipBody() {
         const lines = []
         if (claude && claude.ok && claude.session)
             lines.push(qsTr("Claude session %1 · weekly %2")
                 .arg(pct(claude.session.util))
                 .arg(claude.weekly && claude.weekly[0]
-                    ? pct(claude.weekly[0].util) : qsTr("n/a")))
+                    ? pct(claude.weekly[0].util) : qsTr("n/a"))
+                + staleSuffix(claude))
         if (cursor && cursor.ok && cursor.periods && cursor.periods.length)
             lines.push(qsTr("Cursor %1 %2")
                 .arg(cursor.plan || qsTr("usage"))
-                .arg(pct(cursor.periods[0].util)))
+                .arg(pct(cursor.periods[0].util))
+                + staleSuffix(cursor))
         if (codex && codex.ok && codex.windows && codex.windows.length)
             lines.push(qsTr("Codex %1 %2")
                 .arg(codex.windows[0].label || qsTr("usage"))
-                .arg(pct(codex.windows[0].util)))
+                .arg(pct(codex.windows[0].util))
+                + staleSuffix(codex))
         if (grok && grok.ok && grok.periods) {
             // The period label is vendor data in the vendor's casing, and the
             // fallback below is a translated string: case-folding either one
@@ -412,17 +428,23 @@ PlasmoidItem {
             for (let i = 0; i < grok.periods.length; i++)
                 lines.push(qsTr("Grok %1 %2")
                     .arg(grok.periods[i].label || qsTr("usage"))
-                    .arg(pct(grok.periods[i].util)))
+                    .arg(pct(grok.periods[i].util))
+                    + staleSuffix(grok))
         }
         if (lines.length === 0)
             return errorMsg ? statusText() : qsTr("Loading")
+        const failed = failedNames()
+        if (failed.length)
+            lines.push(qsTr("No reading for: %1").arg(failed.join(", ")))
         return lines.join("\n")
     }
 
     // One vocabulary for a failure, so the banner and the provider cards never
     // label the same condition differently ("Error" vs "Rate-limited").
     function errText(code, signIn) {
-        if (code === "no-token" || code === "http-401")
+        // A 403 is a vendor decision about this account, the same one a 401
+        // is, and both are answered by signing in again.
+        if (code === "no-token" || code === "http-401" || code === "http-403")
             return signIn
         if (code === "net") return qsTr("Network error")
         // "exec" is a run that never produced a payload: python3 missing, the
@@ -430,6 +452,15 @@ PlasmoidItem {
         // failed, so the panel must not say it did.
         if (code === "exec") return qsTr("Quota poll did not run")
         if (code === "http-429") return qsTr("Rate-limited")
+        // The fetcher passes every status through as "http-<code>", so the two
+        // families left get their own wording rather than one "Unavailable"
+        // that reads the same whichever vendor answered and leaves the user
+        // with nothing to act on. A 5xx is the vendor's server and clears on
+        // the next poll, so it is stated as a wait, not a fault.
+        if (code && code.indexOf("http-5") === 0)
+            return qsTr("Provider unavailable, retrying")
+        if (code && code.indexOf("http-4") === 0)
+            return qsTr("Request rejected by the provider")
         if (code === "empty") return qsTr("No provider data returned")
         if (code === "config" && root.configError !== "")
             return qsTr("Check fetcher config: %1").arg(root.configError)
@@ -653,12 +684,18 @@ PlasmoidItem {
                         PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
                     }
                     PlasmaComponents3.BusyIndicator {
-                        visible: root.userRefreshing
+                        // Every poll, not only the one a user asked for: the
+                        // refresh button below is disabled while a run is out
+                        // and a disabled item gets no hover, so the tooltip
+                        // that explains the greyed button never opens. The
+                        // spinner is the only thing saying a poll is running.
+                        visible: root.fetching
                         implicitWidth: Kirigami.Units.gridUnit
                         implicitHeight: Kirigami.Units.gridUnit
                         // A spinner on its own says nothing over speech.
                         Accessible.role: Accessible.ProgressBar
-                        Accessible.name: qsTr("Refreshing")
+                        Accessible.name: root.userRefreshing
+                            ? qsTr("Refreshing") : qsTr("Updating")
                     }
                     PlasmaComponents3.ToolButton {
                         icon.name: "view-refresh"
@@ -1298,8 +1335,12 @@ PlasmoidItem {
         }
 
         PlasmaComponents3.Label {
-            visible: root.gaugeView && row.detail !== ""
-            text: row.detail
+            // The countdown and the sub-detail it sits beside in list view.
+            // Gauge view left the sub-detail to a hover tooltip, so the amount
+            // of a money-backed meter had no visible place at all.
+            visible: root.gaugeView
+                && (row.detail !== "" || row.subdetail !== "")
+            text: [row.detail, row.subdetail].filter(s => s !== "").join("\n")
             font.pointSize: Kirigami.Theme.smallFont.pointSize
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap

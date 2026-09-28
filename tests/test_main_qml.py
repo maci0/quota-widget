@@ -466,6 +466,67 @@ class MainQmlStaleWindowTest(unittest.TestCase):
         )
 
 
+class MainQmlStatusWordingTest(unittest.TestCase):
+    """A failure has to name its condition; "Unavailable" names none."""
+
+    @staticmethod
+    def _err_text() -> str:
+        return QML_SOURCE.split("function errText(", 1)[1].split("\n    }", 1)[0]
+
+    def test_a_forbidden_response_asks_for_a_sign_in(self) -> None:
+        # The fetcher calls a 403 final, the same as a 401, and both are
+        # answered the same way. It used to fall through to "Unavailable",
+        # which is not something a user can act on.
+        self.assertIn('code === "http-403"', self._err_text())
+        self.assertIn("return signIn", self._err_text())
+
+    def test_a_server_error_is_stated_as_a_wait(self) -> None:
+        # 429 was the only 5xx with a wording, so a 500 or a 503 that arrived
+        # before a reading existed read as an unfixable fault. The fetcher
+        # keeps the card through one and the next poll usually clears it.
+        self.assertIn('code.indexOf("http-5") === 0', self._err_text())
+        self.assertIn('qsTr("Provider unavailable, retrying")', self._err_text())
+
+    def test_the_panel_names_the_providers_it_has_no_reading_for(self) -> None:
+        # The tooltip listed only the providers that answered, so a failed one
+        # disappeared from the panel summary without a trace while the popup
+        # showed a card for it.
+        self.assertIn("function failedNames()", QML_SOURCE)
+        tooltip = QML_SOURCE.split("function tooltipBody(", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("failedNames()", tooltip)
+        self.assertIn('qsTr("No reading for: %1")', tooltip)
+
+    def test_the_panel_marks_a_reading_it_is_only_caching(self) -> None:
+        # The popup marks a kept reading "cached"; the panel showed the same
+        # number with nothing on it, so a failed poll looked live there.
+        tooltip = QML_SOURCE.split("function tooltipBody(", 1)[1].split("\n    }", 1)[0]
+        for provider in ("claude", "cursor", "codex", "grok"):
+            self.assertIn(f"staleSuffix({provider})", tooltip)
+
+    def test_a_poll_in_flight_is_visible(self) -> None:
+        # The refresh button is disabled while a run is out, and a disabled
+        # item receives no hover, so the tooltip that explains the greyed
+        # button never opened. The spinner has to cover the automatic polls.
+        indicator = QML_SOURCE.split("PlasmaComponents3.BusyIndicator", 1)[1]
+        self.assertIn(
+            "visible: root.fetching", indicator.split("\n                    }", 1)[0]
+        )
+
+    def test_the_gauge_shows_the_detail_the_list_row_shows(self) -> None:
+        # A money-backed meter states what was spent of what it was capped at
+        # in its sub-detail. Gauge view carried it in a hover tooltip only, so
+        # it had no visible place at all.
+        label = QML_SOURCE.split("// gauge", 1)[1]
+        self.assertIn(
+            '&& (row.detail !== "" || row.subdetail !== "")',
+            label,
+        )
+        self.assertIn(
+            'text: [row.detail, row.subdetail].filter(s => s !== "").join("\\n")',
+            label,
+        )
+
+
 class MainQmlTokenTest(unittest.TestCase):
     """The token block is the widget's type scale. A factor typed at a call
     site is a fourth scale nobody chose, so the steps are pinned here."""
