@@ -52,7 +52,7 @@ PlasmoidItem {
             disconnectSource(sourceName)
             if (data["exit code"] !== 0 && data["exit code"] !== "0") {
                 // Keep last-known values on transient failures.
-                if (!root.claude && !root.cursor && !root.grok && !root.codex)
+                if (root.noData())
                     root.errorMsg = "exec"
                 return
             }
@@ -72,7 +72,7 @@ PlasmoidItem {
                     || (p.grok && p.grok.error)
                     || (p.codex && p.codex.error) || "empty")
             } catch (e) {
-                if (!root.claude && !root.cursor && !root.grok && !root.codex)
+                if (root.noData())
                     root.errorMsg = "parse"
             }
         }
@@ -99,6 +99,9 @@ PlasmoidItem {
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
+    function noData() {
+        return !root.claude && !root.cursor && !root.grok && !root.codex
+    }
     // Keep the last good reading on transient failures (429/5xx/net/exec) so a
     // blip doesn't blank a card. Replace on success or on auth/no-token errors.
     function mergeProv(oldv, newv) {
@@ -392,7 +395,7 @@ PlasmoidItem {
                     subtitle: (root.claude && root.claude.ok && root.claude.plan)
                         ? (root.claude.plan + (root.claude.stale ? " · cached" : ""))
                         : ((root.claude && root.claude.error)
-                            ? claudeErr(root.claude.error) : "Loading")
+                            ? errLabel(root.claude.error, "Sign in with Claude Code") : "Loading")
                     accent: "#D97757"
                     ok: root.claude && root.claude.ok
 
@@ -495,7 +498,7 @@ PlasmoidItem {
                     subtitle: (root.cursor && root.cursor.ok && root.cursor.plan)
                         ? (root.cursor.plan + (root.cursor.stale ? " · cached" : ""))
                         : ((root.cursor && root.cursor.error)
-                            ? cursorErr(root.cursor.error) : "Loading")
+                            ? errLabel(root.cursor.error, "Sign in to Cursor") : "Loading")
                     accent: "#F54E00"
                     ok: root.cursor && root.cursor.ok
 
@@ -554,7 +557,7 @@ PlasmoidItem {
                     subtitle: (root.codex && root.codex.ok && root.codex.plan)
                         ? root.codex.plan
                         : ((root.codex && root.codex.error)
-                            ? codexErr(root.codex.error) : "Loading")
+                            ? errLabel(root.codex.error, "Sign in with `codex login`") : "Loading")
                     accent: "#10A37F"
                     ok: root.codex && root.codex.ok
 
@@ -655,7 +658,7 @@ PlasmoidItem {
                     subtitle: (root.grok && root.grok.ok)
                         ? "Credit limits"
                         : ((root.grok && root.grok.error)
-                            ? grokErr(root.grok.error) : "Loading")
+                            ? errLabel(root.grok.error, "Sign in with `grok login`") : "Loading")
                     accent: "#1DA1F2"
                     ok: root.grok && root.grok.ok
 
@@ -720,30 +723,11 @@ PlasmoidItem {
         }
     }
 
-    function claudeErr(code) {
+    function errLabel(code, signIn) {
         if (code === "no-token" || code === "http-401")
-            return "Sign in with Claude Code"
+            return signIn
         if (code === "net") return "Network error"
         if (code === "http-429") return "Rate-limited"
-        return "Unavailable"
-    }
-    function cursorErr(code) {
-        if (code === "no-token" || code === "http-401")
-            return "Sign in to Cursor"
-        if (code === "net") return "Network error"
-        if (code === "http-429") return "Rate-limited"
-        return "Unavailable"
-    }
-    function codexErr(code) {
-        if (code === "no-token" || code === "http-401")
-            return "Sign in with `codex login`"
-        if (code === "net") return "Network error"
-        return "Unavailable"
-    }
-    function grokErr(code) {
-        if (code === "no-token" || code === "http-401")
-            return "Sign in with `grok login`"
-        if (code === "net") return "Network error"
         return "Unavailable"
     }
 

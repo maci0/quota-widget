@@ -30,6 +30,15 @@ def _rows(value: object) -> list[Payload]:
     return [row for row in value if isinstance(row, dict)]
 
 
+def _join(*parts: str) -> str:
+    return " ".join(part for part in parts if part)
+
+
+def _period_bits(payload: Payload) -> str:
+    rows = _rows(payload.get("periods"))
+    return _join(*(f"{row.get('label', '')}={row.get('util')}%" for row in rows))
+
+
 def _ok_line(name: str, payload: Payload, extra: str) -> None:
     if payload.get("ok"):
         print(f"  {name}: ok {extra}".rstrip())
@@ -63,45 +72,31 @@ def main() -> None:
     codex = _dict(data.get("codex"))
 
     session = _dict(claude.get("session")).get("util")
-    claude_extra = " ".join(
-        part
-        for part in (
+    _ok_line(
+        "claude",
+        claude,
+        _join(
             str(claude.get("plan") or ""),
             f"session={session}%" if claude.get("ok") and session is not None else "",
             "stale" if claude.get("stale") else "",
-        )
-        if part
-    )
-    _ok_line("claude", claude, claude_extra)
-
-    cursor_bits = [
-        str(cursor.get("plan") or ""),
-        *(
-            f"{row.get('label', '')}={row.get('util')}%"
-            for row in _rows(cursor.get("periods"))
         ),
-    ]
-    _ok_line("cursor", cursor, " ".join(bit for bit in cursor_bits if bit))
+    )
+
+    _ok_line(
+        "cursor", cursor, _join(str(cursor.get("plan") or ""), _period_bits(cursor))
+    )
 
     windows = len(_rows(codex.get("windows")))
     _ok_line(
         "codex",
         codex,
-        " ".join(
-            part
-            for part in (
-                str(codex.get("plan") or ""),
-                f"windows={windows}" if codex.get("ok") else "",
-            )
-            if part
+        _join(
+            str(codex.get("plan") or ""),
+            f"windows={windows}" if codex.get("ok") else "",
         ),
     )
 
-    grok_bits = [
-        f"{row.get('label', '')}={row.get('util')}%"
-        for row in _rows(grok.get("periods"))
-    ]
-    _ok_line("grok", grok, " ".join(grok_bits))
+    _ok_line("grok", grok, _period_bits(grok))
 
 
 if __name__ == "__main__":

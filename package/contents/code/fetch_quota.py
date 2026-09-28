@@ -115,21 +115,21 @@ REFRESH_LOCK_POLL_S = 0.25
 FILE_MODE_PRIVATE = 0o600
 # Re-read-after-write retries before a token store is left to the racing writer.
 MERGE_WRITE_ATTEMPTS = 3
-TOKEN_SKEW_MS = 120_000
 TOKEN_SKEW_S = 120
+TOKEN_SKEW_MS = TOKEN_SKEW_S * 1000
 RETRY_AFTER_MIN_S = 0.5
 RETRY_AFTER_MAX_S = 10.0
 # Unix seconds vs milliseconds: values above this are treated as ms.
 MS_EPOCH_CUTOFF = 10_000_000_000
 ERROR_BODY_PREVIEW = 200
-CODEX_SESSION_MAX_S = 6 * 3600
-CODEX_TWO_DAY_S = 2 * 86400
-CODEX_WEEK_MIN_S = 6 * 86400
-CODEX_WEEK_MAX_S = 8 * 86400
-CODEX_MONTH_MIN_S = 28 * 86400
-CODEX_MONTH_MAX_S = 32 * 86400
 SECONDS_PER_HOUR = 3600
 SECONDS_PER_DAY = 86400
+CODEX_SESSION_MAX_S = 6 * SECONDS_PER_HOUR
+CODEX_TWO_DAY_S = 2 * SECONDS_PER_DAY
+CODEX_WEEK_MIN_S = 6 * SECONDS_PER_DAY
+CODEX_WEEK_MAX_S = 8 * SECONDS_PER_DAY
+CODEX_MONTH_MIN_S = 28 * SECONDS_PER_DAY
+CODEX_MONTH_MAX_S = 32 * SECONDS_PER_DAY
 
 
 def emit(obj: JsonDict) -> None:
@@ -152,10 +152,8 @@ def plan_label(subscription: str | None, tier: str | None) -> str:
     sub = (subscription or "").lower()
     tier = (tier or "").lower()
 
-    mult = None
-    m = re.search(r"max[_\s-]?(\d+)x", tier) or re.search(r"(\d+)x", tier)
-    if m:
-        mult = m.group(1)
+    m = re.search(r"(\d+)x", tier)
+    mult = m.group(1) if m else None
 
     if "max" in sub or "max" in tier:
         return f"Max ({mult}x)" if mult else "Max"
@@ -310,7 +308,6 @@ def _stale_cache(name: str) -> JsonDict | None:
         return None
     out = dict(cached)
     out["stale"] = True
-    out["ok"] = True
     return out
 
 
@@ -479,6 +476,76 @@ def _refresh_claude(cred: JsonDict) -> JsonDict | None:
         return new_cred
 
 
+def _claude_is_session(item: JsonDict) -> bool:
+    return item.get("kind") == "session" or item.get("group") == "session"
+
+
+def _claude_weekly(data: JsonDict) -> list[JsonDict]:
+    """Weekly meters, preferring the structured `limits` array over legacy keys."""
+    limits = data.get("limits")
+    weekly: list[JsonDict] = []
+    if isinstance(limits, list) and limits:
+        # The structured list matches the website list, including scoped bars.
+        for item in limits:
+            if not isinstance(item, dict) or _claude_is_session(item):
+                continue
+            kind = str(item.get("kind") or "")
+            scope = _as_dict(item.get("scope"))
+            label = "All models"
+            if scope.get("surface"):
+                label = str(scope["surface"])
+            elif _as_dict(scope.get("model")).get("display_name"):
+                label = str(_as_dict(scope["model"])["display_name"])
+            if kind == "weekly_all":
+                label = "All models"
+            weekly.append(
+                {
+                    "label": label,
+                    "util": item.get("percent"),
+                    "resets_ms": iso_to_ms(item.get("resets_at")),
+                    "kind": kind,
+                }
+            )
+        return weekly
+    for key, label in (
+        ("seven_day", "All models"),
+        ("seven_day_opus", "Opus"),
+        ("seven_day_sonnet", "Sonnet"),
+        ("seven_day_cowork", "Cowork"),
+    ):
+        block = _as_dict(data.get(key))
+        if not block:
+            continue
+        weekly.append(
+            {
+                "label": label,
+                "util": block.get("utilization"),
+                "resets_ms": iso_to_ms(block.get("resets_at")),
+                "kind": key,
+            }
+        )
+    return weekly
+
+
+def _claude_session(data: JsonDict) -> tuple[Any, int | None]:
+    """(util percent, reset ms) for the 5-hour window; `limits` wins when present."""
+    five = _as_dict(data.get("five_hour"))
+    util: Any = five.get("utilization")
+    resets_ms = iso_to_ms(five.get("resets_at"))
+    limits = data.get("limits")
+    if not isinstance(limits, list):
+        return util, resets_ms
+    for item in limits:
+        if not isinstance(item, dict) or not _claude_is_session(item):
+            continue
+        if item.get("percent") is not None:
+            util = item.get("percent")
+        if item.get("resets_at"):
+            resets_ms = iso_to_ms(item.get("resets_at"))
+        break
+    return util, resets_ms
+
+
 def fetch_claude() -> JsonDict:
     if not CLAUDE_CRED.is_file():
         return {"ok": False, "error": "no-token"}
@@ -539,70 +606,8 @@ def fetch_claude() -> JsonDict:
         return {"ok": False, "error": f"http-{status}" if status else "net"}
 
     plan = plan_label(oauth.get("subscriptionType"), oauth.get("rateLimitTier"))
-
-    # Prefer the structured `limits` array (matches the website list,
-    # including scoped weekly bars like Fable). Fall back to legacy keys.
-    weekly: list[JsonDict] = []
-    limits = data.get("limits")
-    if isinstance(limits, list) and limits:
-        for item in limits:
-            if not isinstance(item, dict):
-                continue
-            kind = item.get("kind") or ""
-            group = item.get("group") or ""
-            if group == "session" or kind == "session":
-                # handled separately below
-                continue
-            label = "All models"
-            scope = _as_dict(item.get("scope"))
-            model = _as_dict(scope.get("model"))
-            if model.get("display_name"):
-                label = str(model["display_name"])
-            surface = scope.get("surface")
-            if surface:
-                label = str(surface)
-            if kind == "weekly_all":
-                label = "All models"
-            weekly.append(
-                {
-                    "label": label,
-                    "util": item.get("percent"),
-                    "resets_ms": iso_to_ms(item.get("resets_at")),
-                    "kind": kind,
-                }
-            )
-    else:
-        for key, label in (
-            ("seven_day", "All models"),
-            ("seven_day_opus", "Opus"),
-            ("seven_day_sonnet", "Sonnet"),
-            ("seven_day_cowork", "Cowork"),
-        ):
-            block = _as_dict(data.get(key))
-            if not block:
-                continue
-            weekly.append(
-                {
-                    "label": label,
-                    "util": block.get("utilization"),
-                    "resets_ms": iso_to_ms(block.get("resets_at")),
-                    "kind": key,
-                }
-            )
-
-    five = _as_dict(data.get("five_hour"))
-    session_util = five.get("utilization")
-    session_reset = iso_to_ms(five.get("resets_at"))
-    if isinstance(limits, list):
-        for item in limits:
-            if isinstance(item, dict) and (
-                item.get("kind") == "session" or item.get("group") == "session"
-            ):
-                if item.get("percent") is not None:
-                    session_util = item.get("percent")
-                if item.get("resets_at"):
-                    session_reset = iso_to_ms(item.get("resets_at"))
-                break
+    weekly = _claude_weekly(data)
+    session_util, session_reset = _claude_session(data)
 
     extra = _as_dict(data.get("extra_usage"))
     spend = _as_dict(data.get("spend"))
@@ -818,7 +823,7 @@ def fetch_grok() -> JsonDict:
 
     state = {"entry": entry}
 
-    def get_cfg(url: str) -> tuple[int | None, JsonDict | None]:
+    def get_cfg(url: str) -> tuple[int, JsonDict | None]:
         def call(token: str) -> tuple[int, object]:
             return fetch_json(
                 url,
@@ -881,24 +886,26 @@ def fetch_grok() -> JsonDict:
 # ── Codex ───────────────────────────────────────────────────────────────────
 
 
-def _jwt_claim(token: str, *path: str) -> Any:
-    """Nested JWT payload value; claim types are not a closed set."""
+def _jwt_payload(token: str) -> JsonDict | None:
     try:
         parts = token.split(".")
         if len(parts) < 2:
             return None
         pad = "=" * ((4 - len(parts[1]) % 4) % 4)
         payload = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
-        if not isinstance(payload, dict):
-            return None
-        cur: Any = payload
-        for key in path:
-            if not isinstance(cur, dict):
-                return None
-            cur = cur.get(key)
-        return cur
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError):
         return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _jwt_claim(token: str, *path: str) -> Any:
+    """Nested JWT payload value; claim types are not a closed set."""
+    cur: Any = _jwt_payload(token)
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
 
 
 def _jwt_exp_ms(token: str) -> int | None:
@@ -1433,6 +1440,14 @@ def fetch_cursor() -> JsonDict:
 # ── main ────────────────────────────────────────────────────────────────────
 
 
+def _safe_fetch(fetch: Callable[[], JsonDict]) -> JsonDict:
+    try:
+        return fetch()
+    except Exception:
+        # Plasmashell needs JSON every poll; one provider must not abort the rest.
+        return {"ok": False, "error": "net"}
+
+
 def main() -> None:
     providers: dict[str, Callable[[], JsonDict]] = {
         "claude": fetch_claude,
@@ -1440,13 +1455,9 @@ def main() -> None:
         "grok": fetch_grok,
         "codex": fetch_codex,
     }
-    # Plasmashell needs JSON every poll; one provider must not abort the rest.
-    results: dict[str, JsonDict] = {}
-    for name, fetch in providers.items():
-        try:
-            results[name] = fetch()
-        except Exception:
-            results[name] = {"ok": False, "error": "net"}
+    results: dict[str, JsonDict] = {
+        name: _safe_fetch(fetch) for name, fetch in providers.items()
+    }
 
     emit(
         {
