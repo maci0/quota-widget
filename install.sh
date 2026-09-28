@@ -67,6 +67,8 @@ PKG_ID_RE="${PKG_ID//./\\.}"
 # https://specifications.freedesktop.org/basedir-spec/latest/
 xdg_data="$HOME/.local/share"
 [[ "${XDG_DATA_HOME:-}" = /* ]] && xdg_data="$XDG_DATA_HOME"
+xdg_config="$HOME/.config"
+[[ "${XDG_CONFIG_HOME:-}" = /* ]] && xdg_config="$XDG_CONFIG_HOME"
 xdg_cache="$HOME/.cache"
 [[ "${XDG_CACHE_HOME:-}" = /* ]] && xdg_cache="$XDG_CACHE_HOME"
 xdg_config="$HOME/.config"

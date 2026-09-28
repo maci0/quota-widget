@@ -347,6 +347,9 @@ MERGE_WRITE_ATTEMPTS = 3
 # entry and keeps it until the next poll, so a list that grows with whatever
 # the API reports is memory the widget holds for the rest of the session.
 MAX_WEEKLY_LIMITS = 12
+# How far a split plan meter may sit from the included meter and still be
+# reported as its own gauge. A rounding difference is not a second meter.
+CURSOR_METER_AGREEMENT_PCT = 0.5
 TOKEN_SKEW_S = 120
 TOKEN_SKEW_MS = TOKEN_SKEW_S * 1000
 RETRY_AFTER_MIN_S = 0.5
@@ -790,6 +793,21 @@ def _merge_write_json(
     )
 
 
+def _write_rotated_tokens(
+    provider: str, path: Path, update: MergeUpdate, base: JsonDict
+) -> None:
+    """Persist a rotated token store, naming the file when the write fails.
+
+    The poll still runs on the in-memory token, but a store left holding one
+    the provider has already retired makes the next poll refresh again, and
+    signs the user out of the vendor CLI along with the widget.
+    """
+    try:
+        _merge_write_json(path, update, base)
+    except OSError as exc:
+        warn(f"{provider} token rotated but {path} was not written: {exc}")
+
+
 def _digest(value: str | None) -> str | None:
     """Stable 16-hex id for one account, or None if the value names no account.
 
@@ -926,6 +944,20 @@ def _stale_cache(name: str, account: str | None) -> JsonDict | None:
     out = dict(cached)
     out["stale"] = True
     return out
+
+
+def _fail_or_cached(name: str, account: str | None, status: int) -> JsonDict:
+    """The payload for a provider call that did not return a reading.
+
+    A transient failure serves the last good reading from the cache, so a
+    machine that is offline keeps the card the panel would otherwise blank. A
+    401 or 403 is a vendor decision and is reported as one, cache or no cache.
+    """
+    if _transient_failure(status):
+        cached = _stale_cache(name, account)
+        if cached:
+            return cached
+    return _http_error(status, account)
 
 
 def _read_json_dict(path: Path) -> JsonDict | None:
@@ -1184,14 +1216,7 @@ def _refresh_claude(cred: JsonDict) -> tuple[JsonDict | None, bool]:
             store["claudeAiOauth"] = new_oauth
             return "claudeAiOauth", new_oauth
 
-        try:
-            _merge_write_json(config().claude_cred, put_oauth, new_cred)
-        except OSError as exc:
-            # The poll still runs on the in-memory token, but the file on disk
-            # keeps a token the provider has already retired, so the next poll
-            # refreshes again and the CLI signs the user out.
-            path = config().claude_cred
-            warn(f"claude token rotated but {path} was not written: {exc}")
+        _write_rotated_tokens("claude", config().claude_cred, put_oauth, new_cred)
         return new_cred, rate_limited
 
 
@@ -1246,10 +1271,10 @@ def _claude_weekly(data: JsonDict) -> list[JsonDict]:
     return weekly
 
 
-def _claude_session(data: JsonDict) -> tuple[Any, int | None]:
+def _claude_session(data: JsonDict) -> tuple[float | None, int | None]:
     """(util percent, reset ms) for the 5-hour window; `limits` wins when present."""
     five = _as_dict(data.get("five_hour"))
-    util: Any = _finite_number(five.get("utilization"))
+    util = _finite_number(five.get("utilization"))
     resets_ms = iso_to_ms(five.get("resets_at"))
     limits = data.get("limits")
     if not isinstance(limits, list):
@@ -1329,11 +1354,7 @@ def fetch_claude() -> JsonDict:
             return {"ok": False, "error": "http-429", "account": account}
         return {"ok": False, "error": "http-401", "account": account}
     if status != 200 or not isinstance(data, dict):
-        if _transient_failure(status):
-            cached = _stale_cache("claude", account)
-            if cached:
-                return cached
-        return _http_error(status, account)
+        return _fail_or_cached("claude", account, status)
 
     plan = plan_label(oauth.get("subscriptionType"), oauth.get("rateLimitTier"))
     weekly = _claude_weekly(data)
@@ -1507,11 +1528,9 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
             store[auth_key] = new_entry
             return auth_key, new_entry
 
-        try:
-            _merge_write_json(config().grok_auth, put_entry, {auth_key: new_entry})
-        except OSError as exc:
-            warn(f"grok token rotated but {config().grok_auth} was not written: {exc}")
-
+        _write_rotated_tokens(
+            "grok", config().grok_auth, put_entry, {auth_key: new_entry}
+        )
         return new_entry
 
 
@@ -1673,11 +1692,7 @@ def fetch_grok() -> JsonDict:
         status = next((s for s in (st_week, st_month) if s != 200), 0)
         if status == 401:
             return {"ok": False, "error": "http-401", "account": account}
-        if _transient_failure(status):
-            cached = _stale_cache("grok", account)
-            if cached:
-                return cached
-        return _http_error(status, account)
+        return _fail_or_cached("grok", account, status)
 
     result = _reading(
         {"ok": True, "account": account, "plan": "Grok", "periods": periods}
@@ -1821,12 +1836,7 @@ def _refresh_codex(auth: JsonDict) -> JsonDict | None:
             store["last_refresh"] = new_auth["last_refresh"]
             return "tokens", new_tokens
 
-        try:
-            _merge_write_json(config().codex_auth, put_tokens, new_auth)
-        except OSError as exc:
-            warn(
-                f"codex token rotated but {config().codex_auth} was not written: {exc}"
-            )
+        _write_rotated_tokens("codex", config().codex_auth, put_tokens, new_auth)
         return new_auth
 
 
@@ -1879,23 +1889,20 @@ def fetch_codex() -> JsonDict:
         return fetch_json(CODEX_USAGE_URL, headers)
 
     status, data = call(access)
+    account = _account_id(access, str(account_id) if account_id else None)
     if status == 401:
         refreshed = _refresh_codex(auth)
-        if not refreshed:
-            return {"ok": False, "error": "http-401"}
-        tokens = _as_dict(refreshed.get("tokens"))
-        access = tokens.get("access_token")
-        if not isinstance(access, str):
-            return {"ok": False, "error": "http-401"}
-        status, data = call(access)
-
-    account = _account_id(access, str(account_id) if account_id else None)
+        if refreshed:
+            tokens = _as_dict(refreshed.get("tokens"))
+            access = tokens.get("access_token")
+            account_id = tokens.get("account_id") or account_id
+            if isinstance(access, str) and access:
+                account = _account_id(access, str(account_id) if account_id else None)
+                status, data = call(access)
+    if status == 401:
+        return {"ok": False, "error": "http-401", "account": account}
     if status != 200 or not isinstance(data, dict):
-        if _transient_failure(status):
-            cached = _stale_cache("codex", account)
-            if cached:
-                return cached
-        return _http_error(status, account)
+        return _fail_or_cached("codex", account, status)
 
     plan_type = data.get("plan_type") or "Codex"
     plan = str(plan_type).replace("_", " ").title()
@@ -2145,6 +2152,44 @@ def _cursor_meter(
     }
 
 
+def _cursor_split_percent_meters(
+    plan_u: Any, included: JsonDict | None, cycle_end: int | None
+) -> list[JsonDict]:
+    """The Auto and API meters a plan block carries, or none.
+
+    A block that reports both splits them out of the included block, so the
+    split is a second gauge only when it says something the included meter
+    does not: an auto and an API percentage that agree with each other, or with
+    the included meter, restate a number the card already shows.
+    """
+    if not isinstance(plan_u, dict):
+        return []
+    auto_pct = _finite_number(plan_u.get("autoPercentUsed"))
+    api_pct = _finite_number(plan_u.get("apiPercentUsed"))
+    if auto_pct is None or api_pct is None:
+        return []
+    if auto_pct == api_pct:
+        return []
+    util = included["util"] if included else None
+    if (
+        util is not None
+        and abs(auto_pct - float(util)) <= CURSOR_METER_AGREEMENT_PCT
+        and abs(api_pct - float(util)) <= CURSOR_METER_AGREEMENT_PCT
+    ):
+        return []
+    return [
+        {
+            "label": label,
+            "util": pct,
+            "used": None,
+            "limit": None,
+            "resets_ms": cycle_end,
+            "unit": "percent",
+        }
+        for label, pct in (("Auto + Composer", auto_pct), ("API", api_pct))
+    ]
+
+
 def parse_cursor_summary(data: JsonDict, plan_hint: str | None = None) -> JsonDict:
     """Turn /api/usage-summary JSON into widget periods."""
     plan = cursor_plan_label(_as_text(data.get("membershipType")) or plan_hint)
@@ -2166,40 +2211,7 @@ def parse_cursor_summary(data: JsonDict, plan_hint: str | None = None) -> JsonDi
             included = _cursor_meter(overall, "Included", "cents", cycle_end)
         if included:
             periods.append(included)
-        if isinstance(plan_u, dict):
-            auto_pct = _finite_number(plan_u.get("autoPercentUsed"))
-            api_pct = _finite_number(plan_u.get("apiPercentUsed"))
-            util = included["util"] if included else None
-            if (
-                auto_pct is not None
-                and api_pct is not None
-                and (auto_pct != api_pct)
-                and (
-                    util is None
-                    or abs(auto_pct - float(util)) > 0.5
-                    or abs(api_pct - float(util)) > 0.5
-                )
-            ):
-                periods.append(
-                    {
-                        "label": "Auto + Composer",
-                        "util": auto_pct,
-                        "used": None,
-                        "limit": None,
-                        "resets_ms": cycle_end,
-                        "unit": "percent",
-                    }
-                )
-                periods.append(
-                    {
-                        "label": "API",
-                        "util": api_pct,
-                        "used": None,
-                        "limit": None,
-                        "resets_ms": cycle_end,
-                        "unit": "percent",
-                    }
-                )
+        periods.extend(_cursor_split_percent_meters(plan_u, included, cycle_end))
 
     on_demand = _cursor_meter(iu.get("onDemand"), "On-demand", "cents", cycle_end)
     team = _as_dict(data.get("teamUsage"))
@@ -2252,13 +2264,8 @@ def fetch_cursor() -> JsonDict:
         # request, not a signed-out session, and labelling it 401 sends the
         # user to re-authenticate for nothing.
         return {"ok": False, "error": f"http-{status}", "account": account}
-    if _transient_failure(status):
-        cached = _stale_cache("cursor", account)
-        if cached:
-            return cached
-        return _http_error(status, account)
     if status != 200 or not isinstance(data, dict):
-        return _http_error(status, account)
+        return _fail_or_cached("cursor", account, status)
 
     summary = parse_cursor_summary(data, auth.get("plan"))
     summary["account"] = account
