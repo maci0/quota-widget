@@ -38,7 +38,7 @@ if ! python3 "$ROOT/package/contents/code/fetch_quota.py" \
 else
   echo "data source ok:"
   python3 "$ROOT/scripts/print_smoke.py" "$SCRATCH/smoke.json" \
-    || echo "warning: invalid configuration (detail in $SCRATCH/smoke.err)" >&2
+    || echo "warning: smoke check failed (detail above)" >&2
 fi
 
 # Bytecode caches are build residue, not content: the whole package/ tree is

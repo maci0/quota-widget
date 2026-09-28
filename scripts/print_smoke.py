@@ -11,13 +11,27 @@ from typing import Any
 # JSON dump from fetch_quota.py: provider payloads are unversioned dicts.
 Payload = dict[str, Any]
 
+USAGE_LINE = "usage: print_smoke.py [-h] [DUMP]"
+
+HELP = f"""{USAGE_LINE}
+
+Summarize a fetch_quota.py JSON dump: one line per provider on stdout, or
+exit 1 when the dump carries a config error (detail on stderr).
+
+positional arguments:
+  DUMP   dump to read; defaults to .scratch/smoke.json under the project root
+
+options:
+  -h, --help  print this help and exit
+"""
+
 
 def project_root() -> Path:
     start = Path(__file__).resolve().parent
     for path in [start, *start.parents]:
         if (path / "package" / "metadata.json").is_file():
             return path
-    raise SystemExit("package/metadata.json not found")
+    raise SystemExit("print_smoke: package/metadata.json not found")
 
 
 def _dict(value: object) -> Payload:
@@ -49,28 +63,34 @@ def _ok_line(name: str, payload: Payload, extra: str) -> None:
 def _load(path: Path) -> Payload:
     if not path.is_file():
         raise SystemExit(
-            f"no fetch_quota.py dump at {path}\n"
+            f"print_smoke: no fetch_quota.py dump at {path}\n"
             "run: mkdir -p .scratch && "
             "python3 package/contents/code/fetch_quota.py > .scratch/smoke.json"
         )
     try:
         return _dict(json.loads(path.read_text(encoding="utf-8")))
     except UnicodeDecodeError as exc:
-        raise SystemExit(f"{path} is not valid UTF-8: {exc}") from exc
+        raise SystemExit(f"print_smoke: {path} is not valid UTF-8: {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"{path} is not valid JSON: {exc}") from exc
+        raise SystemExit(f"print_smoke: {path} is not valid JSON: {exc}") from exc
 
 
-def main() -> None:
-    dump = (
-        Path(sys.argv[1])
-        if len(sys.argv) > 1
-        else project_root() / ".scratch" / "smoke.json"
-    )
+def main(argv: list[str] | None = None) -> None:
+    args = sys.argv[1:] if argv is None else argv
+    if args in (["-h"], ["--help"]):
+        print(HELP, end="")
+        raise SystemExit(0)
+    if len(args) > 1:
+        print(
+            f"print_smoke: unexpected argument {args[1]!r}\n{USAGE_LINE}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    dump = Path(args[0]) if args else project_root() / ".scratch" / "smoke.json"
     data = _load(dump)
     config_error = data.get("config_error")
     if config_error:
-        print(f"  config error: {config_error}")
+        print(f"print_smoke: config error: {config_error}", file=sys.stderr)
         raise SystemExit(1)
     claude = _dict(data.get("claude"))
     cursor = _dict(data.get("cursor"))

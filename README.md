@@ -62,6 +62,10 @@ python3 package/contents/code/fetch_quota.py > .scratch/smoke.json
 python3 scripts/print_smoke.py .scratch/smoke.json
 ```
 
+Both take `--help`. The fetcher prints one JSON object on stdout and keeps
+diagnostics on stderr, so `fetch_quota.py > dump.json` is safe; `--print-config`
+shows the paths and knobs it resolved, without reading a token.
+
 ## Development
 
 Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.11+ (`uv` installs it).

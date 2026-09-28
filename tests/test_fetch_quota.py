@@ -50,6 +50,14 @@ _SANDBOX_ENV = {
     "QUOTA_WIDGET_CACHE": str(Path(_SANDBOX.name) / "cache"),
 }
 
+# Short names a test binds a credential file to, and the env var that carries it.
+_CRED_ENV = {
+    "CLAUDE_CRED": "QUOTA_WIDGET_CLAUDE_CREDENTIALS",
+    "CODEX_AUTH": "QUOTA_WIDGET_CODEX_AUTH",
+    "GROK_AUTH": "QUOTA_WIDGET_GROK_AUTH",
+    "CURSOR_AUTH_JSON": "QUOTA_WIDGET_CURSOR_AUTH",
+}
+
 
 @contextlib.contextmanager
 def point_credential(name: str, path: Path) -> Iterator[None]:
@@ -295,25 +303,6 @@ def _fake_jwt(sub: str) -> str:
         .decode()
     )
     return f"{header}.{payload}.sig"
-
-
-# Test-side names for the credential files the config now owns.
-Credential = Literal["CLAUDE_CRED", "CODEX_AUTH", "GROK_AUTH", "CURSOR_AUTH_JSON"]
-
-
-def point_credential(case: unittest.TestCase, name: Credential, path: Path) -> None:
-    """Point one provider at a scratch credential file for the whole test."""
-    original = fetch_quota.config()
-    if name == "CLAUDE_CRED":
-        patched = dataclasses.replace(original, claude_cred=path)
-    elif name == "CODEX_AUTH":
-        patched = dataclasses.replace(original, codex_auth=path)
-    elif name == "GROK_AUTH":
-        patched = dataclasses.replace(original, grok_auth=path)
-    else:
-        patched = dataclasses.replace(original, cursor_auth=path)
-    fetch_quota._CONFIG = patched
-    case.addCleanup(setattr, fetch_quota, "_CONFIG", original)
 
 
 def _http_returning(status: int, body: object, hdrs: object = None) -> HttpFake:
@@ -1276,9 +1265,30 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(payload["config"]["home"], "/home/widget")
 
     def test_unknown_argument_exits_nonzero(self) -> None:
-        with self.assertRaises(SystemExit) as ctx:
-            fetch_quota.main(["--nope"])
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as ctx:
+                fetch_quota.main(["--nope"])
         self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("usage: fetch_quota.py", stderr.getvalue())
+
+    def test_help_exits_zero_and_lists_the_flags(self) -> None:
+        for flag in ("--help", "-h"):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                with self.assertRaises(SystemExit) as ctx:
+                    fetch_quota.main([flag])
+            self.assertEqual(ctx.exception.code, 0)
+            self.assertIn("--print-config", stdout.getvalue())
+
+    def test_help_survives_a_broken_config(self) -> None:
+        with (
+            patch.dict(os.environ, {"QUOTA_WIDGET_CACHE": "relative/path"}),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                fetch_quota.main(["--help"])
+        self.assertEqual(ctx.exception.code, 0)
 
 
 class Utf8StateFileTest(unittest.TestCase):
@@ -1505,6 +1515,37 @@ class PrintSmokeTest(unittest.TestCase):
         self.assertEqual(
             print_smoke._load(dump), {"claude": {"ok": True, "plan": "Pro"}}
         )
+
+    def test_help_exits_zero(self) -> None:
+        for flag in ("--help", "-h"):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                with self.assertRaises(SystemExit) as caught:
+                    print_smoke.main([flag])
+            self.assertEqual(caught.exception.code, 0)
+            self.assertIn("usage: print_smoke.py", stdout.getvalue())
+
+    def test_config_error_goes_to_stderr(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        dump = Path(tmp.name) / "smoke.json"
+        dump.write_text(json.dumps({"ok": False, "config_error": "bad cache path"}))
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as caught:
+                print_smoke.main([str(dump)])
+        self.assertEqual(caught.exception.code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("bad cache path", stderr.getvalue())
+
+    def test_extra_argument_is_a_usage_error(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as caught:
+                print_smoke.main(["a", "b"])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("usage: print_smoke.py", stderr.getvalue())
 
 
 class ReplayTest(unittest.TestCase):

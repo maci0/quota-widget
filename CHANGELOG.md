@@ -19,6 +19,9 @@ prints, so a fetcher and UI shipped together never break each other.
   smoke runs.
 - `docs/THREAT_MODEL.md`: entry points, trust boundaries, assets, and the
   threats that apply to each, with file references.
+- `--help` on the fetcher and on `print_smoke.py`, listing the flags, the
+  environment variables, and the exit codes. Help is answered before the
+  environment is read, so it works on a broken config.
 
 ### Fixed
 
@@ -60,6 +63,11 @@ prints, so a fetcher and UI shipped together never break each other.
   token store, and the write is UTF-8 rather than the locale encoding.
 - An HTTP error response is closed after its body is discarded, instead of
   relying on the process exit to release the socket.
+- An unknown argument now prints the usage line next to the error, and a
+  `print_smoke.py` config error goes to stderr so the provider lines on stdout
+  stay clean when piped.
+- The fetcher tests bind credential paths through the environment again, so
+  `uv run pytest` is green.
 
 ### Changed
 

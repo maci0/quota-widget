@@ -1746,6 +1746,35 @@ def fetch_cursor() -> JsonDict:
 
 # ── main ────────────────────────────────────────────────────────────────────
 
+USAGE_LINE = "usage: fetch_quota.py [--print-config] [--help]"
+
+HELP = f"""{USAGE_LINE}
+
+Poll each configured provider's usage endpoint and print one JSON object on
+stdout. Plasmashell polls this script every 2 minutes, so stdout stays pure
+JSON: diagnostics go to stderr. The exit code is 0 whenever JSON was printed,
+including a config error (the JSON then carries "error": "config").
+
+options:
+  --print-config  print the resolved config (paths and numeric knobs) and exit
+  -h, --help      print this help and exit
+
+environment:
+  QUOTA_WIDGET_HOME                 base for credential and cache paths
+  QUOTA_WIDGET_CACHE                provider cache dir
+  QUOTA_WIDGET_CACHE_MAX_AGE_S      seconds a cache entry stays fresh (24 h)
+  QUOTA_WIDGET_HTTP_TIMEOUT         per-request timeout, 0 < s <= 300
+  QUOTA_WIDGET_NOW_MS               pin the clock (ms since epoch) for replays
+  QUOTA_WIDGET_CLAUDE_CREDENTIALS   Claude credentials file
+  QUOTA_WIDGET_CODEX_AUTH           Codex auth file
+  QUOTA_WIDGET_GROK_AUTH            Grok auth file
+  QUOTA_WIDGET_CURSOR_AUTH          Cursor auth file
+  QUOTA_WIDGET_CURSOR_STATE_DB      Cursor state db
+
+Plasmashell does not read shell rc files: export a variable into the user
+session (systemctl --user import-environment NAME) or the widget never sees it.
+"""
+
 
 def _safe_fetch(name: str, fetch: Callable[[], JsonDict]) -> JsonDict:
     try:
@@ -1762,6 +1791,10 @@ def _safe_fetch(name: str, fetch: Callable[[], JsonDict]) -> JsonDict:
 
 def main(argv: list[str] | None = None) -> None:
     args = sys.argv[1:] if argv is None else argv
+    if args in (["--help"], ["-h"]):
+        # Answered before load_config: help must work on a broken environment.
+        print(HELP, end="")
+        raise SystemExit(0)
     try:
         cfg = load_config()
     except ConfigError as exc:
@@ -1785,7 +1818,10 @@ def main(argv: list[str] | None = None) -> None:
     if args == ["--print-config"]:
         emit({"ok": True, "config": cfg.describe()})
     if args:
-        print(f"fetch_quota: unknown argument {args[0]!r}", file=sys.stderr)
+        print(
+            f"fetch_quota: unknown argument {args[0]!r}\n{USAGE_LINE}",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
 
     providers: dict[str, Callable[[], JsonDict]] = {
