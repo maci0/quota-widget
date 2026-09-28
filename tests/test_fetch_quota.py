@@ -1468,6 +1468,29 @@ class ConfigTest(unittest.TestCase):
                 fetch_quota.main(["--help"])
         self.assertEqual(ctx.exception.code, 0)
 
+    def test_providers_are_polled_concurrently(self) -> None:
+        # A poll waits on the network, so one provider's round trip must not
+        # be spent before the next one starts. The barrier only clears once all
+        # four are inside their fetch, which a sequential main() never reaches.
+        names = ("claude", "cursor", "grok", "codex")
+        started = threading.Barrier(len(names), timeout=10)
+        patches = [
+            patch.object(
+                fetch_quota,
+                f"fetch_{name}",
+                lambda name=name: (started.wait(), {"ok": True, "provider": name})[1],
+            )
+            for name in names
+        ]
+        with contextlib.ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                with self.assertRaises(SystemExit):
+                    fetch_quota.main([])
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual([payload[name]["provider"] for name in names], list(names))
+
 
 class Utf8StateFileTest(unittest.TestCase):
     """The credential, cache, and state files are UTF-8 whatever the locale is.

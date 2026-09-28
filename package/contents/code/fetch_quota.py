@@ -41,6 +41,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from email.message import Message
 from pathlib import Path
@@ -1865,14 +1866,25 @@ def main(argv: list[str] | None = None) -> None:
         )
         raise SystemExit(2)
 
+    # A poll waits on network, not CPU: each provider is one or more HTTPS round
+    # trips, so running them in turn made the panel wait the sum of every
+    # provider's latency. One thread per provider overlaps them. The refresh
+    # flock still serializes token rotation (flock is per open file
+    # description, so two threads conflict exactly as two processes do), and
+    # the results are keyed by name, so the payload keeps its field order.
     providers: dict[str, Callable[[], JsonDict]] = {
         "claude": fetch_claude,
         "cursor": fetch_cursor,
         "grok": fetch_grok,
         "codex": fetch_codex,
     }
+    with ThreadPoolExecutor(max_workers=len(providers)) as pool:
+        futures = {
+            name: pool.submit(_safe_fetch, name, fetch)
+            for name, fetch in providers.items()
+        }
     results: dict[str, JsonDict] = {
-        name: _safe_fetch(name, fetch) for name, fetch in providers.items()
+        name: future.result() for name, future in futures.items()
     }
 
     emit(
