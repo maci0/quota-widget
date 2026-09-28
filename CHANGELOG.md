@@ -178,6 +178,32 @@ fails if a Breaking entry lands in this section without a matching next version.
   sentence is assembled from a translated phrase and a separator written in
   QML. The names go through the catalog separator now, the one the meter's
   spoken summary already used.
+- A vendor number too large for a float took the whole provider down. The gate
+  every reading passes through turned an integer literal into a Python `int` of
+  whatever size the body spells, and `float()` raises `OverflowError` past
+  `1e308` rather than returning an infinity, so a 309-digit value in a
+  well-formed `200` was never a reading that read as absent: it was an
+  exception, and the panel was told the connection dropped while it held the
+  last good card. A number no float can hold now reads as no number. A JSON
+  integer literal past Python's digit limit is the same shape one step
+  earlier, where `json.loads` raises a plain `ValueError` the parse path did
+  not catch; it is a non-JSON body now, like any other it cannot read.
+- A plan name off the wire is drawn as it stands, so it no longer carries the
+  characters a label never needs: a bidi override that reorders the text
+  beside it, a control character that moves the cursor, or a length bounded
+  only by the response cap, which put a megabyte of vendor text in the cache
+  entry and on the panel every poll. Claude's plan and weekly-window labels,
+  Cursor's membership type, and Codex's `plan_type` are filtered and capped;
+  a value left empty by the filter falls back to the name the card would show
+  with no value at all. The label itself is unchanged for every plan name
+  there is.
+- A `Location` header or an OIDC `token_endpoint` naming a port that is not a
+  number, or one past 65535, raised out of the origin comparison instead of
+  naming no origin. Both URLs come off the network, and `ValueError` is neither
+  an `OSError` nor a `URLError`, so it left the redirect handler and blanked the
+  whole card as a transport failure. `_origin` reads the port inside the parse
+  and answers `None`, which is what the redirect guard and the Grok token
+  endpoint check already treat as a URL with no usable origin.
 - The traceback a crashing provider writes to the session journal spelled the
   home directory out. `traceback.print_exc` writes to stderr itself, past the
   redaction every `warn` line goes through, and each frame names a file under

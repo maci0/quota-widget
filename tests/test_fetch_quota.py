@@ -1478,6 +1478,29 @@ class NonFiniteReadingTest(unittest.TestCase):
         self.assertIsNone(meter["util"])
         self.assertIsNone(meter["used"])
 
+    def test_a_number_too_big_for_a_float_reads_as_absent(self) -> None:
+        # json.loads turns an integer literal into an int of any size, and
+        # float() raises OverflowError past 1e308 rather than returning inf.
+        # A 200 carrying one took the provider down with it.
+        huge = 10**309
+        self.assertIsNone(fetch_quota._finite_number(huge))
+        self.assertIsNone(fetch_quota._emittable(huge))
+        self.assertIsNone(fetch_quota._amount(huge))
+
+    def test_the_gate_itself_does_not_raise_on_a_big_integer(self) -> None:
+        with self.assertRaises(OverflowError):  # documents float()'s behaviour
+            float(10**309)
+        body = json.loads('{"used": ' + "9" * 400 + "}")
+        meter = fetch_quota._cursor_meter(
+            {"enabled": True, "used": body["used"], "limit": 100},
+            "Included",
+            "cents",
+            1,
+        )
+        assert meter is not None
+        self.assertIsNone(meter["used"])
+        self.assertIsNone(meter["util"])
+
     def test_money_value_rounds_to_the_nearest_cent(self) -> None:
         self.assertEqual(fetch_quota._money_val(249.9999999), 250)
         self.assertEqual(fetch_quota._money_val({"val": 100.5}), 100)
@@ -1555,6 +1578,39 @@ class PlanLabelTest(unittest.TestCase):
         self.assertEqual(fetch_quota.plan_label("max", "max_20x"), "Max (20x)")
         self.assertEqual(fetch_quota.plan_label("pro", "default_claude_pro"), "Pro")
         self.assertEqual(fetch_quota.plan_label(None, None), "Claude")
+
+
+class LabelTextTest(unittest.TestCase):
+    """A plan name arrives off the wire and is drawn as it stands, so it is
+    bounded and carries none of the characters that reorder or hide a label."""
+
+    RLO = chr(0x202E)  # RIGHT-TO-LEFT OVERRIDE
+    LRM = chr(0x200E)  # LEFT-TO-RIGHT MARK
+    ESC = chr(0x1B)
+    ZWJ = chr(0x200D)  # ZERO WIDTH JOINER
+
+    def test_a_bidi_override_is_dropped(self) -> None:
+        self.assertEqual(
+            fetch_quota.plan_label(f"drowssap{self.RLO}", None), "Drowssap"
+        )
+
+    def test_an_escape_sequence_loses_only_the_escape(self) -> None:
+        self.assertEqual(fetch_quota._label_text(f"Pr{self.ESC}[2J"), "Pr[2J")
+
+    def test_a_zero_width_joiner_is_dropped(self) -> None:
+        self.assertEqual(fetch_quota._label_text(f"Pr{self.ZWJ}o"), "Pro")
+
+    def test_a_name_is_capped(self) -> None:
+        label = fetch_quota.plan_label("x" * 5000, None)
+        self.assertLessEqual(len(label), fetch_quota.MAX_LABEL_CHARS)
+
+    def test_a_value_that_names_nothing_falls_back(self) -> None:
+        self.assertEqual(fetch_quota.plan_label(self.LRM, None), "Claude")
+        self.assertEqual(fetch_quota.cursor_plan_label(self.RLO), "Cursor")
+
+    def test_a_non_string_names_nothing(self) -> None:
+        self.assertEqual(fetch_quota._label_text({"plan": "pro"}), "")
+        self.assertEqual(fetch_quota._label_text(7), "")
 
 
 class GrokPeriodTest(unittest.TestCase):
@@ -4371,6 +4427,21 @@ class ResponseSizeCapTest(unittest.TestCase):
 
         self.assertEqual((status, body), (200, {"ok": True}))
 
+    def test_an_integer_past_the_digit_limit_is_a_non_json_body(self) -> None:
+        # json.loads raises a plain ValueError there, not a JSONDecodeError,
+        # and a ValueError is neither an OSError nor a URLError: it left
+        # fetch_http and blanked the card as a dropped connection.
+        resp = self._Resp(
+            b'{"used": ' + b"9" * (sys.get_int_max_str_digits() + 1) + b"}"
+        )
+        with (
+            patch.object(urllib.request, "urlopen", lambda *a, **k: resp),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status, body, _hdrs = fetch_quota.fetch_http("https://api.test/usage", {})
+
+        self.assertEqual((status, body), (200, None))
+
     def test_the_discarded_error_body_is_capped_too(self) -> None:
         # A 429 or a 5xx is the response a peer picks at length, and this body
         # is drained and thrown away: reading it whole is the same heap cost.
@@ -4546,6 +4617,15 @@ class GrokTokenEndpointTest(unittest.TestCase):
 
     def test_a_non_url_is_refused(self) -> None:
         self.assertEqual(self._discovery(["https://auth.x.ai/token"]), [])
+
+    def test_an_unparsable_port_is_refused(self) -> None:
+        # .port raises ValueError on a port that is not a number, and the
+        # endpoint is named by a document off the network, so an exception here
+        # would take the whole refresh down rather than refuse the endpoint.
+        self.assertEqual(self._discovery("https://auth.x.ai:not-a-port/token"), [])
+
+    def test_an_out_of_range_port_is_refused(self) -> None:
+        self.assertEqual(self._discovery("https://auth.x.ai:99999999/token"), [])
 
     def test_the_vendor_endpoint_is_accepted(self) -> None:
         self.assertTrue(

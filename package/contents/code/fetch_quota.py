@@ -184,6 +184,25 @@ def _utf8_encodable(value: str) -> bool:
     return True
 
 
+# A label the panel renders comes off the wire, so it is bounded and free of
+# the characters a label never needs: Cc is a control character and Cf a
+# format one, the set carrying the bidi overrides and zero-width joiners that
+# reorder or hide the text beside them. An unbounded name is copied into the
+# cache entry and drawn on every poll.
+MAX_LABEL_CHARS = 64
+LABEL_CATEGORIES = frozenset({"Cc", "Cf"})
+
+
+def _label_text(value: object) -> str:
+    """Display text for a wire value, or "" for one that names nothing."""
+    if not isinstance(value, str):
+        return ""
+    text = "".join(
+        ch for ch in value if unicodedata.category(ch) not in LABEL_CATEGORIES
+    )
+    return text.strip()[:MAX_LABEL_CHARS].strip()
+
+
 def _read_json_dict(path: Path) -> JsonDict | None:
     """The JSON object at path, or None if it is missing, unreadable, or not
     an object. A store that holds a list reads as absent rather than raising on
@@ -368,10 +387,19 @@ def _finite_number(value: object) -> float | None:
     back as bare NaN/Infinity, which is not JSON and which plasmashell's
     parser rejects. A missing number must read as absent, never as a clamped
     zero or a full 100%.
+
+    An integer literal is the other shape the docstring covers. json.loads
+    turns one into a Python int of whatever size the body spells, and
+    float() raises OverflowError past 1e308, so a 309-digit reading in a
+    well-formed 200 took the whole provider down instead of reading as no
+    reading. A number no float can hold is not one this payload can carry.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
     return number if math.isfinite(number) else None
 
 
@@ -978,7 +1006,7 @@ def plan_label(subscription: str | None, tier: str | None) -> str:
     if "enterprise" in sub:
         return "Enterprise"
     if sub:
-        return sub.replace("_", " ").title()
+        return _label_text(sub).replace("_", " ").title() or "Claude"
     return "Claude"
 
 
@@ -1512,13 +1540,18 @@ def _entry_lock(entry: Path) -> Iterator[None]:
 
 def _origin(url: str) -> tuple[str, str, int | None] | None:
     """(scheme, host, port) a request is aimed at, or None if it has no host."""
+    # Reading .port raises ValueError on a port that is not a number or is out
+    # of range, and both URLs here come off the wire: a Location header names
+    # the port, and so does an OIDC discovery document's token_endpoint. An
+    # unparsable port is a URL with no usable origin, not an exception the
+    # caller has to catch around every comparison.
     try:
         parts = urllib.parse.urlsplit(url)
+        if not parts.hostname:
+            return None
+        return (parts.scheme.lower(), parts.hostname.lower(), parts.port)
     except ValueError:
         return None
-    if not parts.hostname:
-        return None
-    return (parts.scheme.lower(), parts.hostname.lower(), parts.port)
 
 
 class _RefusedRedirect(urllib.error.HTTPError):
@@ -1610,7 +1643,11 @@ def fetch_http(
                     return UNREADABLE_BODY_STATUS, None, hdrs
                 try:
                     return resp.status, json.loads(body.decode("utf-8")), hdrs
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                except ValueError:
+                    # ValueError, not JSONDecodeError: an integer literal past
+                    # sys.get_int_max_str_digits() makes json.loads raise the
+                    # plain one, and it left the provider with an unhandled
+                    # exception and a "net" card where the vendor answered 200.
                     warn(f"{url} returned {resp.status} with a non-JSON body")
                     return UNREADABLE_BODY_STATUS, None, hdrs
         except _RefusedRedirect:
@@ -1755,9 +1792,12 @@ def _claude_weekly(data: JsonDict) -> list[JsonDict]:
             scope = _as_dict(item.get("scope"))
             label = "All models"
             if scope.get("surface"):
-                label = str(scope["surface"])
+                label = _label_text(scope["surface"]) or "All models"
             elif _as_dict(scope.get("model")).get("display_name"):
-                label = str(_as_dict(scope["model"])["display_name"])
+                label = (
+                    _label_text(_as_dict(scope["model"])["display_name"])
+                    or "All models"
+                )
             if kind == "weekly_all":
                 label = "All models"
             weekly.append(
@@ -2478,8 +2518,8 @@ def fetch_codex() -> JsonDict:
     if status != 200 or not isinstance(data, dict):
         return _fail_or_cached("codex", account, status)
 
-    plan_type = data.get("plan_type") or "Codex"
-    plan = str(plan_type).replace("_", " ").title()
+    plan_type = data.get("plan_type")
+    plan = _label_text(plan_type).replace("_", " ").title() or "Codex"
 
     rate = _as_dict(data.get("rate_limit"))
     windows: list[JsonDict] = []
@@ -2605,7 +2645,7 @@ def cursor_plan_label(membership: str | None) -> str:
     if m in names:
         return names[m]
     if m:
-        return m.replace("_", " ").title()
+        return _label_text(m).replace("_", " ").title() or "Cursor"
     return "Cursor"
 
 
