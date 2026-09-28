@@ -100,7 +100,19 @@ CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
-USER_AGENT = "quota-widget/1.0"
+METADATA_JSON = Path(__file__).resolve().parents[2] / "metadata.json"
+
+
+def _package_version() -> str:
+    metadata = _as_dict(json.loads(METADATA_JSON.read_text(encoding="utf-8")))
+    plugin = _as_dict(metadata.get("KPlugin"))
+    version = plugin.get("Version")
+    if not isinstance(version, str):
+        raise SystemExit(f"KPlugin.Version missing from {METADATA_JSON}")
+    return version
+
+
+USER_AGENT = f"quota-widget/{_package_version()}"
 # Anthropic rate-limits /api/oauth/usage per User-Agent; Claude Code's bucket works.
 # https://github.com/anthropics/claude-code/issues/30930
 CLAUDE_USER_AGENT = "claude-code/2.1.251"

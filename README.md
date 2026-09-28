@@ -92,6 +92,7 @@ uv run pytest tests/test_fetch_quota.py::IsoToMsTest
 Tests are hermetic: no network, no credentials, no home-directory state. `uv run pytest` alone is a sub-second loop.
 
 Conventions, branching, and how to add a test or a dependency: [CONTRIBUTING.md](CONTRIBUTING.md).
+What changed in each release, and what breaks when upgrading: [CHANGELOG.md](CHANGELOG.md).
 
 ## Configuration
 
