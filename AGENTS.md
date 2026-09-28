@@ -4,13 +4,13 @@ Inherits the universal rules in `~/.agents/AGENTS.md`. Local notes below; they d
 
 ## What this is
 
-KDE Plasma 6 plasmoid (`com.maci.quota-widget`). QML UI in `package/contents/ui/main.qml`. Data source in `package/contents/code/fetch_quota.py`, polled by plasmashell's `executable` engine.
+KDE Plasma 6 plasmoid (`com.maci.quota-widget`). QML UI in `package/contents/ui/main.qml`. Data source in `package/contents/code/fetch_quota.py`, run by the `executable` engine `main.qml` declares, not by the manifest.
 
 ## Runtime Python
 
 Plasmashell runs `python3 package/contents/code/fetch_quota.py`. That path is system Python on purpose: the widget has no venv at display time. Do not switch the QML command to `uv run`.
 
-Every wall-clock read goes through `now_ms()` / `now_utc()`; `QUOTA_WIDGET_NOW_MS` pins the clock so a poll replays byte-for-byte. Call `time.time()` or `datetime.now()` directly anywhere else in the fetcher and the replay guarantee is gone. A wait that ends on a deadline (the refresh lock, currently) reads `monotonic()` and pauses through `sleep()` instead: a pinned wall clock never advances, so a deadline taken through `now_ms()` would expire on the first poll and a raw `time.sleep` would cost real seconds. Nothing in the fetcher calls `time.monotonic` or `time.sleep` directly.
+Every wall-clock read goes through `now_ms()` / `now_utc()`; `QUOTA_WIDGET_NOW_MS` pins the clock so a poll replays byte-for-byte. Call `time.time()` or `datetime.now()` directly anywhere else in the fetcher and the replay guarantee is gone. A wait that ends on a deadline (the refresh lock, currently) reads `monotonic()` and pauses through `sleep()` instead: a pinned wall clock never advances, so a deadline taken through `now_ms()` would expire on the first poll and a raw `time.sleep` would cost real seconds. Nothing in the fetcher calls `time.monotonic` or `time.sleep` directly, and the one `time.time()` outside `now_ms()` is `_poll_stamp`'s fallback, which fires only when the pinned clock itself raised and plasmashell would otherwise get no JSON.
 
 A provider timestamp without an offset is UTC. Parse it with `iso_to_utc()`, never `datetime.fromisoformat(...).timestamp()`: that resolves a naive value in plasmashell's host zone, so the same reading lands hours off outside UTC and shifts again at every DST transition.
 
@@ -54,7 +54,9 @@ through `flock`, `_atomic_write_json`, and the re-read in `_merge_write_json`.
   `limits` array, the Codex rate-limit windows and reset credits, `ItemTable`
   cells, JWTs). Generators are seeded so a failure reproduces; raise
   `ITERATIONS` or move `BASE_SEED` to widen a run.
-- `scripts/print_smoke.py`: prints a fetched JSON dump (`install.sh` writes `.scratch/smoke.json`)
+- `scripts/print_smoke.py`: prints a fetched JSON dump (`install.sh` writes
+  `.scratch/smoke.json`). `install.sh` runs it as a standalone script, so it
+  keeps its own `project_root()` walk instead of importing the test helper.
 - `install.sh`: root symlink installer. Its root walk starts at the script
   behind whatever symlink named it, since a distro package or a link in
   `~/bin` runs it from outside the checkout.
