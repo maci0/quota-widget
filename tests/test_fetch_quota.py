@@ -1606,11 +1606,12 @@ class ProviderCacheTest(unittest.TestCase):
         )
         self.assertIsNone(fetch_quota._read_provider_cache("grok", None))
 
-    def test_entry_older_than_the_stale_window_is_ignored(self) -> None:
+    def _write_expired_entry(self, name: str) -> Path:
+        """Write a provider entry aged a minute past the retention window."""
         fetch_quota._write_provider_cache(
-            "grok", {"ok": True, "plan": "Grok"}, self.account
+            name, {"ok": True, "plan": "Grok"}, self.account
         )
-        path = Path(self.tmp.name) / "grok.json"
+        path = Path(self.tmp.name) / f"{name}.json"
         entry = json.loads(path.read_text())
         entry["cached_ms"] = int(
             (
@@ -1621,6 +1622,10 @@ class ProviderCacheTest(unittest.TestCase):
             * 1000
         )
         path.write_text(json.dumps(entry))
+        return path
+
+    def test_entry_older_than_the_stale_window_is_ignored(self) -> None:
+        self._write_expired_entry("grok")
         self.assertIsNone(fetch_quota._stale_cache("grok", self.account))
 
     def test_an_expired_entry_is_deleted_whatever_account_asks(self) -> None:
@@ -1628,20 +1633,7 @@ class ProviderCacheTest(unittest.TestCase):
         # another account is signed in, nothing ever reads that file again
         # under the digest that scopes it, so an expiry checked only after the
         # account matched would never fire for it.
-        fetch_quota._write_provider_cache(
-            "grok", {"ok": True, "plan": "Grok"}, self.account
-        )
-        path = Path(self.tmp.name) / "grok.json"
-        entry = json.loads(path.read_text())
-        entry["cached_ms"] = int(
-            (
-                dt.datetime.now(dt.UTC).timestamp()
-                - fetch_quota.config().cache_max_age_s
-                - 60
-            )
-            * 1000
-        )
-        path.write_text(json.dumps(entry))
+        path = self._write_expired_entry("grok")
         self.assertIsNone(fetch_quota._read_provider_cache("grok", "acct-2"))
         self.assertFalse(path.exists())
 

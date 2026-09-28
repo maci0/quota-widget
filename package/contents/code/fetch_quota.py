@@ -1676,11 +1676,8 @@ def _money_val(obj: Any) -> int | None:  # JSON number or {val: int}
     double, which the widget renders as a minor-unit amount, so int()
     truncation lands a cent under every value; rounding reconciles it with
     the dollars the vendor billed."""
-    if obj is None:
-        return None
     if isinstance(obj, dict) and "val" in obj:
-        number = _finite_number(obj["val"])
-        return None if number is None else round(number)
+        obj = obj["val"]
     number = _finite_number(obj)
     return None if number is None else round(number)
 
@@ -2046,7 +2043,6 @@ def fetch_codex() -> JsonDict:
         return fetch_json(CODEX_USAGE_URL, headers)
 
     status, data = call(access)
-    account = _account_id(access, str(account_id) if account_id else None)
     if status == 401:
         refreshed = _refresh_codex(auth)
         if not refreshed:

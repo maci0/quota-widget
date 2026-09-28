@@ -71,8 +71,6 @@ xdg_config="$HOME/.config"
 [[ "${XDG_CONFIG_HOME:-}" = /* ]] && xdg_config="$XDG_CONFIG_HOME"
 xdg_cache="$HOME/.cache"
 [[ "${XDG_CACHE_HOME:-}" = /* ]] && xdg_cache="$XDG_CACHE_HOME"
-xdg_config="$HOME/.config"
-[[ "${XDG_CONFIG_HOME:-}" = /* ]] && xdg_config="$XDG_CONFIG_HOME"
 
 DEST="$xdg_data/plasma/plasmoids/${PKG_ID}"
 PLASMOID_CONFIG="$xdg_config/plasmoids/org.kde.plasma.plasmoid/${PKG_ID}.json"

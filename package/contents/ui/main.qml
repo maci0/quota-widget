@@ -1269,51 +1269,17 @@ PlasmoidItem {
             PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
             Accessible.ignored: true
 
-            Shape {
-                anchors.fill: parent
+            GaugeArc {
                 opacity: root.trackOpacity
-                ShapePath {
-                    strokeWidth: row.ring
-                    strokeColor: Kirigami.Theme.disabledTextColor
-                    fillColor: "transparent"
-                    capStyle: ShapePath.RoundCap
-                    startX: row.gaugeSize / 2
-                        + row.arcRadius * Math.cos(row.startDeg * Math.PI / 180)
-                    startY: row.gaugeSize / 2
-                        + row.arcRadius * Math.sin(row.startDeg * Math.PI / 180)
-                    PathAngleArc {
-                        centerX: row.gaugeSize / 2
-                        centerY: row.gaugeSize / 2
-                        radiusX: row.arcRadius
-                        radiusY: row.arcRadius
-                        startAngle: row.startDeg
-                        sweepAngle: row.maxSweep
-                    }
-                }
+                arcColor: Kirigami.Theme.disabledTextColor
+                arcSweep: row.maxSweep
             }
 
-            Shape {
-                anchors.fill: parent
+            GaugeArc {
                 visible: row.util !== undefined && row.util !== null
                     && isFinite(Number(row.util))
-                ShapePath {
-                    strokeWidth: row.ring
-                    strokeColor: utilColor(row.util)
-                    fillColor: "transparent"
-                    capStyle: ShapePath.RoundCap
-                    startX: row.gaugeSize / 2
-                        + row.arcRadius * Math.cos(row.startDeg * Math.PI / 180)
-                    startY: row.gaugeSize / 2
-                        + row.arcRadius * Math.sin(row.startDeg * Math.PI / 180)
-                    PathAngleArc {
-                        centerX: row.gaugeSize / 2
-                        centerY: row.gaugeSize / 2
-                        radiusX: row.arcRadius
-                        radiusY: row.arcRadius
-                        startAngle: row.startDeg
-                        sweepAngle: row.maxSweep * row.shownFrac
-                    }
-                }
+                arcColor: utilColor(row.util)
+                arcSweep: row.maxSweep * row.shownFrac
             }
 
             PlasmaComponents3.Label {
@@ -1347,6 +1313,33 @@ PlasmoidItem {
             Layout.fillWidth: true
             Layout.preferredWidth: row.gaugeSize
             Accessible.ignored: true
+        }
+    }
+
+    // The dial is one arc drawn twice, the track at the full sweep and the
+    // value at the animated fraction of it. The geometry is named in UsageRow
+    // and read from there, so a change to the dial reaches both arcs at once.
+    component GaugeArc: Shape {
+        property color arcColor
+        property real arcSweep
+        anchors.fill: parent
+        ShapePath {
+            strokeWidth: row.ring
+            strokeColor: arcColor
+            fillColor: "transparent"
+            capStyle: ShapePath.RoundCap
+            startX: row.gaugeSize / 2
+                + row.arcRadius * Math.cos(row.startDeg * Math.PI / 180)
+            startY: row.gaugeSize / 2
+                + row.arcRadius * Math.sin(row.startDeg * Math.PI / 180)
+            PathAngleArc {
+                centerX: row.gaugeSize / 2
+                centerY: row.gaugeSize / 2
+                radiusX: row.arcRadius
+                radiusY: row.arcRadius
+                startAngle: row.startDeg
+                sweepAngle: arcSweep
+            }
         }
     }
 }
