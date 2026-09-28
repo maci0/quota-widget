@@ -37,13 +37,26 @@ def _ok_line(name: str, payload: Payload, extra: str) -> None:
         print(f"  {name}: {payload.get('error') or 'empty'}")
 
 
+def _load(path: Path) -> Payload:
+    if not path.is_file():
+        raise SystemExit(
+            f"no fetch_quota.py dump at {path}\n"
+            "run: mkdir -p .scratch && "
+            "python3 package/contents/code/fetch_quota.py > .scratch/smoke.json"
+        )
+    try:
+        return _dict(json.loads(path.read_text()))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{path} is not valid JSON: {exc}") from exc
+
+
 def main() -> None:
     dump = (
         Path(sys.argv[1])
         if len(sys.argv) > 1
         else project_root() / ".scratch" / "smoke.json"
     )
-    data = _dict(json.loads(dump.read_text()))
+    data = _load(dump)
     claude = _dict(data.get("claude"))
     cursor = _dict(data.get("cursor"))
     grok = _dict(data.get("grok"))

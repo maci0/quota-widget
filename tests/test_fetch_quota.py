@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import fetch_quota
+import print_smoke
 
 
 class CodexWindowTest(unittest.TestCase):
@@ -537,6 +538,38 @@ class HttpRetryableTest(unittest.TestCase):
         self.assertTrue(fetch_quota._http_retryable(500))
         self.assertFalse(fetch_quota._http_retryable(401))
         self.assertFalse(fetch_quota._http_retryable(0))
+
+
+class PrintSmokeTest(unittest.TestCase):
+    def test_missing_dump_names_the_command_to_run(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        missing = Path(tmp.name) / "smoke.json"
+
+        with self.assertRaises(SystemExit) as caught:
+            print_smoke._load(missing)
+        self.assertIn(str(missing), str(caught.exception))
+        self.assertIn("fetch_quota.py", str(caught.exception))
+
+    def test_invalid_json_names_the_file(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        dump = Path(tmp.name) / "smoke.json"
+        dump.write_text("not json")
+
+        with self.assertRaises(SystemExit) as caught:
+            print_smoke._load(dump)
+        self.assertIn("not valid JSON", str(caught.exception))
+
+    def test_reads_provider_payload(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        dump = Path(tmp.name) / "smoke.json"
+        dump.write_text(json.dumps({"claude": {"ok": True, "plan": "Pro"}}))
+
+        self.assertEqual(
+            print_smoke._load(dump), {"claude": {"ok": True, "plan": "Pro"}}
+        )
 
 
 if __name__ == "__main__":

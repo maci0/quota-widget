@@ -58,18 +58,36 @@ Claude's usage API 429s unknown User-Agents. The fetcher sends Claude Code's Use
 Smoke-test without Plasma:
 
 ```bash
-python3 package/contents/code/fetch_quota.py
+python3 package/contents/code/fetch_quota.py > .scratch/smoke.json
+python3 scripts/print_smoke.py .scratch/smoke.json
 ```
 
-Dev gate (`uv`):
+## Development
+
+Requires [`uv`](https://docs.astral.sh/uv/) and Python 3.11+ (`uv` installs it).
 
 ```bash
-uv sync --extra dev
-uv run pytest
-uv run black --check .
-uv run ruff check .
-uv run mypy
+uv sync --extra dev --frozen
 ```
+
+`--frozen` is what CI uses, so a stale `uv.lock` fails here rather than after a push.
+
+The full gate, same order as CI:
+
+```bash
+uv run black --check . && uv run ruff check . && uv run mypy && uv run pytest
+```
+
+While iterating, one file or one test at a time:
+
+```bash
+uv run pytest tests/test_fetch_quota.py -k cursor
+uv run pytest tests/test_fetch_quota.py::IsoToMsTest
+```
+
+Tests are hermetic: no network, no credentials, no home-directory state. `uv run pytest` alone is a sub-second loop.
+
+Conventions, branching, and how to add a test or a dependency: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Layout
 

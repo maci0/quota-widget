@@ -35,4 +35,4 @@ files = ["package/contents/code/fetch_quota.py", "tests", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["package/contents/code"]
+pythonpath = ["package/contents/code", "scripts"]
