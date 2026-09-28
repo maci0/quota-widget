@@ -69,6 +69,8 @@ def _load(path: Path) -> Payload:
         )
     try:
         return _dict(json.loads(path.read_text(encoding="utf-8")))
+    except OSError as exc:
+        raise SystemExit(f"print_smoke: {path} could not be read: {exc}") from exc
     except UnicodeDecodeError as exc:
         raise SystemExit(f"print_smoke: {path} is not valid UTF-8: {exc}") from exc
     except json.JSONDecodeError as exc:

@@ -2660,5 +2660,148 @@ class RefreshLockWaitTest(unittest.TestCase):
         self.assertEqual(self.clock[0], fetch_quota.REFRESH_LOCK_WAIT_S)
 
 
+class SilentWriteTest(unittest.TestCase):
+    """A write that cannot land must reach the journal, not just the next poll."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = config_env(QUOTA_WIDGET_CACHE=self.tmp.name)
+        env.__enter__()
+        self.addCleanup(env.__exit__, None, None, None)
+
+    def test_merge_write_reports_a_writer_that_keeps_winning(self) -> None:
+        path = Path(self.tmp.name) / "auth.json"
+        real_write = fetch_quota._atomic_write_json
+
+        def racing_write(target: Path, obj: object) -> None:
+            real_write(target, obj)
+            # A concurrent writer replaces the value after every commit.
+            real_write(target, {"tokens": "cli"})
+
+        def put_tokens(store: dict[str, object]) -> tuple[str, object]:
+            store["tokens"] = "widget"
+            return "tokens", "widget"
+
+        err = io.StringIO()
+        with (
+            patch.object(fetch_quota, "_atomic_write_json", racing_write),
+            contextlib.redirect_stderr(err),
+        ):
+            fetch_quota._merge_write_json(path, put_tokens)
+
+        logged = err.getvalue()
+        self.assertIn(str(path), logged)
+        self.assertIn("attempts", logged)
+
+    def test_cache_write_failure_is_reported(self) -> None:
+        def refusing_mkdir(*args: object, **kwargs: object) -> None:
+            raise OSError("no space left on device")
+
+        err = io.StringIO()
+        with (
+            patch.object(Path, "mkdir", refusing_mkdir),
+            contextlib.redirect_stderr(err),
+        ):
+            fetch_quota._write_provider_cache(
+                "claude", {"ok": True, "plan": "Max"}, "acct-1"
+            )
+
+        logged = err.getvalue()
+        self.assertIn("claude", logged)
+        self.assertIn("no space left on device", logged)
+
+
+class CursorFailureReportingTest(unittest.TestCase):
+    """A Cursor read that fails is not a signed-out session."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        auth_json = Path(self.tmp.name) / "auth.json"
+        auth_json.write_text(json.dumps({"accessToken": _fake_jwt("auth0|user_01ERR")}))
+        env = config_env(
+            QUOTA_WIDGET_CACHE=self.tmp.name, QUOTA_WIDGET_CURSOR_AUTH=str(auth_json)
+        )
+        env.__enter__()
+        self.addCleanup(env.__exit__, None, None, None)
+
+    def _fetch_with_status(self, status: int) -> JsonDict:
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            return status, None
+
+        with patch.object(fetch_quota, "fetch_json", fake_json):
+            return fetch_quota.fetch_cursor()
+
+    def test_signed_out_still_reports_401(self) -> None:
+        self.assertEqual(
+            self._fetch_with_status(401), {"ok": False, "error": "http-401"}
+        )
+
+    def test_forbidden_reports_its_own_status(self) -> None:
+        # 401 renders as "Sign in to Cursor"; a 403 is an edge rejection, so
+        # reporting it as 401 sends the user to re-authenticate for nothing.
+        self.assertEqual(
+            self._fetch_with_status(403), {"ok": False, "error": "http-403"}
+        )
+
+    def test_an_unreadable_state_db_is_reported(self) -> None:
+        db = Path(self.tmp.name) / "state.vscdb"
+        db.write_bytes(b"not a sqlite database")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(fetch_quota._read_cursor_state_db(db))
+        self.assertIn(str(db), err.getvalue())
+
+    def test_a_locked_state_db_stays_quiet(self) -> None:
+        db = Path(self.tmp.name) / "state.vscdb"
+        db.write_bytes(b"not a sqlite database")
+        err = io.StringIO()
+        with (
+            patch.object(
+                sqlite3,
+                "connect",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ),
+            contextlib.redirect_stderr(err),
+        ):
+            self.assertIsNone(fetch_quota._read_cursor_state_db(db))
+        self.assertEqual(err.getvalue(), "")
+
+
+class HomeDirectoryTest(unittest.TestCase):
+    """An unresolvable home is a config error, so the panel still gets JSON."""
+
+    def setUp(self) -> None:
+        self.addCleanup(fetch_quota.load_config)
+
+    def test_no_home_directory_raises_config_error(self) -> None:
+        with patch.object(Path, "home", side_effect=RuntimeError("no HOME")):
+            with self.assertRaises(fetch_quota.ConfigError) as ctx:
+                fetch_quota.load_config({})
+        self.assertIn("home directory", str(ctx.exception))
+
+    def test_main_emits_a_payload_when_home_is_unresolvable(self) -> None:
+        out = io.StringIO()
+        err = io.StringIO()
+        with (
+            patch.object(Path, "home", side_effect=RuntimeError("no HOME")),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                fetch_quota.main([])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertEqual(json.loads(out.getvalue())["error"], "config")
+        self.assertIn("home directory", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

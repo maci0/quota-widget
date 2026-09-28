@@ -114,6 +114,21 @@ prints, so a fetcher and UI shipped together never break each other.
   stay clean when piped.
 - The fetcher tests bind credential paths through the environment again, so
   `uv run pytest` is green.
+- A token merge-write that loses every attempt to a concurrent writer is
+  reported on stderr. The write is dropped either way, so the journal is the
+  only place that can say the store is being contested.
+- A provider cache entry that cannot be written (a full disk, a read-only cache
+  directory) is reported on stderr. It is the only fallback a later poll has
+  when the vendor API fails.
+- A Cursor `state.vscdb` that cannot be read for any reason other than the IDE
+  holding its write lock is reported on stderr. It otherwise read as a signed
+  out Cursor, and the fix was to sign in again over a db that was never
+  readable.
+- An unresolvable home directory is a configuration error, so the run prints
+  `error: "config"` and leaves the panel a payload to read instead of raising
+  out of the config load.
+- `print_smoke.py` reports a dump it cannot read as a message rather than a
+  traceback.
 
 ### Changed
 
@@ -126,6 +141,9 @@ prints, so a fetcher and UI shipped together never break each other.
   their version tag, and Dependabot (`.github/dependabot.yml`) opens the bump,
   so a moved tag can no longer change what the gate runs. The uv cache is keyed
   on `uv.lock` explicitly rather than by the action's default glob.
+- A Cursor `403` is reported as `http-403` instead of `http-401`. A 401 renders
+  as "Sign in to Cursor", which a rejected request is not; a 403 renders as
+  "Unavailable".
 
 ## [1.1.0] - 2026-09-28
 

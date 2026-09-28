@@ -359,10 +359,23 @@ def _cursor_state_db(env: Mapping[str, str], home: Path) -> Path:
 _CONFIG: Config | None = None
 
 
+def _home(env: Mapping[str, str]) -> Path:
+    """The home directory, or ConfigError when the environment has none.
+
+    Path.home() raises RuntimeError, which is not a ConfigError, so it would
+    abort the run before main() could emit a payload and the panel would go
+    blank instead of showing "config".
+    """
+    try:
+        return Path.home()
+    except RuntimeError as exc:
+        raise ConfigError(f"cannot resolve the home directory: {exc}") from exc
+
+
 def load_config(env: Mapping[str, str] | None = None) -> Config:
     """Read and validate the environment. Raises ConfigError on bad values."""
     values = os.environ if env is None else env
-    home = _env_path(values, "QUOTA_WIDGET_HOME", Path.home())
+    home = _env_path(values, "QUOTA_WIDGET_HOME", _home(values))
     cache_base = _xdg_dir(values, "XDG_CACHE_HOME", home / ".cache")
     timeout = _env_number(
         values, "QUOTA_WIDGET_HTTP_TIMEOUT", DEFAULT_HTTP_TIMEOUT_S, MAX_HTTP_TIMEOUT_S
@@ -575,7 +588,13 @@ def _merge_write_json(
         if isinstance(after, dict) and after.get(key) == value:
             return
     # A writer kept winning the race; it holds the rotated token itself, so the
-    # tokens in memory stay usable for this poll.
+    # tokens in memory stay usable for this poll. The write is lost either way,
+    # so name the file: the next poll otherwise repeats the refresh with no
+    # hint that the store is being contested.
+    warn(
+        f"gave up writing {path} after {MERGE_WRITE_ATTEMPTS} attempts; "
+        "another writer replaced the value each time"
+    )
 
 
 def _digest(value: str | None) -> str | None:
@@ -651,8 +670,11 @@ def _write_provider_cache(name: str, payload: JsonDict, account: str | None) -> 
                 "payload": payload,
             },
         )
-    except OSError:
-        pass  # cache is best-effort; a full disk must not fail the poll
+    except OSError as exc:
+        # Cache is best-effort: a full disk must not fail the poll. It is also
+        # the only fallback a later poll has when the vendor API fails, so the
+        # operator needs to know it is not being written.
+        warn(f"could not write the {name} cache entry: {exc}")
 
 
 def _stale_cache(name: str, account: str | None) -> JsonDict | None:
@@ -1654,6 +1676,16 @@ def _read_cursor_auth_json(path: Path) -> tuple[str, str] | None:
     return token, ""
 
 
+def _sqlite_is_routine(exc: sqlite3.Error) -> bool:
+    """A state.vscdb failure that is ordinary rather than a fault.
+
+    The IDE holds a write lock while it saves, and a db that has never held a
+    Cursor session has no ItemTable. Both read as "no token", which is correct.
+    """
+    text = str(exc).lower()
+    return "locked" in text or "no such table" in text
+
+
 def _read_cursor_state_db(path: Path) -> tuple[str, str] | None:
     if not path.is_file():
         return None
@@ -1668,7 +1700,11 @@ def _read_cursor_state_db(path: Path) -> tuple[str, str] | None:
             "SELECT key, value FROM ItemTable WHERE key IN (?, ?)",
             ("cursorAuth/accessToken", "cursorAuth/stripeMembershipType"),
         ).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        # Without this the panel says "no token" and the operator signs the
+        # Cursor CLI out and back in over a db that was never readable.
+        if not _sqlite_is_routine(exc):
+            warn(f"{path} could not be read: {exc}")
         return None
     finally:
         if con is not None:
@@ -1830,7 +1866,10 @@ def fetch_cursor() -> JsonDict:
     status, data = fetch_json(CURSOR_SUMMARY_URL, headers)
     account = _account_id(auth["token"], auth["sub"])
     if status in (401, 403):
-        return {"ok": False, "error": "http-401"}
+        # Report the status the vendor sent. A 403 is an edge rejection of the
+        # request, not a signed-out session, and labelling it 401 sends the
+        # user to re-authenticate for nothing.
+        return {"ok": False, "error": f"http-{status}"}
     if _http_retryable(status):
         cached = _stale_cache("cursor", account)
         if cached:
