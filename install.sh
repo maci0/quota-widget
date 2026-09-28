@@ -33,6 +33,10 @@ else
     || echo "warning: invalid configuration (detail in $SCRATCH/smoke.err)" >&2
 fi
 
+# Bytecode caches are build residue, not content: the whole package/ tree is
+# what gets linked into the plasmoid dir.
+find "$ROOT/package" -type d -name __pycache__ -prune -exec rm -rf {} +
+
 mkdir -p "$(dirname "$DEST")"
 rm -rf "$DEST"
 ln -sfn "$ROOT/package" "$DEST"

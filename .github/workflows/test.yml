@@ -10,6 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.13"
       - run: uv sync --extra dev --frozen
       - run: uv run black --check .
       - run: uv run ruff check .
