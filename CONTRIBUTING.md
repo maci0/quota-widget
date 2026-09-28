@@ -51,15 +51,15 @@ behavior.
 
 ## QML changes
 
-`package/contents/ui/main.qml` is plain QtQuick. After editing, clear the QML
-cache and restart plasmashell so the change shows up:
+`package/contents/ui/main.qml` is plain QtQuick. Restart plasmashell so the change
+shows up:
 
 ```bash
 ./install.sh
-rm -rf ~/.cache/plasmashell/qmlcache
 systemctl --user restart plasma-plasmashell.service
 ```
 
-`./install.sh` symlinks `package/` into `~/.local/share/plasma/plasmoids/`, so
-there is nothing to reinstall while iterating. It also runs the fetcher once and
-prints the result, which is the quickest check that provider parsing still works.
+`./install.sh` symlinks `package/` into `~/.local/share/plasma/plasmoids/` and
+clears the QML cache, so there is nothing to reinstall while iterating and no
+cache to clear by hand. It also runs the fetcher once and prints the result,
+which is the quickest check that provider parsing still works.

@@ -7,7 +7,8 @@ Claude: GET https://api.anthropic.com/api/oauth/usage
 
 Cursor: GET https://cursor.com/api/usage-summary
   (same numbers as cursor.com/dashboard → Usage)
-  Auth: Cursor IDE session in state.vscdb, or cursor-agent ~/.config/cursor/auth.json
+  Auth: cursor-agent ~/.config/cursor/auth.json, else the Cursor IDE session in
+  state.vscdb (that order is the lookup order)
 
 Grok:   GET https://cli-chat-proxy.grok.com/v1/billing
   Auth: ~/.grok/auth.json OIDC access token (auto-refreshed)
@@ -145,6 +146,8 @@ def _finite_number(value: object) -> float | None:
 
 
 def sleep(seconds: float) -> None:
+    """A seam the tests patch, so a Retry-After or retry backoff costs no wall
+    clock in the suite."""
     time.sleep(seconds)
 
 
@@ -383,6 +386,11 @@ def config() -> Config:
 
 
 def emit(obj: JsonDict) -> None:
+    """Print the one payload plasmashell reads and exit.
+
+    stdout is the panel's only channel and it is parsed as a whole, so every
+    exit path goes through here rather than falling off the end of main.
+    """
     print(json.dumps(obj, separators=(",", ":")))
     raise SystemExit(0)
 
@@ -415,6 +423,11 @@ def iso_to_utc(value: str) -> dt.datetime | None:
 
 
 def iso_to_ms(value: str | None) -> int | None:
+    """Epoch-ms from a vendor ISO-8601 timestamp, or None.
+
+    None covers a missing, malformed, or out-of-range value alike: a reset the
+    widget cannot read is shown as absent, never as a bogus date.
+    """
     if not value:
         return None
     when = iso_to_utc(value)
@@ -1097,9 +1110,10 @@ def _refresh_grok(auth_key: str, entry: JsonDict) -> JsonDict | None:
 
 
 def _money_val(obj: Any) -> int | None:  # JSON number or {val: int}
-    """A cent amount, or None. Values crossing the wire are dollars-era
-    doubles, so a float lands a cent under int() truncation; rounding to the
-    nearest cent is what reconciles with the dollars the vendor bills."""
+    """A cent amount, or None. The billing API sends dollars as a JSON
+    double, which the widget renders as a minor-unit amount, so int()
+    truncation lands a cent under every value; rounding reconciles it with
+    the dollars the vendor billed."""
     if obj is None:
         return None
     if isinstance(obj, dict) and "val" in obj:
@@ -1559,6 +1573,11 @@ def _jwt_sub(token: str) -> str | None:
 
 
 def cursor_plan_label(membership: str | None) -> str:
+    """Map a Cursor membershipType to the dashboard's plan name.
+
+    An unknown value is title-cased rather than dropped, so a plan the
+    fetcher has not seen still reads as a name rather than as "Cursor".
+    """
     m = (membership or "").strip().lower().replace("-", "_").replace(" ", "_")
     names = {
         "free": "Free",
@@ -1834,6 +1853,12 @@ def _poll_stamp() -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Validate the environment, run every provider, print one JSON payload.
+
+    `--print-config` stops after the config check. Any other argument is a
+    usage error. The process always exits through emit(), so a run that
+    crashed on its way there still leaves the panel a payload it can read.
+    """
     args = sys.argv[1:] if argv is None else argv
     if args in (["--help"], ["-h"]):
         # Answered before load_config: help must work on a broken environment.

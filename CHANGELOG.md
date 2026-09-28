@@ -77,6 +77,8 @@ prints, so a fetcher and UI shipped together never break each other.
   token store, and the write is UTF-8 rather than the locale encoding.
 - An HTTP error response is closed after its body is discarded, instead of
   relying on the process exit to release the socket.
+- `ruff` passes again: a dead `point_credential` helper in the test module
+  shadowed the one above it, so the gate and CI were red on a clean tree.
 - An unknown argument now prints the usage line next to the error, and a
   `print_smoke.py` config error goes to stderr so the provider lines on stdout
   stay clean when piped.

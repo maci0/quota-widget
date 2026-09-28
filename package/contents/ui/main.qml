@@ -22,8 +22,9 @@ PlasmoidItem {
     readonly property string cmd: "python3 '"
         + scriptPath.replace(/'/g, "'\\''") + "'"
 
-    // kcfg values are user-editable, so every one is clamped to its range
-    // before use; a bad config file must not blank the widget.
+    // The kcfg integers are user-editable, so each is clamped to its range
+    // before use; a bad config file must not blank the widget. gaugeView is a
+    // Bool and needs no clamp.
     function intSetting(value, fallback, min, max) {
         var n = parseInt(value)
         if (!isFinite(n))
@@ -77,7 +78,7 @@ PlasmoidItem {
     readonly property bool gaugeView: !!Plasmoid.configuration.gaugeView
     readonly property bool firstLoad: root.noData() && root.errorMsg === ""
     // A poll is in flight. exec.poll() drops a second one, so the header
-    // disables refresh and the compact view shows a placeholder meanwhile.
+    // disables refresh and shows the spinner while the run is out.
     property bool fetching: false
     property bool userRefreshing: false
 

@@ -50,7 +50,7 @@ systemctl --user restart plasma-plasmashell.service
 
 ## Fetching
 
-`package/contents/code/fetch_quota.py` is polled every 2 minutes (change it in the widget settings, see below). Only one run is in flight at a time: the next poll waits for the previous one to finish, and a run still going after 10 minutes is dropped so polling resumes.
+`package/contents/code/fetch_quota.py` is polled every 2 minutes (change it in the widget settings, see below). Only one run is in flight at a time: a poll that fires while the previous one is still going is dropped, and a run still going after 10 minutes is disconnected so the next tick starts a fresh one.
 
 | Provider | Endpoint | Credentials |
 | --- | --- | --- |
@@ -66,6 +66,7 @@ Claude's usage API 429s unknown User-Agents. The fetcher sends Claude Code's Use
 Smoke-test without Plasma:
 
 ```bash
+mkdir -p .scratch
 python3 package/contents/code/fetch_quota.py > .scratch/smoke.json
 python3 scripts/print_smoke.py .scratch/smoke.json
 ```
@@ -101,7 +102,7 @@ uv run pytest tests/test_fetch_quota.py -k cursor
 uv run pytest tests/test_fetch_quota.py::IsoToMsTest
 ```
 
-Tests are hermetic: no network, no credentials, no home-directory state. `uv run pytest` alone is a sub-second loop.
+Tests are hermetic: no network, no credentials, no home-directory state. `uv run pytest` alone runs the whole suite in a few seconds.
 
 Conventions, branching, and how to add a test or a dependency: [CONTRIBUTING.md](CONTRIBUTING.md).
 What changed in each release, and what breaks when upgrading: [CHANGELOG.md](CHANGELOG.md).
@@ -179,7 +180,7 @@ Token writes go through a temp file that is flushed and renamed, then the direct
 
 The widget is local-only. It has no telemetry, no analytics, no crash reporting, and no network calls other than the four usage endpoints and the OAuth token refreshes named in the fetching section above. It never sends a request to a server it does not already name there.
 
-What the fetcher reads from your account is what a usage bar needs: plan name, period percentages, reset times, and credit balances. Account identifiers (the WorkOS user id in the Cursor session, the ChatGPT account id header) are used to authorize a request. The raw value is never written to the cache, the emitted JSON, or any log; the cache stores a 16-character SHA-256 digest of it, which is what scopes an entry to one account. Nothing is written to a log at all; errors surface as a status code such as `http-429` on the card, and the body of a failed HTTP response is discarded rather than captured. `install.sh` writes one run's output to `.scratch/smoke.json` and the failure detail to `.scratch/smoke.err` in the checkout, both gitignored.
+What the fetcher reads from your account is what a usage bar needs: plan name, period percentages, reset times, and credit balances. Account identifiers (the WorkOS user id in the Cursor session, the ChatGPT account id header) are used to authorize a request. The raw value is never written to the cache, the emitted JSON, or any log; the cache stores a 16-character SHA-256 digest of it, which is what scopes an entry to one account. The card shows a status such as `http-429` and nothing more; the cause behind a failed call goes to stderr, which is the journal under Plasma, and that line carries the URL and the error, never a payload or an identifier. The body of a failed HTTP response is discarded rather than captured. `install.sh` writes one run's output to `.scratch/smoke.json` and the failure detail to `.scratch/smoke.err` in the checkout, both gitignored.
 
 Retention:
 
@@ -199,9 +200,15 @@ package/metadata.json
 package/contents/config/main.xml
 package/contents/ui/main.qml
 package/contents/code/fetch_quota.py
+package/contents/icons/com.maci.quota-widget.svg
 scripts/print_smoke.py
+tests/
+docs/THREAT_MODEL.md
 install.sh
 ```
+
+`package/` is the whole plasmoid and the only thing `install.sh` links into
+`~/.local/share/plasma/plasmoids/`.
 
 ## Disclaimer
 

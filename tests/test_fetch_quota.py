@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import dataclasses
 import datetime as dt
 import email.message
 import io
@@ -18,7 +17,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Literal
 from unittest.mock import patch
 
 import fetch_quota
@@ -38,16 +37,6 @@ _NEW_TOKENS: dict[str, object] = {
 
 JsonDict = dict[str, Any]
 
-# Test-side names for the credential files the config owns.
-Credential = Literal["CLAUDE_CRED", "CODEX_AUTH", "GROK_AUTH", "CURSOR_AUTH_JSON"]
-
-_CREDENTIAL_FIELD: Final[dict[str, str]] = {
-    "CLAUDE_CRED": "claude_cred",
-    "CODEX_AUTH": "codex_auth",
-    "GROK_AUTH": "grok_auth",
-    "CURSOR_AUTH_JSON": "cursor_auth",
-}
-
 _SANDBOX = tempfile.TemporaryDirectory()
 _SANDBOX_ENV = {
     "QUOTA_WIDGET_HOME": _SANDBOX.name,
@@ -61,22 +50,6 @@ _CRED_ENV = {
     "GROK_AUTH": "QUOTA_WIDGET_GROK_AUTH",
     "CURSOR_AUTH_JSON": "QUOTA_WIDGET_CURSOR_AUTH",
 }
-
-
-@contextlib.contextmanager
-def point_credential(name: Credential, path: Path) -> Iterator[None]:
-    """Point one credential file at a temp path, then restore the config.
-
-    The fetcher reads credential paths from its Config, so a test swaps the
-    field there rather than rebinding a module-level constant.
-    """
-    original = fetch_quota.config()
-    updates: dict[str, Any] = {_CREDENTIAL_FIELD[name]: path}
-    fetch_quota._CONFIG = dataclasses.replace(original, **updates)
-    try:
-        yield
-    finally:
-        fetch_quota._CONFIG = original
 
 
 def setUpModule() -> None:
