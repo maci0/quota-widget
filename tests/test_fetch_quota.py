@@ -1503,6 +1503,90 @@ class GrokNoPeriodTest(unittest.TestCase):
         self.assertEqual(_scoped(out), {"ok": False, "error": "net", "transient": True})
 
 
+class GrokBothCallsOverlapTest(unittest.TestCase):
+    """The weekly and monthly reads are two round trips to one host, so the
+    poll waits the slower of the two rather than the sum of the two."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        auth = Path(tmp.name) / "grok.json"
+        auth.write_text(json.dumps({"cli::c": {"key": "tok"}}))
+        self.env = config_env(
+            QUOTA_WIDGET_CACHE=tmp.name, QUOTA_WIDGET_GROK_AUTH=str(auth)
+        )
+        self.env.__enter__()
+        self.addCleanup(self.env.__exit__, None, None, None)
+
+    def test_both_calls_are_in_flight_at_once(self) -> None:
+        # A barrier no sequential pair can pass: the second call is only
+        # reached once the first has returned, and the wait then expires.
+        both_in_flight = threading.Barrier(2, timeout=5)
+
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            both_in_flight.wait()
+            if "format=credits" in url:
+                return 200, {
+                    "config": {
+                        "creditUsagePercent": 30,
+                        "currentPeriod": {"type": "WEEKLY"},
+                    }
+                }
+            return 200, {"config": {"used": 250, "monthlyLimit": 1000}}
+
+        with patch.object(fetch_quota, "fetch_json", fake_json):
+            out = fetch_quota.fetch_grok()
+
+        self.assertTrue(out["ok"])
+        self.assertEqual([p["label"] for p in out["periods"]], ["Weekly", "Monthly"])
+
+    def test_a_refresh_from_either_call_reaches_the_others_account(self) -> None:
+        # A 401 on the weekly call rotates the token; the reading is scoped by
+        # the token in hand after both calls, not the one the poll started
+        # with.
+        def fake_json(
+            url: str,
+            headers: dict[str, str],
+            *,
+            timeout: float = 12.0,
+            data: bytes | None = None,
+            method: str | None = None,
+        ) -> tuple[int, object]:
+            if "format=credits" in url and headers["Authorization"] == "Bearer tok":
+                return 401, None
+            if "format=credits" in url:
+                return 200, {
+                    "config": {
+                        "creditUsagePercent": 30,
+                        "currentPeriod": {"type": "WEEKLY"},
+                    }
+                }
+            return 200, {"config": {"used": 250, "monthlyLimit": 1000}}
+
+        rotated = {"key": "new", "refresh_token": "r", "oidc_client_id": "cli"}
+
+        with (
+            patch.object(fetch_quota, "fetch_json", fake_json),
+            patch.object(fetch_quota, "_refresh_grok", return_value=rotated),
+            patch.object(
+                fetch_quota,
+                "_account_id",
+                side_effect=lambda token, fallback=None: f"acct-{token}",
+            ),
+        ):
+            out = fetch_quota.fetch_grok()
+
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["account"], "acct-new")
+
+
 class GrokAuthStoreTest(unittest.TestCase):
     """The store is written by several tools, so the selection cannot assume
     one expires_at spelling."""

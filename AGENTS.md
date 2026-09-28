@@ -30,6 +30,10 @@ caller that reaches a provider without `main()`'s preload still loads it once.
 `_refresh_lock()` waits only on `LOCK_BUSY_ERRNOS`: a filesystem that cannot
 lock (`ENOLCK`, a network mount) refreshes unguarded at once instead of
 spinning out the 20 s deadline, and a `flock` never taken is never released.
+Grok's two billing calls are a second pool of two, nested in the provider one
+(it waits on the network, not on CPU), so the token a 401 rotates is returned
+from the call that took it instead of assigned through a shared name; both
+refreshes then meet the same `flock` re-read and end up on one token.
 Nothing else in the fetcher mutates module state; the rest is cross-process,
 through `flock`, `_atomic_write_json`, and the re-read in `_merge_write_json`.
 

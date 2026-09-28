@@ -1822,8 +1822,13 @@ def fetch_grok() -> JsonDict:
         if refreshed:
             entry = refreshed
 
-    def get_cfg(url: str) -> tuple[int, JsonDict | None]:
-        nonlocal entry
+    def get_cfg(url: str, entry: JsonDict) -> tuple[int, JsonDict | None, JsonDict]:
+        """(status, period config, the entry to poll the next call with).
+
+        The entry comes back rather than being assigned in place, so two calls
+        can run at once: each refreshes off its own copy and hands the token it
+        ended up holding back, and the two never write to the same name.
+        """
 
         def call(token: str) -> tuple[int, object]:
             return fetch_json(
@@ -1837,25 +1842,36 @@ def fetch_grok() -> JsonDict:
 
         token = entry.get("key")
         if not isinstance(token, str) or not token:
-            return 0, None
+            return 0, None, entry
         status, data = call(token)
         if status == 401:
+            # The refresh lock spans the credential re-read, so whichever call
+            # gets there second finds the rotated token and skips the round
+            # trip; both then hold the same one.
             refreshed = _refresh_grok(auth_key, entry)
             if not refreshed:
-                return 401, None
+                return 401, None, entry
             entry = refreshed
             token = entry.get("key")
             if not isinstance(token, str) or not token:
-                return 401, None
+                return 401, None, entry
             status, data = call(token)
         if status != 200 or not isinstance(data, dict):
-            return status, None
+            return status, None, entry
         cfg = data.get("config")
-        return status, cfg if isinstance(cfg, dict) else data
+        return status, cfg if isinstance(cfg, dict) else data, entry
 
     # Weekly (unified credits) + monthly ($ limit) are separate meters; show both.
-    st_week, week_cfg = get_cfg(GROK_BILLING_URL + "?format=credits")
-    st_month, month_cfg = get_cfg(GROK_BILLING_URL)
+    # Two round trips to one host, so they overlap instead of summing: the poll
+    # waits the slower of the two rather than the sum of both.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        week = pool.submit(get_cfg, GROK_BILLING_URL + "?format=credits", entry)
+        month = pool.submit(get_cfg, GROK_BILLING_URL, entry)
+        st_week, week_cfg, week_entry = week.result()
+        st_month, month_cfg, month_entry = month.result()
+    # Either call may be the one that rotated the token; a refresh either one
+    # saw is the entry the reading belongs to.
+    entry = month_entry if week_entry is entry else week_entry
 
     periods: list[JsonDict] = []
     seen: set[tuple[str, int | None]] = set()
