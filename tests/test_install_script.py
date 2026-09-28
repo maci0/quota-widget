@@ -58,6 +58,11 @@ class InstallScriptTest(unittest.TestCase):
         return root
 
     def run_script(self, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return self.run_script_env({"HOME": str(self.home)}, root, *args)
+
+    def run_script_env(
+        self, env: dict[str, str], root: Path, *args: str
+    ) -> subprocess.CompletedProcess[str]:
         bash = shutil.which("bash")
         if bash is None:
             self.skipTest("bash is not on PATH")
@@ -66,7 +71,7 @@ class InstallScriptTest(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
-            env={"HOME": str(self.home), "PATH": "/usr/bin:/bin"},
+            env={**env, "PATH": "/usr/bin:/bin"},
         )
 
     def dest(self, plugin_id: str) -> Path:
@@ -89,6 +94,22 @@ class InstallScriptTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("KPlugin Id", result.stderr)
+
+    def test_refuses_an_environment_without_home(self) -> None:
+        # The XDG defaults need $HOME, and `set -u` would stop the script on
+        # the first expansion with the shell's own wording, which says nothing
+        # about the widget. XDG_DATA_HOME alone does not stand in: the config
+        # and cache defaults need it too.
+        for args in ([], ["--help"]):
+            with self.subTest(args=args):
+                result = self.run_script_env(
+                    {"XDG_DATA_HOME": str(self.home / "data")},
+                    self.checkout("com.example.widget"),
+                    *args,
+                )
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("HOME is not set", result.stderr)
 
     def test_refuses_an_id_that_is_not_a_directory_name(self) -> None:
         for bad in ("../../etc", "com.maci quota-widget", "com.maci..widget", ""):

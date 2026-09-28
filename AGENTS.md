@@ -84,7 +84,9 @@ install directory is the manifest's `KPlugin.Id`, read at run time, so a rename
 takes the link, the guard, and the uninstall with it and a manifest without a
 usable Id stops the run. It creates nothing group- or world-readable (`umask
 077`) and does not write to the checkout except `.scratch/` and removing
-`__pycache__` under `package/`.
+`__pycache__` under `package/`. A run without `$HOME` stops before that, since
+the XDG defaults the destination and the cache paths are built from are only
+the spec defaults when the variable is unset.
 `./install.sh --uninstall` removes the widget and keeps the cache and the plasmoid
 config. Run the script only when the user asks to install, upgrade, or remove, never
 as a build or test step.
@@ -225,5 +227,8 @@ which is the floor `requires-python` declares and `install.sh` reads.
 `.github/workflows/test.yml` pins each third-party action to the commit behind
 its version tag; `.github/dependabot.yml` opens the bump. Do not repin one to a
 floating tag. The `uv` version there is pinned, so raise it there and nowhere
-else.
+else. The gate runs the whole block on a Python matrix, the `requires-python`
+floor and the `.python-version` default, because plasmashell runs the fetcher
+with whatever `python3` the user's distro ships and the floor is the
+interpreter most likely to break. A new floor means a new matrix entry.
 

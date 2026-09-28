@@ -270,6 +270,14 @@ fails if a Breaking entry lands in this section without a matching next version.
   trace while the popup still showed its card. The tooltip now names the
   providers it has no reading for, and marks a reading it is holding from
   cache the way its card does.
+- The providers the tooltip names as unanswered were listed on a comma written
+  in QML and spliced into the translated "No reading for: %1" line, so the
+  catalog held half a sentence and a language that lists its separators
+  differently could not be shown one. The list is joined on the same
+  translated pattern a meter's spoken summary uses.
+- `install.sh` stopped on its first `$HOME` expansion when the environment had
+  none, which `set -u` reports in the shell's own wording. It now says which
+  variable is missing, before it reads a manifest or a destination.
 - Gauge view carried a meter's sub-detail (the spend of a cap, the absolute
   reset time) in a hover tooltip only, so it had no visible place at all. The
   gauge now states it under the dial, as the list row does.

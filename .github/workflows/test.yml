@@ -20,11 +20,23 @@ jobs:
     # system python and shellcheck under the gate without a commit.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # The floor is the one README and pyproject name, and plasmashell runs the
+    # fetcher with whatever python3 the user's distro ships, so the floor is
+    # the interpreter most likely to break. .python-version (3.12) is the dev
+    # default and the upper end of the claim, so both ends run the whole gate.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    name: test (python ${{ matrix.python-version }})
     # The gate reads dates, so the runner's zone and locale must not decide
     # what a test sees. Both are set here rather than inherited.
     env:
       TZ: UTC
       LC_ALL: C.UTF-8
+      # An explicit version outranks the .python-version file, so the matrix
+      # entry decides which interpreter uv builds the environment from.
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       # Third-party actions are pinned to the commit behind the tag, so a
       # moved tag cannot change what the gate runs. Dependabot opens the bump
@@ -36,7 +48,8 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           version: "0.12.13"
-          # uv sync is the slowest step; the cache key is uv.lock.
+          # uv sync is the slowest step; the cache key is uv.lock and the
+          # interpreter, since the two environments are separate.
           enable-cache: true
           cache-dependency-glob: "uv.lock"
       # The gate lives in scripts/gate.sh, so a step added there runs here too

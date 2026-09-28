@@ -63,6 +63,14 @@ PKG_ID_RE="${PKG_ID//./\\.}"
 # The floor for the runtime `python3` is `requires-python` in pyproject.toml,
 # not a second literal here: a copy is a number nobody bumps.
 
+# The XDG defaults below need $HOME, and a run without one (a service unit,
+# `env -i`, a cron entry) would otherwise stop on the first expansion under
+# `set -u` with the shell's own wording. `--help` reaches the usage text.
+if [[ -z "${HOME:-}" ]]; then
+  echo "error: HOME is not set; the widget installs under the user's data dir" >&2
+  exit 1
+fi
+
 # XDG base dirs: a relative value is invalid, so the spec default stands.
 # https://specifications.freedesktop.org/basedir-spec/latest/
 xdg_data="$HOME/.local/share"

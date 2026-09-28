@@ -215,7 +215,9 @@ class MainQmlLocalizationTest(unittest.TestCase):
         self.assertIn('qsTr("%1, %2").arg(a).arg(b)', QML_SOURCE)
         # The failed-provider line lists vendor marks, and the separator around
         # them is as much the locale's as the sentence around the line is.
-        self.assertIn('qsTr("No reading for: %1").arg(joinLocalized(failed))', QML_SOURCE)
+        self.assertIn(
+            'qsTr("No reading for: %1").arg(joinLocalized(failed))', QML_SOURCE
+        )
         self.assertIn("function joinNames(names)", QML_SOURCE)
 
     def test_currency_codes_go_through_the_locale_formatter(self) -> None:
@@ -615,11 +617,13 @@ class MainQmlStaleWindowTest(unittest.TestCase):
         # mergeProv ages a kept reading against staleKeepMs, so taking the
         # window after the merge leaves a shortened
         # QUOTA_WIDGET_CACHE_MAX_AGE_S in force for one poll past the payload
-        # that reported it.
+        # that reported it. The merge walks providerNames, so one site covers
+        # every provider and the window has to precede that walk.
         window = QML_SOURCE.index("root.staleKeepMs = (typeof keepS ===")
-        for prov in ("claude", "cursor", "grok", "codex"):
-            merge = QML_SOURCE.index(f"mergeProv(root.{prov}, p.{prov})")
-            self.assertLess(window, merge, f"{prov} merged before the window")
+        merge = QML_SOURCE.index("root[n] = mergeProv(root[n], p[n])")
+        self.assertLess(window, merge, "the window was taken after the merge")
+        walk = QML_SOURCE[:merge]
+        self.assertIn("for (let i = 0; i < root.providerNames.length; i++)", walk)
 
     def test_the_fallback_window_is_not_writable_state(self) -> None:
         # staleKeepMs is overwritten by every poll, so the default it falls
