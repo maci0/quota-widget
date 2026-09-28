@@ -127,6 +127,8 @@ Right-click the widget, Configure, General. Stored by plasmashell in
 | `utilCritAt` | `90` | 1 to 100 | percent used before a meter is labelled "critical" |
 
 Out-of-range values in that file are clamped to the range above, not rejected.
+`utilCritAt` is also raised to `utilWarnAt` when it sits below it, so a reading
+can never be labelled "critical" before it is labelled "high".
 
 ### Fetcher environment
 

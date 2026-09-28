@@ -274,10 +274,12 @@ fails if a Breaking entry lands in this section without a matching next version.
 - `pyproject.toml` declares `[tool.uv] required-version = ">=0.12.13"`, the
   release CI pins, so a uv too old for the lockfile's revision 3 stops with a
   version message on the first command.
-- The `error: "config"` payload no longer carries `fetched_ms`, since the clock
-  override can be the value that failed. The panel falls back to its own clock.
-  No release carried the field on that payload, so this narrows a shape added
-  in this same window rather than removing one a user depends on.
+- The `error: "config"` payload is stamped from the real clock instead of the
+  pinned one, since the clock override can be the value that failed: a pin the
+  config check rejects would otherwise raise again on the emit path and leave
+  plasmashell with no JSON at all. The panel sees an `int` either way. No
+  release carried the field on that payload, so this narrows a shape added in
+  this same window rather than changing one a user depends on.
 - CI pins `actions/checkout` and `astral-sh/setup-uv` to the commit behind
   their version tag, and Dependabot (`.github/dependabot.yml`) opens the bump,
   so a moved tag can no longer change what the gate runs. The uv cache is keyed

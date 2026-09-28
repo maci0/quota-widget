@@ -399,7 +399,8 @@ class Config:
     cache_max_age_s: int
 
     def describe(self) -> JsonDict:
-        """Active values for `--print-config`. Paths only; no token is read here."""
+        """Active values for `--print-config`: paths and numeric knobs, and no
+        token is read to produce them."""
         return {
             "home": str(self.home),
             "claude_cred": str(self.claude_cred),
@@ -1265,6 +1266,13 @@ def _claude_session(data: JsonDict) -> tuple[Any, int | None]:
 
 
 def fetch_claude() -> JsonDict:
+    """One Claude reading, or a failure the panel can label.
+
+    `error` is "no-token" when the credential store holds no usable access
+    token, "http-429" when a throttled refresh left the session unproven, and
+    otherwise the status _http_error names. A transient status serves the
+    cached reading instead, marked "stale".
+    """
     if not config().claude_cred.is_file():
         return {"ok": False, "error": "no-token"}
 
@@ -1595,6 +1603,12 @@ def _parse_grok_period(cfg: JsonDict) -> JsonDict:
 
 
 def fetch_grok() -> JsonDict:
+    """One Grok reading, or a failure the panel can label.
+
+    `error` is "no-token" with no auth store, "http-401" when the session is
+    rejected, and otherwise the first non-200 status of the two billing calls.
+    A transient status serves the cached reading instead, marked "stale".
+    """
     loaded = _load_grok_auth()
     if not loaded:
         return {"ok": False, "error": "no-token"}
@@ -1817,6 +1831,13 @@ def _refresh_codex(auth: JsonDict) -> JsonDict | None:
 
 
 def fetch_codex() -> JsonDict:
+    """One Codex reading, or a failure the panel can label.
+
+    `error` is "no-token" when the auth file holds no usable access token, and
+    otherwise the status _http_error names; the "http-401" a rejected refresh
+    returns names no account, because there is no surviving token to scope one
+    by. A transient status serves the cached reading instead, marked "stale".
+    """
     if not config().codex_auth.is_file():
         return {"ok": False, "error": "no-token"}
 
@@ -2203,6 +2224,13 @@ def parse_cursor_summary(data: JsonDict, plan_hint: str | None = None) -> JsonDi
 
 
 def fetch_cursor() -> JsonDict:
+    """One Cursor reading, or a failure the panel can label.
+
+    `error` is "no-token" when neither credential source yields a session, and
+    otherwise the status the vendor sent, so a 403 stays a 403 and is not
+    reported as a signed-out session. A transient status serves the cached
+    reading instead, marked "stale".
+    """
     auth = _load_cursor_auth()
     if not auth:
         return {"ok": False, "error": "no-token"}
