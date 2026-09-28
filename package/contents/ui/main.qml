@@ -135,6 +135,11 @@ PlasmoidItem {
                 if (root.nowMs - root.pollStartedMs > root.pollTimeoutMs) {
                     disconnectSource(connectedSources[0])
                     root.pollStartedMs = 0
+                    // The dropped run reports nothing back, so its flags would
+                    // stay set: the spinner turning for good and refresh
+                    // disabled until some later poll happened to answer.
+                    root.fetching = false
+                    root.userRefreshing = false
                 }
                 return
             }
@@ -328,13 +333,13 @@ PlasmoidItem {
     function errText(code, signIn) {
         if (code === "no-token" || code === "http-401")
             return signIn
-        if (code === "net") return "Network error"
-        if (code === "exec") return "Offline"
-        if (code === "http-429") return "Rate-limited"
-        if (code === "empty") return "No provider data returned"
+        if (code === "net") return qsTr("Network error")
+        if (code === "exec") return qsTr("Offline")
+        if (code === "http-429") return qsTr("Rate-limited")
+        if (code === "empty") return qsTr("No provider data returned")
         if (code === "config" && root.configError !== "")
-            return "Check fetcher config: " + root.configError
-        return "Unavailable"
+            return qsTr("Check fetcher config: %1").arg(root.configError)
+        return qsTr("Unavailable")
     }
 
     function statusText() {
@@ -587,8 +592,9 @@ PlasmoidItem {
                     Layout.fillWidth: true
                     visible: root.claude !== null
                     title: "Claude"
-                    subtitle: (root.claude && root.claude.ok && root.claude.plan)
-                        ? (root.claude.plan + staleSuffix(root.claude))
+                    subtitle: (root.claude && root.claude.ok)
+                        ? ((root.claude.plan || qsTr("Signed in"))
+                            + staleSuffix(root.claude))
                         : ((root.claude && root.claude.error)
                             ? errText(root.claude.error, qsTr("Sign in with Claude Code"))
                             : qsTr("Loading"))
@@ -693,8 +699,9 @@ PlasmoidItem {
                     Layout.fillWidth: true
                     visible: root.cursor !== null
                     title: "Cursor"
-                    subtitle: (root.cursor && root.cursor.ok && root.cursor.plan)
-                        ? (root.cursor.plan + staleSuffix(root.cursor))
+                    subtitle: (root.cursor && root.cursor.ok)
+                        ? ((root.cursor.plan || qsTr("Signed in"))
+                            + staleSuffix(root.cursor))
                         : ((root.cursor && root.cursor.error)
                             ? errText(root.cursor.error, qsTr("Sign in to Cursor"))
                             : qsTr("Loading"))
@@ -755,8 +762,9 @@ PlasmoidItem {
                     Layout.fillWidth: true
                     visible: root.codex !== null
                     title: "Codex"
-                    subtitle: (root.codex && root.codex.ok && root.codex.plan)
-                        ? (root.codex.plan + staleSuffix(root.codex))
+                    subtitle: (root.codex && root.codex.ok)
+                        ? ((root.codex.plan || qsTr("Signed in"))
+                            + staleSuffix(root.codex))
                         : ((root.codex && root.codex.error)
                             ? errText(root.codex.error, qsTr("Sign in with `codex login`"))
                             : qsTr("Loading"))
@@ -980,7 +988,7 @@ PlasmoidItem {
                 // "cached" is opaque on its own: say what it means on hover.
                 HoverHandler { id: subtitleHover }
                 PlasmaComponents3.ToolTip.text: card.stale
-                    ? "Last known reading; the latest poll failed"
+                    ? qsTr("Last known reading; the latest poll failed")
                     : ""
                 PlasmaComponents3.ToolTip.visible: card.stale
                     && subtitleHover.hovered

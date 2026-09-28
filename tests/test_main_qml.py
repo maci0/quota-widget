@@ -20,29 +20,62 @@ UI_BINDING: Final = re.compile(
     re.MULTILINE,
 )
 PROSE_LITERAL: Final = re.compile(r'"([^"\\]*)"')
+# Fetcher payload keys and the shell prefix, not words a reader sees.
+NOT_PROSE: Final = frozenset({"exit code", "stdout", "python3 '"})
 
 
 class MainQmlLocalizationTest(unittest.TestCase):
     """Guards the locale contract the fetcher tests cannot see."""
 
     @staticmethod
-    def _untranslated_bindings() -> list[str]:
+    def _stripped_source() -> str:
+        # Comments are not UI text, and a qsTr() call is already marked, so
+        # neither can reach a reader. What is left is prose nobody can translate.
+        return re.sub(r"//[^\n]*", "", re.sub(r'qsTr\("[^"]*"\)', "", QML_SOURCE))
+
+    @classmethod
+    def _untranslated_bindings(cls) -> list[str]:
         # Drop every qsTr() call first, so what is left is text a translator
         # would never see. Brand names ("Claude", "Cursor", "Codex", "Grok")
         # and separators (" · ") carry no letters-plus-space, so they stay.
         source = re.sub(r'qsTr\("[^"]*"\)', "", QML_SOURCE)
         found: list[str] = []
         for match in UI_BINDING.finditer(source):
-            for literal in PROSE_LITERAL.findall(match.group(1)):
-                stripped = literal.strip()
-                if " " in stripped and re.search(r"[A-Za-z]", stripped):
-                    found.append(stripped)
+            found.extend(cls._prose(match.group(1)))
+        return found
+
+    @staticmethod
+    def _prose(text: str) -> list[str]:
+        found: list[str] = []
+        for literal in PROSE_LITERAL.findall(text):
+            stripped = literal.strip()
+            if (
+                " " in stripped
+                and re.search(r"[A-Za-z]", stripped)
+                and stripped not in NOT_PROSE
+            ):
+                found.append(stripped)
         return found
 
     def test_ui_text_is_marked_for_translation(self) -> None:
         # A hardcoded label is a word a translator cannot reach, so the widget
         # stays English in every locale.
         self.assertEqual(self._untranslated_bindings(), [])
+
+    def test_helper_returned_text_is_marked_for_translation(self) -> None:
+        # errText() and the cached-card tooltip return their wording into a
+        # label, so no `text:` binding ever names the literal and the sweep
+        # above reads the call site, not the string.
+        # A literal never spans a line here, and matching across one would pair
+        # a stray quote with the next line's.
+        self.assertEqual(
+            [
+                literal
+                for line in self._stripped_source().splitlines()
+                for literal in self._prose(line)
+            ],
+            [],
+        )
 
     def test_dates_and_times_use_the_locale(self) -> None:
         # "ddd h:mm AP" and friends are English patterns: they name the weekday
@@ -136,6 +169,17 @@ class MainQmlAccessibilityTest(unittest.TestCase):
         # meter showed the countdown first, in the same two columns.
         self.assertNotIn('"Resets " + resetAtStr(', QML_SOURCE)
 
+    def test_a_card_that_answered_is_not_labelled_loading(self) -> None:
+        # A provider with no plan name (Cursor reads one off the credential)
+        # rendered live meters under a subtitle saying "Loading".
+        for provider in ("claude", "cursor", "codex"):
+            self.assertIn(
+                f"subtitle: (root.{provider} && root.{provider}.ok)\n"
+                f"                        ? ((root.{provider}.plan "
+                '|| qsTr("Signed in"))',
+                QML_SOURCE,
+            )
+
 
 class MainQmlPollingTest(unittest.TestCase):
     """A poll holds a child process; it must always be released."""
@@ -165,6 +209,14 @@ class MainQmlPollingTest(unittest.TestCase):
         # here or it outlives the object that started it.
         self.assertIn("Component.onDestruction:", QML_SOURCE)
         self.assertIn("exec.disconnectSource(held[i])", QML_SOURCE)
+
+    def test_a_dropped_run_releases_the_indicators(self) -> None:
+        # The dropped run reports nothing back, so the refresh button and its
+        # spinner keep the state of a run that is already gone.
+        drop = QML_SOURCE.split("disconnectSource(connectedSources[0])", 1)[1]
+        block = drop.split("\n                }", 1)[0]
+        self.assertIn("root.fetching = false", block)
+        self.assertIn("root.userRefreshing = false", block)
 
 
 if __name__ == "__main__":
