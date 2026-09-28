@@ -1011,10 +1011,18 @@ def plan_label(subscription: str | None, tier: str | None) -> str:
 
 
 def parse_retry_after(value: str | None) -> float | None:
-    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date)."""
-    if not value:
+    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date).
+
+    A header is the vendor's to shape, so anything that is not a plain
+    string, and any value that is not a finite number of seconds, reads as
+    no wait at all. The result feeds sleep(), where an infinity or a raise
+    would cost the poll far more than the retry it was meant to cover.
+    """
+    if not isinstance(value, str) or not value:
         return None
     s = value.strip()
+    if not s:
+        return None
     try:
         number = float(s)
     except ValueError:
@@ -1028,9 +1036,10 @@ def parse_retry_after(value: str | None) -> float | None:
         when = email.utils.parsedate_to_datetime(s)
         if when.tzinfo is None:
             when = when.replace(tzinfo=dt.UTC)
-        return max(0.0, (when - now_utc()).total_seconds())
+        wait = (when - now_utc()).total_seconds()
     except (TypeError, ValueError, OverflowError):
         return None  # HTTP-date present but not parseable
+    return max(0.0, wait) if math.isfinite(wait) else None
 
 
 def _fsync_dir(path: Path) -> None:
@@ -1700,7 +1709,13 @@ def _claude_expired(oauth: JsonDict) -> bool:
     exp = _finite_number(oauth.get("expiresAt"))
     if exp is None:
         return False
-    return epoch_ms(exp) <= now_ms() + TOKEN_SKEW_MS
+    if exp > MS_EPOCH_CUTOFF:
+        ts_ms: int | None = int(exp)
+    else:
+        ts_ms = ms_from_seconds_or_none(exp)
+    if ts_ms is None:
+        return False
+    return ts_ms <= now_ms() + TOKEN_SKEW_MS
 
 
 def _refresh_claude(cred: JsonDict) -> tuple[JsonDict | None, bool]:
@@ -2392,7 +2407,12 @@ def _codex_window(block: JsonDict | None, name: str) -> JsonDict | None:
 
 
 def _codex_reset_credits(data: JsonDict) -> JsonDict:
-    """Preserve a reported empty reset-credit balance as an explicit zero."""
+    """Preserve a reported empty reset-credit balance as an explicit zero.
+
+    A count that is present but is not a finite number is not a balance, so
+    it reads as absent: a NaN here would reach the emitted document and the
+    panel's JSON parser would reject the whole payload.
+    """
     reported = "rate_limit_reset_credits" in data
     raw = data.get("rate_limit_reset_credits")
     resets = raw if isinstance(raw, dict) else {}

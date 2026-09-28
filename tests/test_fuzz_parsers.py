@@ -1,6 +1,6 @@
 """Randomized (property) fuzzing for the parsers fed untrusted input.
 
-Three surfaces carry bytes or JSON that this process does not control:
+Every surface that carries bytes or JSON this process does not control:
 
 - ``parse_cursor_summary`` reads the Cursor usage-summary body off the wire
   and out of ``~/.cache/quota-widget/cursor.json``.
@@ -12,11 +12,14 @@ Three surfaces carry bytes or JSON that this process does not control:
 - ``_codex_window`` and ``_codex_reset_credits`` read the Codex usage body,
   where the window's numbers are rescaled into an instant before they reach
   the panel.
+- ``parse_retry_after`` reads the Retry-After header, which reaches sleep().
 - ``_vscdb_str`` and ``_jwt_payload`` read cells and tokens out of a Cursor
   SQLite state DB and a vendor credential file.
+- ``_write_provider_cache`` and ``_read_provider_cache`` round-trip readings
+  through disk.
 
-Both run inside a plasmashell poll, so a raise is a dead widget until the
-next reload. The generators are seeded, so a failure reproduces from the
+All of them run inside a plasmashell poll, so a raise is a dead widget until
+the next reload. The generators are seeded, so a failure reproduces from the
 printed seed. A fuzzer only proves the presence of a bug; the assertions
 below are the invariant half, and they turn a wrong answer into a failure
 the generator can see.
@@ -25,10 +28,15 @@ the generator can see.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import math
+import os
 import random
+import tempfile
 import unittest
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import fetch_quota
@@ -37,6 +45,9 @@ JsonDict = dict[str, Any]
 
 ITERATIONS = 2000
 BASE_SEED = 20260928
+# The cache harness writes a real file, and every write is fsynced, so it
+# runs a shorter pass than the in-memory parsers.
+CACHE_ITERATIONS = 150
 
 # Shapes the vendors actually send, plus the ones a broken or hostile
 # response would send. Generation starts from these so a short run still
@@ -144,6 +155,57 @@ def _b64url(payload: bytes) -> str:
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
+# Timestamps as the vendors write them, plus the ones a broken value holds.
+TIMESTAMP_SEEDS: tuple[Any, ...] = (
+    "2026-05-02T14:11:55.000Z",
+    "2026-05-02T14:11:55Z",
+    "2026-05-02T14:11:55",
+    "2026-05-02 14:11:55",
+    "2026-05-02T14:11:55+02:00",
+    "2026-05-02T14:11:55.123456789Z",
+    "  2026-05-02T14:11:55Z  ",
+    "0001-01-01T00:00:00Z",
+    "9999-12-31T23:59:59.999999Z",
+    "2026-13-45T99:99:99Z",
+    "2026-02-30T00:00:00Z",
+    "Z",
+    "+00:00",
+    "1970-01-01T00:00:00.000+00:00",
+    "",
+    "not a date",
+    "1e999",
+    "\x00",
+    "2026-05-02T14:11:55Z\u00a0",
+    None,
+    1_743_691_915_000,
+    0,
+    1e308,
+    ["2026-05-02T14:11:55Z"],
+    {"start": "2026-05-02T14:11:55Z"},
+    True,
+)
+
+# Retry-After header values: delta-seconds, HTTP-date, and neither.
+RETRY_AFTER_SEEDS: tuple[Any, ...] = (
+    "0",
+    "120",
+    "  5  ",
+    "-10",
+    "1e999",
+    "nan",
+    "inf",
+    "Wed, 02 May 2026 14:11:55 GMT",
+    "Wednesday, 02-May-26 14:11:55 GMT",
+    "Wed, 99 Xxx 2026 99:99:99 GMT",
+    "",
+    "   ",
+    "\x00",
+    None,
+    5,
+    ["5"],
+)
+
+
 def _rand_json(rng: random.Random, depth: int = 0) -> Any:
     """A JSON value with the shape of a usage-summary body, roughly."""
     if depth >= 3 or rng.random() < 0.25:
@@ -177,6 +239,8 @@ def _rand_summary(rng: random.Random) -> Any:
     return base
 
 
+
+
 def _rand_cell(rng: random.Random) -> Any:
     if rng.random() < 0.3:
         return rng.choice(CELL_SEEDS)
@@ -190,6 +254,27 @@ def _rand_cell(rng: random.Random) -> Any:
     if kind == 2:
         return f'"\\u{raw.hex()}"'
     return text
+
+
+def _assert_serializable(case: unittest.TestCase, obj: Any) -> None:
+    """The panel parses this with JSON; a NaN or Infinity blanks the widget."""
+    json.loads(json.dumps(obj, allow_nan=False))
+
+
+@contextlib.contextmanager
+def _cache_dir(path: Path) -> Iterator[None]:
+    """Point the fetcher's cache at `path` for the duration of a test."""
+    saved = os.environ.get("QUOTA_WIDGET_CACHE")
+    os.environ["QUOTA_WIDGET_CACHE"] = str(path)
+    fetch_quota.load_config()
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("QUOTA_WIDGET_CACHE", None)
+        else:
+            os.environ["QUOTA_WIDGET_CACHE"] = saved
+        fetch_quota.load_config()
 
 
 class CursorSummaryFuzz(unittest.TestCase):
@@ -210,9 +295,7 @@ class CursorSummaryFuzz(unittest.TestCase):
                 value = period[key]
                 if isinstance(value, float):
                     self.assertTrue(math.isfinite(value), f"{key}={value!r} not finite")
-        # The panel parses this with JSON; a NaN or Infinity here blanks the
-        # whole widget, so the emitted document must round-trip.
-        json.loads(json.dumps(parsed, allow_nan=False))
+        _assert_serializable(self, parsed)
         return parsed
 
     def test_fuzz_usage_summary(self) -> None:
@@ -780,6 +863,158 @@ class CodexWindowFuzz(unittest.TestCase):
         absent = fetch_quota._codex_reset_credits({})
         self.assertIs(absent["reported"], False)
         self.assertIsNone(absent["available"])
+
+    def test_expiry_out_of_range_is_not_a_date(self) -> None:
+        # An exp far past any renderable instant is finite, and rounding it
+        # to milliseconds is what used to raise out of the poll.
+        for claim in ('{"exp":1e308}', '{"exp":-1e308}', '{"exp":1e400}'):
+            payload = base64.urlsafe_b64encode(claim.encode()).rstrip(b"=").decode()
+            with self.subTest(claim=claim):
+                self.assertIsNone(fetch_quota._jwt_exp_ms(f"h.{payload}.s"))
+        # The same value in the Claude credential file, read as an expiry.
+        self.assertIs(fetch_quota._claude_expired({"expiresAt": -1e308}), False)
+        self.assertIs(fetch_quota._claude_expired({"expiresAt": 1e308}), False)
+
+    def test_fuzz_window_label(self) -> None:
+        for iteration in range(ITERATIONS):
+            rng = random.Random(BASE_SEED + 60_000 + iteration)
+            seconds = rng.choice([None, 0, -1, 1, 18_000, 172_800, 604_800])
+            label = fetch_quota._codex_window_label(seconds, "primary_window")
+            self.assertIsInstance(label, str)
+            self.assertTrue(label)
+            self.assertTrue(label.encode("utf-8"))
+
+
+class TimestampFuzz(unittest.TestCase):
+    """Invariants for the ISO-8601 reader every provider body feeds."""
+
+    def _check(self, raw: Any) -> int | None:
+        ms = fetch_quota.iso_to_ms(raw)
+        self.assertTrue(
+            ms is None or (isinstance(ms, int) and not isinstance(ms, bool)),
+            f"iso_to_ms({raw!r}) = {ms!r}",
+        )
+        return ms
+
+    def test_fuzz_vendor_timestamps(self) -> None:
+        for iteration in range(ITERATIONS):
+            rng = random.Random(BASE_SEED + 30_000 + iteration)
+            raw = rng.choice(TIMESTAMP_SEEDS) if rng.random() < 0.5 else _rand_json(rng)
+            with self.subTest(iteration=iteration, seed=BASE_SEED + 30_000 + iteration):
+                self._check(raw)
+
+    def test_known_timestamps(self) -> None:
+        self.assertEqual(self._check("2026-05-02T14:11:55.000Z"), 1777731115000)
+        # Offset-free is UTC, never the host zone.
+        self.assertEqual(self._check("2026-05-02T14:11:55"), 1777731115000)
+        self.assertEqual(self._check("2026-05-02T16:11:55+02:00"), 1777731115000)
+        self.assertEqual(self._check(1_743_691_915_000), 1743691915000)
+        for raw in ("", "not a date", "2026-13-45T99:99:99Z", None):
+            self.assertIsNone(self._check(raw))
+
+    def test_pathological_timestamps_terminate(self) -> None:
+        """A megabyte of near-date text must not stall a poll."""
+        self.assertIsNone(self._check("2026-05-02T14:11:55Z" * 50_000))
+        self.assertIsNone(self._check("9" * 1_000_000))
+        self.assertIsNone(self._check("\x00" * 1_000_000))
+
+
+
+class RetryAfterFuzz(unittest.TestCase):
+    """Invariants for the Retry-After header, which reaches sleep() as-is."""
+
+    def test_fuzz_retry_after(self) -> None:
+        for iteration in range(ITERATIONS):
+            rng = random.Random(BASE_SEED + 80_000 + iteration)
+            raw = (
+                rng.choice(RETRY_AFTER_SEEDS) if rng.random() < 0.5 else _rand_json(rng)
+            )
+            with self.subTest(iteration=iteration, seed=BASE_SEED + 80_000 + iteration):
+                wait = fetch_quota.parse_retry_after(raw)
+                self.assertTrue(wait is None or isinstance(wait, float))
+                if wait is not None:
+                    # This value reaches sleep(): finite, never negative, so
+                    # a hostile header cannot park a poll.
+                    self.assertTrue(math.isfinite(wait))
+                    self.assertGreaterEqual(wait, 0.0)
+
+    def test_known_retry_after(self) -> None:
+        self.assertEqual(fetch_quota.parse_retry_after("5"), 5.0)
+        self.assertEqual(fetch_quota.parse_retry_after("-10"), 0.0)
+        self.assertIsNone(fetch_quota.parse_retry_after("nan"))
+        self.assertIsNone(fetch_quota.parse_retry_after("inf"))
+        self.assertIsNone(fetch_quota.parse_retry_after("1e999"))
+        self.assertIsNone(fetch_quota.parse_retry_after("not a date"))
+        # A header the parser hands back as something other than text is not
+        # a wait; it must not reach the strip() below it.
+        self.assertIsNone(fetch_quota.parse_retry_after({"Retry-After": 5}))  # type: ignore[arg-type]
+
+
+class ProviderCacheRoundTripFuzz(unittest.TestCase):
+    """A parsed reading must survive the cache write and read unchanged."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._env = _cache_dir(Path(self.tmp.name) / "cache")
+        self._env.__enter__()
+        self.addCleanup(self._env.__exit__, None, None, None)
+        self.account = "acct-fuzz"
+
+    def _check(self, payload: JsonDict) -> None:
+        _assert_serializable(self, payload)
+        fetch_quota._write_provider_cache("claude", payload, self.account)
+        got = fetch_quota._read_provider_cache("claude", self.account)
+        self.assertIsNotNone(got)
+        assert got is not None
+        # fetched_ms comes back as the instant of the write, not of the read,
+        # so a replay cannot buy a second fresh window.
+        self.assertGreaterEqual(got["fetched_ms"], payload["fetched_ms"])
+        self.assertLessEqual(got["fetched_ms"], fetch_quota.now_ms())
+        for key, value in payload.items():
+            if key == "fetched_ms":
+                continue
+            self.assertEqual(got[key], value, f"{key} did not survive the round trip")
+        stale = fetch_quota._stale_cache("claude", self.account)
+        self.assertIsNotNone(stale)
+        assert stale is not None
+        self.assertIs(stale["stale"], True)
+
+    def test_fuzz_parsed_readings_survive_the_cache(self) -> None:
+        fuzz = ClaudeUsageFuzz()
+        for iteration in range(CACHE_ITERATIONS):
+            rng = random.Random(BASE_SEED + 90_000 + iteration)
+            weekly, (session, _) = fuzz._check(_rand_claude(rng))
+            payload = fetch_quota._reading(
+                {
+                    "ok": True,
+                    "plan": "Pro",
+                    "session": {"util": session, "resets_ms": None},
+                    "weekly": weekly,
+                }
+            )
+            with self.subTest(iteration=iteration, seed=BASE_SEED + 90_000 + iteration):
+                self._check(payload)
+
+    def test_fuzz_unserializable_readings_leave_no_entry(self) -> None:
+        for iteration in range(CACHE_ITERATIONS):
+            rng = random.Random(BASE_SEED + 100_000 + iteration)
+            leaf = _rand_json(rng, 2)
+            payload = fetch_quota._reading({"ok": True, "plan": leaf, "extra": leaf})
+            with self.subTest(
+                iteration=iteration, seed=BASE_SEED + 100_000 + iteration
+            ):
+                # A fresh cache per iteration, so a refused write is judged
+                # against an empty store rather than the previous entry.
+                with _cache_dir(Path(self.tmp.name) / f"case{iteration}"):
+                    try:
+                        self._check(payload)
+                    except (TypeError, ValueError):
+                        # The write refuses what JSON cannot carry; the next
+                        # read must find nothing rather than a torn entry.
+                        self.assertIsNone(
+                            fetch_quota._read_provider_cache("claude", self.account)
+                        )
 
 
 if __name__ == "__main__":

@@ -94,10 +94,10 @@ fails if a Breaking entry lands in this section without a matching next version.
   clamped to 30 to 3600), `utilWarnAt` (default 70, 1 to 99), and
   `utilCritAt` (default 90, 1 to 100). Documented in the README.
 - Seeded randomized fuzzing for the parsers that read untrusted input: the
-  Cursor usage-summary body, the Grok billing config, the Claude usage body and
-  its `limits` array, the Codex rate-limit windows and reset credits, the Cursor
-  `ItemTable` cells, and vendor JWTs (`tests/test_fuzz_parsers.py`). A failure
-  prints the seed that reproduces it.
+  Cursor and Grok bodies, the Claude usage body and its `limits` array, the Codex
+  rate-limit windows and reset credits, `Retry-After`, `ItemTable` cells, vendor
+  JWTs, and the provider cache write/read pair (`tests/test_fuzz_parsers.py`). A
+  failure prints the seed that reproduces it.
 - `QUOTA_WIDGET_NOW_MS` pins the fetcher clock, so the same HTTP responses print
   byte-identical output on every run. Documented in the README, for tests and
   smoke runs.

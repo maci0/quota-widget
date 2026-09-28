@@ -4440,7 +4440,7 @@ class ResponseSizeCapTest(unittest.TestCase):
         ):
             status, body, _hdrs = fetch_quota.fetch_http("https://api.test/usage", {})
 
-        self.assertEqual((status, body), (200, None))
+        self.assertEqual((status, body), (fetch_quota.UNREADABLE_BODY_STATUS, None))
 
     def test_the_discarded_error_body_is_capped_too(self) -> None:
         # A 429 or a 5xx is the response a peer picks at length, and this body

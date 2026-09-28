@@ -61,9 +61,11 @@ through `flock`, `_atomic_write_json`, and the re-read in `_merge_write_json`.
   itself, which polls four providers.
 - `tests/test_fuzz_parsers.py`: seeded randomized fuzzing of the parsers fed
   untrusted input (the Cursor and Grok bodies, the Claude usage body and its
-  `limits` array, the Codex rate-limit windows and reset credits, `ItemTable`
-  cells, JWTs). Generators are seeded so a failure reproduces; raise
-  `ITERATIONS` or move `BASE_SEED` to widen a run.
+  `limits` array, the Codex rate-limit windows and reset credits, `Retry-After`,
+  `ItemTable` cells, JWTs, and the provider cache write/read pair). Generators
+  are seeded so a failure reproduces; raise `ITERATIONS` or move `BASE_SEED` to
+  widen a run. The cache harness writes a real file and runs `CACHE_ITERATIONS`
+  instead.
 - `scripts/print_smoke.py`: prints a fetched JSON dump (`install.sh` writes
   `.scratch/smoke.json`). `install.sh` runs it as a standalone script, so it
   keeps its own `project_root()` walk instead of importing the test helper.
