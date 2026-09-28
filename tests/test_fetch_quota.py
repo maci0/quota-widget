@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import unittest
 import urllib.error
 import urllib.parse
@@ -1057,6 +1058,23 @@ class CursorStateDbTest(unittest.TestCase):
         self._write_db({"k": "v"}, table="Other")
         self.assertIsNone(fetch_quota._read_cursor_state_db(self.db))
 
+    def test_an_undecodable_cell_does_not_cost_the_token(self) -> None:
+        # A TEXT cell that is not UTF-8 used to abort the whole query, so a
+        # garbage membership string signed the user out of the widget.
+        self._write_db({"cursorAuth/accessToken": _fake_jwt("auth0|user_01IDB")})
+        con = sqlite3.connect(self.db)
+        with con:
+            con.execute(
+                "UPDATE ItemTable SET value = CAST(? AS TEXT) WHERE key = ?",
+                (b"\xff\xfe pro", "cursorAuth/stripeMembershipType"),
+            )
+        con.close()
+
+        self.assertEqual(
+            fetch_quota._read_cursor_state_db(self.db),
+            (_fake_jwt("auth0|user_01IDB"), ""),
+        )
+
     def test_load_falls_through_to_the_db_when_auth_json_is_absent(self) -> None:
         self._write_db(
             {
@@ -1530,6 +1548,26 @@ class AccountIdTest(unittest.TestCase):
     def test_nothing_identifiable_is_none(self) -> None:
         self.assertIsNone(fetch_quota._account_id("opaque"))
         self.assertIsNone(fetch_quota._account_id(None))
+
+    def test_decomposed_and_composed_spellings_share_one_scope(self) -> None:
+        # An NFD id (a macOS- or vendor-produced string) and its NFC twin are
+        # one account, and a byte-unequal digest would split their cache.
+        nfc = unicodedata.normalize("NFC", "café-01ABC")
+        nfd = unicodedata.normalize("NFD", "café-01ABC")
+        self.assertNotEqual(nfc, nfd)
+        self.assertEqual(fetch_quota._digest(nfc), fetch_quota._digest(nfd))
+        self.assertEqual(
+            fetch_quota._account_id(_fake_jwt(nfc)),
+            fetch_quota._account_id(_fake_jwt(nfd)),
+        )
+
+    def test_an_unencodable_id_is_no_id_rather_than_a_crash(self) -> None:
+        # json.loads decodes a "\ud800" escape into a lone surrogate, which
+        # encodes to nothing; raising here would lose the whole provider card
+        # to a digest and reach the panel as a network error.
+        lone = json.loads('"\\ud800"')
+        self.assertIsNone(fetch_quota._digest(lone))
+        self.assertIsNone(fetch_quota._account_id(_fake_jwt(lone), lone))
 
 
 class ErrorBodyTest(unittest.TestCase):

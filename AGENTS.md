@@ -80,7 +80,7 @@ Two layers hold a last good reading: the fetcher writes `~/.cache/quota-widget/<
 - Age a value by `fetched_ms`, the instant the reading was taken, never by when the payload arrived. Replaying a cached payload must not buy a second window.
 - Both layers expire at 24 h. `DEFAULT_CACHE_MAX_AGE_S` in `fetch_quota.py` (overridable through `QUOTA_WIDGET_CACHE_MAX_AGE_S`) is the one to change: the fetcher emits the effective window as `cache_max_age_s` and `main.qml` takes `staleKeepMs` from it, so an override reaches the panel. `defaultStaleKeepMs` in `main.qml` is the fallback for a payload that carries no value.
 - An expired fetcher entry is deleted when it is read.
-- Entries are scoped to one account id (`_account_id`, hashed), so a second account signing in on the same machine never reads the first one's numbers.
+- Entries are scoped to one account id (`_account_id`, hashed), so a second account signing in on the same machine never reads the first one's numbers. That id is text off the wire, so `_digest` normalizes it to `NORMALIZATION_FORM` (NFC) before hashing: an NFD spelling of the same account and its NFC twin are one scope, not two.
 
 Nothing personal reaches a log, a cache, or the emitted JSON: no email or session token leaves the function that reads it, and a failed HTTP body is discarded rather than kept. The provider cache holds only what the UI renders, plus the hashed account id used to scope it. README's "Data and privacy" section is the user-facing statement of this; change it with the code.
 

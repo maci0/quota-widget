@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -48,6 +49,21 @@ def _join(*parts: str) -> str:
     return " ".join(part for part in parts if part)
 
 
+def _use_utf8_streams() -> None:
+    """Print plan labels and error text as UTF-8 whatever the locale says.
+
+    The labels come off the vendor's wire in the vendor's text, and under a C
+    or Latin-1 locale the default stream encoding is ASCII, so printing one
+    raises UnicodeEncodeError and the summary never reaches the terminal. A
+    captured stream (the test suite) has no reconfigure; it needs no fixing.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(ValueError):  # stream already detached
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def _period_bits(payload: Payload) -> str:
     rows = _rows(payload.get("periods"))
     return _join(*(f"{row.get('label', '')}={row.get('util')}%" for row in rows))
@@ -78,6 +94,7 @@ def _load(path: Path) -> Payload:
 
 
 def main(argv: list[str] | None = None) -> None:
+    _use_utf8_streams()
     args = sys.argv[1:] if argv is None else argv
     if args in (["-h"], ["--help"]):
         print(HELP, end="")

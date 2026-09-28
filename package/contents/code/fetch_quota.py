@@ -38,6 +38,7 @@ import sys
 import tempfile
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -47,7 +48,7 @@ from dataclasses import dataclass
 from email.message import Message
 from pathlib import Path
 from types import ModuleType
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
 from urllib.request import pathname2url
 
 # flock is POSIX-only; on Windows the refresh lock degrades to no lock, which
@@ -115,6 +116,12 @@ def _unknown_env(env: Mapping[str, str]) -> str | None:
 # under a C locale (a plasmashell started without LANG) and would decode a
 # store holding a non-ASCII account name into a read error.
 JSON_ENCODING = "utf-8"
+
+# One form for every text that is compared or keyed: NFC, the form a provider's
+# own UI and a desktop file manager both store. An id spelled NFD (a macOS or
+# decomposed vendor string) and the same id spelled NFC are equal strings after
+# this and hash to the same account scope; left raw they are two accounts.
+NORMALIZATION_FORM: Literal["NFC"] = "NFC"
 
 # update(obj) mutates obj and returns the (key, value) pair that must survive.
 MergeUpdate: TypeAlias = Callable[[JsonDict], "tuple[str, Any]"]
@@ -651,9 +658,22 @@ def _merge_write_json(
 
 
 def _digest(value: str | None) -> str | None:
+    """Stable 16-hex id for one account, or None if the value names no account.
+
+    The value is a `sub` claim or a vendor account id, so it is text off the
+    wire: it is normalized (an NFD spelling must key the same cache scope as
+    its NFC twin), encoded by name, and a value that cannot be encoded at all
+    (a JSON "\\ud800" escape decodes to a lone surrogate) reads as no id. A
+    crash here would be caught as a provider failure and reported to the panel
+    as a network error, costing the user the whole card over a digest.
+    """
     if not isinstance(value, str) or not value:
         return None
-    return hashlib.sha256(value.encode()).hexdigest()[:16]
+    try:
+        normalized = unicodedata.normalize(NORMALIZATION_FORM, value)
+        return hashlib.sha256(normalized.encode(JSON_ENCODING)).hexdigest()[:16]
+    except UnicodeEncodeError:
+        return None
 
 
 def _account_id(access_token: str | None, fallback: str | None = None) -> str | None:
@@ -892,7 +912,7 @@ def _refresh_claude(cred: JsonDict) -> JsonDict | None:
                 "refresh_token": refresh,
                 "client_id": CLAUDE_CLIENT_ID,
             }
-        ).encode()
+        ).encode(JSON_ENCODING)
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -1739,6 +1759,19 @@ def _sqlite_is_routine(exc: sqlite3.Error) -> bool:
     return "locked" in text or "no such table" in text
 
 
+def _vscdb_text(raw: bytes) -> str:
+    """sqlite text_factory: decode a TEXT cell without losing the query.
+
+    sqlite's default text_factory raises on a cell that is not valid UTF-8,
+    and it raises while the result set is being built, so one undecodable
+    membership cell discards a perfectly good accessToken in the same row set
+    and the user loses the provider. surrogateescape keeps valid text exact
+    and hands the undecodable cell on as lone surrogates, which _vscdb_str
+    drops like any other cell it cannot re-encode.
+    """
+    return raw.decode(JSON_ENCODING, "surrogateescape")
+
+
 def _read_cursor_state_db(path: Path) -> tuple[str, str] | None:
     if not path.is_file():
         return None
@@ -1749,6 +1782,7 @@ def _read_cursor_state_db(path: Path) -> tuple[str, str] | None:
             con = sqlite3.connect(uri, uri=True, timeout=1.0)
         except sqlite3.OperationalError:
             con = sqlite3.connect(uri + "&immutable=1", uri=True, timeout=1.0)
+        con.text_factory = _vscdb_text
         rows = con.execute(
             "SELECT key, value FROM ItemTable WHERE key IN (?, ?)",
             ("cursorAuth/accessToken", "cursorAuth/stripeMembershipType"),

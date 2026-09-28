@@ -263,6 +263,16 @@ class TokenAndCellFuzz(unittest.TestCase):
                 # A token that claims an expiry must produce a usable instant.
                 exp = fetch_quota._jwt_exp_ms(token)
                 self.assertTrue(exp is None or isinstance(exp, int))
+                # The account id digests the sub claim, which a "\ud800"
+                # escape spells as a lone surrogate: no id, never a raise.
+                account = fetch_quota._account_id(token)
+                self.assertTrue(
+                    account is None
+                    or (
+                        len(account) == 16
+                        and all(c in "0123456789abcdef" for c in account)
+                    )
+                )
 
     def test_known_token_shapes(self) -> None:
         header = fetch_quota._jwt_payload("h." + "aGVsbG8" + ".s")
