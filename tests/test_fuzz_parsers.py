@@ -1033,7 +1033,8 @@ class ProviderCacheRoundTripFuzz(unittest.TestCase):
                 }
             )
             with self.subTest(iteration=iteration, seed=BASE_SEED + 90_000 + iteration):
-                self._check(payload)
+                with _cache_dir(Path(self.tmp.name) / f"case{iteration}"):
+                    self._check(payload)
 
     def test_fuzz_unserializable_readings_leave_no_entry(self) -> None:
         for iteration in range(CACHE_ITERATIONS):
