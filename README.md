@@ -14,6 +14,8 @@ Four vendor dashboards. Numbers match the same endpoints the CLIs and websites a
 
 **Grok**: weekly % (the CLI "Weekly limit left" line), monthly $ used / remaining, reset time. One bar when the API returns one period.
 
+The fetcher also supplies **OpenCode Go** session, weekly and monthly percentages and reset times to the Quickshell widget in `../dotfiles/quickshell/Quota.qml`. Connect Go with OpenCode's `/connect` command; the fetcher reads the saved `opencode-go` API key. The Plasma UI still displays the four providers above.
+
 ## Requirements
 
 - KDE Plasma 6
@@ -160,13 +162,14 @@ reason on stderr; no provider runs with a half-applied config.
 | `QUOTA_WIDGET_CURSOR_STATE_DB` | `$XDG_CONFIG_HOME/Cursor/User/globalStorage/state.vscdb` |
 | `QUOTA_WIDGET_CODEX_AUTH` | `$HOME/.codex/auth.json` |
 | `QUOTA_WIDGET_GROK_AUTH` | `$HOME/.grok/auth.json` |
+| `QUOTA_WIDGET_OPENCODE_AUTH` | `$XDG_DATA_HOME/opencode/auth.json` (`$HOME/.local/share` by default) |
 | `QUOTA_WIDGET_CACHE` | `$XDG_CACHE_HOME/quota-widget` |
 | `QUOTA_WIDGET_CACHE_MAX_AGE_S` | `86400` (0 < value <= 86400, whole seconds) |
 | `QUOTA_WIDGET_ACCOUNT_SALT` | unset (64 hex characters; tests and smoke runs only) |
 | `QUOTA_WIDGET_HTTP_TIMEOUT` | `12.0` (0 < value <= 300, seconds) |
 | `QUOTA_WIDGET_NOW_MS` | unset (integer epoch milliseconds, from 0 to `253402300799999`; tests and smoke runs only) |
 
-`XDG_CONFIG_HOME` and `XDG_CACHE_HOME` set to a relative path are ignored, per
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME` set to a relative path are ignored, per
 the [base directory spec](https://specifications.freedesktop.org/basedir-spec/latest/).
 
 A `QUOTA_WIDGET_*` name the fetcher does not read is a configuration error, not
@@ -234,7 +237,9 @@ The widget backs nothing up itself, and there is no restore procedure to run: no
 
 ## Data and privacy
 
-The widget is local-only. It has no telemetry, no analytics, no crash reporting, and no network calls other than the four usage endpoints, the OAuth token refreshes, and Grok's OIDC discovery document, all named in the fetching section above. It never sends a request to a server it does not already name there.
+The widget is local-only. It has no telemetry, no analytics, no crash reporting, and no network calls other than the usage endpoints, the OAuth token refreshes, and Grok's OIDC discovery document, all named in the fetching section above. It never sends a request to a server it does not already name there.
+
+Go usage comes from `GET https://opencode.ai/zen/go/v1/usage` with the saved API key as a Bearer token. The auth file is read only. Its cache is scoped to a keyed digest of that key because the endpoint returns no account identifier; rotating the key invalidates the cached reading. The key itself is never included in the payload or cache. See the [endpoint source](https://github.com/anomalyco/opencode/blob/dev/packages/console/app/src/routes/zen/go/v1/usage.ts).
 
 What the fetcher reads from your account is what a usage bar needs: plan name, period percentages, reset times, and credit balances. Account identifiers (the WorkOS user id in the Cursor session, the ChatGPT account id header) are used to authorize a request. The raw value is never written to the cache, the emitted JSON, or any log; the cache stores a 16-character digest of it taken under a per-installation key kept beside the cache entries, which is what scopes an entry to one account, and that digest (never the value) travels in each provider payload as `account` so the panel scopes the reading it keeps through a failed poll the same way. A poll whose account digest differs from the one a card is holding drops it instead of showing another account's numbers. The card shows a status such as `http-429` and nothing more. Two codes are the fetcher's own rather than a vendor's answer, and are named so the panel does not read them as a verdict about your account: `net` is a request that never got a response, and `refused` is a request the fetcher declined to send, because a redirect would have carried your credential to another host. Both hold the card you have, since nothing about the account or the vendor changed; a newer widget is what clears a `refused`, because the refusal is the fetcher's own and repeats. A third, `bad-body`, is a provider that answered with a body the fetcher could not read (over the 4 MiB cap, empty, or not JSON): the vendor did answer, so passing its own `200` on would report a reading that was never measured, and it carries `transient` like a `5xx` or a dropped connection, which the next poll usually clears. Every `http-<code>` is a status the vendor returned. Every failed provider also carries `transient`, the fetcher's own classification of whether a cached reading beats reporting the failure, which is what the panel acts on when it decides to hold a card; the cause behind a failed call goes to stderr, which is the journal under Plasma, and that line carries the URL and the error, never a response body: the body of a failed HTTP response is drained and discarded rather than captured. A token refresh that fails is named there too, since the card shows the same "no token" for a throttled exchange and for a revoked one. Every warning the fetcher prints spells a path under your home directory as `~`, so the account name in it does not outlive the poll in the journal or on the card. A provider that crashes instead of returning writes its exception text and a traceback to the same stream, the traceback through the same redaction: every frame of it names a file under the checkout, which sits under your home directory. That text is built from whatever the vendor sent, so the journal is still not a place to paste a value you care about. `QUOTA_WIDGET_NOW_MS` pins the fetcher's clock, and is for tests and one-off runs only; leave it unset in a normal session. `install.sh` writes one run's output to `.scratch/smoke.json` and the failure detail to `.scratch/smoke.err` in the checkout, both gitignored.
 

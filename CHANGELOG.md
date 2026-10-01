@@ -16,6 +16,18 @@ reconstruction of the release history, not a record written at the time.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-01
+
+### Added
+
+- The fetcher supplies OpenCode Go session, weekly, and monthly usage to the
+  Quickshell frontend. It reads the saved `opencode-go` API key from the
+  XDG data directory, or `QUOTA_WIDGET_OPENCODE_AUTH`, without writing that
+  file. The Plasma provider roster stays the same.
+- Go readings carry a keyed account digest and follow the existing cache
+  retention and failure rules. Changing the API key invalidates the cached
+  reading; the key is never included in the output or cache.
+
 ## [1.2.0] - 2026-09-28
 
 ### Breaking

@@ -26,7 +26,7 @@ The QML owns the fetcher process. One run at a time: `exec.poll()` returns early
 
 ## Threads
 
-The four providers run in one `ThreadPoolExecutor`, so every provider is a
+The providers run in one `ThreadPoolExecutor`, so every provider is a
 shared-state site. `config()` publishes `_CONFIG` behind `_CONFIG_LOCK`, so a
 caller that reaches a provider without `main()`'s preload still loads it once.
 `_refresh_lock()` waits only on `LOCK_BUSY_ERRNOS`: a filesystem that cannot
@@ -58,7 +58,7 @@ through `flock`, `_atomic_write_json`, and the re-read in `_merge_write_json`.
 - `tests/test_install_script.py`: runs `install.sh` against a checkout copied
   into a temp dir, over the paths that decide a directory's fate, and through
   symlinks that name it from outside the checkout. It never runs the install
-  itself, which polls four providers.
+  itself, which polls the providers.
 - `tests/test_fuzz_parsers.py`: seeded randomized fuzzing of the parsers fed
   untrusted input (the Cursor and Grok bodies, the Claude usage body and its
   `limits` array, the Codex rate-limit windows and reset credits, `Retry-After`,
@@ -150,6 +150,8 @@ The applet icon is `package/contents/icons/com.maci.quota-widget.svg`, a 270 deg
 
 Fetcher talks to each vendor's own usage endpoint with credentials already on disk (Claude Code, Cursor IDE / cursor-agent, Codex CLI, Grok CLI). Tokens stay on the machine except those HTTPS calls.
 
+OpenCode Go is also emitted as `opencode_go` for the Quickshell frontend in `../dotfiles`. `Config.opencode_auth` reads `$XDG_DATA_HOME/opencode/auth.json` (default `~/.local/share`), overridable through `QUOTA_WIDGET_OPENCODE_AUTH`. Only the `opencode-go` API key is read, and the auth file is never written. The usage endpoint returns no account id, so its cache uses a keyed digest of the API key; changing the key discards the previous reading. Its `windows` carry session, weekly and monthly percentages and reset timestamps. The Plasma roster remains in `providerNames`.
+
 ## Caches
 
 Two layers hold a last good reading: the fetcher writes `~/.cache/quota-widget/<provider>.json` and reads it back only through `_read_provider_cache`, and the plasmoid keeps its own copy in `mergeProv` for the same window.
@@ -233,4 +235,3 @@ else. The gate runs the whole block on a Python matrix, the `requires-python`
 floor and the `.python-version` default, because plasmashell runs the fetcher
 with whatever `python3` the user's distro ships and the floor is the
 interpreter most likely to break. A new floor means a new matrix entry.
-

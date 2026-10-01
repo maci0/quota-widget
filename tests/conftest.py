@@ -24,11 +24,14 @@ from typing import TYPE_CHECKING
 import pytest
 
 import fetch_quota
+from project_paths import project_root
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-SANDBOX = tempfile.TemporaryDirectory()
+SCRATCH = project_root() / ".scratch"
+SCRATCH.mkdir(exist_ok=True)
+SANDBOX = tempfile.TemporaryDirectory(dir=SCRATCH)
 SANDBOX_HOME = SANDBOX.name
 SANDBOX_CACHE = str(Path(SANDBOX.name) / "cache")
 SANDBOX_ENV = {

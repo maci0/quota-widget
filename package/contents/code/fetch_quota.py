@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch Claude + Cursor + Grok + Codex usage quotas for the Plasma widget.
+"""Fetch usage quotas for the Plasma and Quickshell widgets.
 
 Claude: GET https://api.anthropic.com/api/oauth/usage
   (same numbers as claude.ai Settings → Usage / Claude Code /usage)
@@ -17,6 +17,9 @@ Codex:  GET https://chatgpt.com/backend-api/wham/usage
   (same numbers as chatgpt.com/codex/settings/usage and Codex /status)
   Auth: ~/.codex/auth.json ChatGPT OAuth tokens (auto-refreshed)
 
+OpenCode Go: GET https://opencode.ai/zen/go/v1/usage
+  Auth: $XDG_DATA_HOME/opencode/auth.json → opencode-go.key
+
 Configuration is read once at startup from QUOTA_WIDGET_* environment
 variables and validated before any request; run with --print-config to see the
 active values. See README "Configuration".
@@ -24,7 +27,7 @@ active values. See README "Configuration".
 One module, in this order: environment names and their validation, the clock,
 Config and load_config, the emit/warn/redact output pair, JSON and filesystem
 helpers, the account digest and the two cache layers, HTTP, then one section
-per provider (Claude, Grok, Codex, Cursor) and main() at the foot. A provider
+per provider (Claude, Grok, Codex, Cursor, Go) and main() at the foot. A provider
 section owns its credential lookup, its refresh, and its parser, and reaches
 for everything else through the helpers above it.
 """
@@ -91,6 +94,7 @@ ENV_CODEX_AUTH = "QUOTA_WIDGET_CODEX_AUTH"
 ENV_GROK_AUTH = "QUOTA_WIDGET_GROK_AUTH"
 ENV_CURSOR_AUTH = "QUOTA_WIDGET_CURSOR_AUTH"
 ENV_CURSOR_STATE_DB = "QUOTA_WIDGET_CURSOR_STATE_DB"
+ENV_OPENCODE_AUTH = "QUOTA_WIDGET_OPENCODE_AUTH"
 
 # Prefix a knob must carry, so a variable the widget does not own is never
 # mistaken for a typo of one that it does.
@@ -109,6 +113,7 @@ ENV_DOCS: tuple[tuple[str, str], ...] = (
     (ENV_GROK_AUTH, "Grok auth file"),
     (ENV_CURSOR_AUTH, "Cursor auth file"),
     (ENV_CURSOR_STATE_DB, "Cursor state db"),
+    (ENV_OPENCODE_AUTH, "OpenCode auth file"),
 )
 KNOWN_ENV = frozenset(name for name, _ in ENV_DOCS)
 
@@ -473,6 +478,7 @@ USER_AGENT = f"quota-widget/{_package_version()}"
 CLAUDE_USER_AGENT = "claude-code/2.1.251"
 
 CURSOR_SUMMARY_URL = "https://cursor.com/api/usage-summary"
+OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 
 REFRESH_LOCK_NAME = "refresh.lock"
 # The key every account digest is taken under, kept beside the entries it
@@ -612,6 +618,7 @@ class Config:
     grok_auth: Path
     cursor_auth: Path
     cursor_state_db: Path
+    opencode_auth: Path
     cache_dir: Path
     http_timeout_s: float
     cache_max_age_s: int
@@ -641,6 +648,7 @@ class Config:
             "grok_auth": str(self.grok_auth),
             "cursor_auth": str(self.cursor_auth),
             "cursor_state_db": str(self.cursor_state_db),
+            "opencode_auth": str(self.opencode_auth),
             "cache_dir": str(self.cache_dir),
             "http_timeout_s": self.http_timeout_s,
             "poll_timeout_s": self.poll_timeout_s,
@@ -771,7 +779,7 @@ _CONFIG: Config | None = None
 # reaches a provider without that would otherwise have every provider thread
 # build and publish the module global at the same time.
 _CONFIG_LOCK = threading.Lock()
-# Same shape for the account-salt key: the four provider threads each digest
+# Same shape for the account-salt key: the provider threads each digest
 # an account, and only one of them may create the key.
 _ACCOUNT_SALT: bytes | None = None
 _SALT_LOCK = threading.Lock()
@@ -828,6 +836,13 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         ),
         cursor_state_db=_env_path(
             values, ENV_CURSOR_STATE_DB, _cursor_state_db(values, home)
+        ),
+        opencode_auth=_env_path(
+            values,
+            ENV_OPENCODE_AUTH,
+            _xdg_dir(values, "XDG_DATA_HOME", home / ".local" / "share")
+            / "opencode"
+            / "auth.json",
         ),
         cache_dir=_env_path(values, ENV_CACHE, cache_base / "quota-widget"),
         http_timeout_s=timeout,
@@ -2916,6 +2931,62 @@ def fetch_cursor() -> JsonDict:
     return result
 
 
+# ── Go ──────────────────────────────────────────────────────────────────────
+
+
+def fetch_opencode_go() -> JsonDict:
+    auth = _read_json_dict(config().opencode_auth) or {}
+    entry = _as_dict(auth.get("opencode-go"))
+    key = entry.get("key")
+    if (
+        entry.get("type") != "api"
+        or not isinstance(key, str)
+        or not key
+        or not key.isascii()
+        or not key.isprintable()
+        or any(c.isspace() for c in key)
+    ):
+        return _failure("no-token")
+
+    # The API returns no account id; rotating the key invalidates its cache.
+    account = _digest(key)
+    status, data = fetch_json(
+        OPENCODE_GO_USAGE_URL,
+        {
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    if status != 200:
+        return _fail_or_cached("opencode_go", account, status)
+
+    usage = _as_dict(_as_dict(data).get("usage"))
+    windows = []
+    for name, label in (
+        ("rolling", "Session"),
+        ("weekly", "Weekly"),
+        ("monthly", "Monthly"),
+    ):
+        block = _as_dict(usage.get(name))
+        util = _finite_number(block.get("percent"))
+        if util is not None:
+            windows.append(
+                {
+                    "label": label,
+                    "util": min(100.0, max(0.0, util)),
+                    "resets_ms": iso_to_ms(block.get("resetsAt")),
+                }
+            )
+    if not windows:
+        return _fail_or_cached("opencode_go", account, UNREADABLE_BODY_STATUS)
+    result = _reading(
+        {"ok": True, "account": account, "plan": "Go", "windows": windows}
+    )
+    _write_provider_cache("opencode_go", result, account)
+    return result
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 USAGE_LINE = "usage: fetch_quota.py [--print-config | --clear-cache] [--help]"
@@ -3061,6 +3132,7 @@ def main(argv: list[str] | None = None) -> None:
                 "cursor": _failure("config"),
                 "grok": _failure("config"),
                 "codex": _failure("config"),
+                "opencode_go": _failure("config"),
                 "fetched_ms": _poll_stamp(),
             }
         )
@@ -3083,6 +3155,7 @@ def main(argv: list[str] | None = None) -> None:
         "cursor": fetch_cursor,
         "grok": fetch_grok,
         "codex": fetch_codex,
+        "opencode_go": fetch_opencode_go,
     }
     with ThreadPoolExecutor(max_workers=len(providers)) as pool:
         futures = {

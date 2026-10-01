@@ -96,6 +96,7 @@ CREDENTIAL_ENV = {
     "CODEX_AUTH": "QUOTA_WIDGET_CODEX_AUTH",
     "GROK_AUTH": "QUOTA_WIDGET_GROK_AUTH",
     "CURSOR_AUTH_JSON": "QUOTA_WIDGET_CURSOR_AUTH",
+    "OPENCODE_AUTH": "QUOTA_WIDGET_OPENCODE_AUTH",
     "CURSOR_STATE_DB": "QUOTA_WIDGET_CURSOR_STATE_DB",
 }
 
@@ -2641,6 +2642,133 @@ class SaltInstallFailureTest(unittest.TestCase):
         self.assertIn("could not write the account key", journal.getvalue())
 
 
+class OpenCodeGoTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = self.enterContext(
+            tempfile.TemporaryDirectory(dir=project_root() / ".scratch")
+        )
+        self.auth = Path(tmp) / "auth.json"
+        self.enterContext(
+            config_env(
+                QUOTA_WIDGET_OPENCODE_AUTH=str(self.auth),
+                QUOTA_WIDGET_CACHE=str(Path(tmp) / "cache"),
+                QUOTA_WIDGET_NOW_MS=str(PINNED_NOW_MS),
+            )
+        )
+        self.auth.write_text(
+            json.dumps({"opencode-go": {"type": "api", "key": "go-test-key"}}),
+            encoding="utf-8",
+        )
+        self.body = {
+            "usage": {
+                "rolling": {
+                    "status": "ok",
+                    "percent": 0,
+                    "resetsAt": "2026-10-01T12:00:00Z",
+                },
+                "weekly": {
+                    "status": "ok",
+                    "percent": 35,
+                    "resetsAt": "2026-10-05T12:00:00Z",
+                },
+                "monthly": {
+                    "status": "rate-limited",
+                    "percent": 101,
+                    "resetsAt": "2026-11-01T12:00:00Z",
+                },
+            }
+        }
+
+    def test_usage_becomes_three_windows_with_reset_times(self) -> None:
+        with patch.object(
+            fetch_quota, "fetch_json", return_value=(200, self.body)
+        ) as request:
+            out = fetch_quota.fetch_opencode_go()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["plan"], "Go")
+        self.assertEqual(out["fetched_ms"], PINNED_NOW_MS)
+        self.assertEqual(
+            [(w["label"], w["util"]) for w in out["windows"]],
+            [("Session", 0), ("Weekly", 35), ("Monthly", 100)],
+        )
+        self.assertEqual(out["windows"][0]["resets_ms"], 1790856000000)
+        self.assertEqual(request.call_args.args[0], fetch_quota.OPENCODE_GO_USAGE_URL)
+        self.assertEqual(
+            request.call_args.args[1]["Authorization"], "Bearer go-test-key"
+        )
+        cached = fetch_quota._read_provider_cache("opencode_go", out["account"])
+        self.assertEqual(cached, out)
+
+    def test_missing_and_invalid_credentials_never_make_a_request(self) -> None:
+        self.auth.unlink()
+        with patch.object(fetch_quota, "fetch_json") as request:
+            self.assertEqual(fetch_quota.fetch_opencode_go()["error"], "no-token")
+            entry: object
+            for entry in (
+                None,
+                [],
+                {},
+                {"type": "oauth", "key": "x"},
+                {"type": "api", "key": ""},
+                {"type": "api", "key": "x\r\ny"},
+                {"type": "api", "key": "é"},
+            ):
+                self.auth.write_text(
+                    json.dumps({"opencode-go": entry}), encoding="utf-8"
+                )
+                self.assertEqual(fetch_quota.fetch_opencode_go()["error"], "no-token")
+            request.assert_not_called()
+
+    def test_invalid_usage_is_unavailable_and_invalid_resets_are_absent(self) -> None:
+        body: object
+        for body in (
+            None,
+            [],
+            {},
+            {"usage": []},
+            {"usage": {"rolling": {"percent": True}}},
+            {"usage": {"weekly": {"percent": float("nan")}}},
+            {"usage": {"monthly": {"percent": "35"}}},
+        ):
+            with patch.object(fetch_quota, "fetch_json", return_value=(200, body)):
+                out = fetch_quota.fetch_opencode_go()
+            self.assertFalse(out["ok"])
+            self.assertEqual(out["error"], "bad-body")
+        with patch.object(
+            fetch_quota,
+            "fetch_json",
+            return_value=(200, {"usage": {"rolling": {"percent": 12, "resetsAt": []}}}),
+        ):
+            out = fetch_quota.fetch_opencode_go()
+        self.assertEqual(
+            out["windows"], [{"label": "Session", "util": 12, "resets_ms": None}]
+        )
+
+    def test_transient_failure_keeps_cache_and_auth_failure_or_changed_key_does_not(
+        self,
+    ) -> None:
+        with patch.object(fetch_quota, "fetch_json", return_value=(200, self.body)):
+            good = fetch_quota.fetch_opencode_go()
+        for status in (0, 429, 503):
+            with patch.object(fetch_quota, "fetch_json", return_value=(status, None)):
+                self.assertEqual(
+                    fetch_quota.fetch_opencode_go(), {**good, "stale": True}
+                )
+        for status in (401, 403):
+            with patch.object(fetch_quota, "fetch_json", return_value=(status, None)):
+                self.assertEqual(
+                    fetch_quota.fetch_opencode_go()["error"], f"http-{status}"
+                )
+        self.auth.write_text(
+            json.dumps({"opencode-go": {"type": "api", "key": "another-key"}}),
+            encoding="utf-8",
+        )
+        with patch.object(fetch_quota, "fetch_json", return_value=(429, None)):
+            changed = fetch_quota.fetch_opencode_go()
+        self.assertFalse(changed["ok"])
+        self.assertNotEqual(changed["account"], good["account"])
+
+
 class ConfigTest(unittest.TestCase):
     """Configuration is read once, validated, and never silently repaired."""
 
@@ -2655,6 +2783,9 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertEqual(cfg.codex_auth, Path("/home/widget/.codex/auth.json"))
         self.assertEqual(cfg.grok_auth, Path("/home/widget/.grok/auth.json"))
+        self.assertEqual(
+            cfg.opencode_auth, Path("/home/widget/.local/share/opencode/auth.json")
+        )
         self.assertEqual(cfg.cache_dir, Path("/home/widget/.cache/quota-widget"))
         self.assertEqual(cfg.http_timeout_s, fetch_quota.DEFAULT_HTTP_TIMEOUT_S)
         self.assertEqual(cfg.cache_max_age_s, fetch_quota.DEFAULT_CACHE_MAX_AGE_S)
@@ -2667,6 +2798,22 @@ class ConfigTest(unittest.TestCase):
             }
         )
         self.assertEqual(cfg.cache_dir, Path("/xdg/cache/quota-widget"))
+
+    def test_opencode_auth_honors_xdg_data_and_path_override(self) -> None:
+        cfg = fetch_quota.load_config(
+            {"QUOTA_WIDGET_HOME": "/home/widget", "XDG_DATA_HOME": "/xdg/data"}
+        )
+        self.assertEqual(cfg.opencode_auth, Path("/xdg/data/opencode/auth.json"))
+        cfg = fetch_quota.load_config(
+            {"QUOTA_WIDGET_HOME": "/home/widget", "XDG_DATA_HOME": "relative/data"}
+        )
+        self.assertEqual(
+            cfg.opencode_auth, Path("/home/widget/.local/share/opencode/auth.json")
+        )
+        cfg = fetch_quota.load_config(
+            {"QUOTA_WIDGET_OPENCODE_AUTH": "/opt/opencode/auth.json"}
+        )
+        self.assertEqual(cfg.opencode_auth, Path("/opt/opencode/auth.json"))
 
     def test_relative_xdg_dirs_are_ignored(self) -> None:
         cfg = fetch_quota.load_config(
@@ -3106,8 +3253,8 @@ class ConfigTest(unittest.TestCase):
     def test_providers_are_polled_concurrently(self) -> None:
         # A poll waits on the network, so one provider's round trip must not
         # be spent before the next one starts. The barrier only clears once all
-        # four are inside their fetch, which a sequential main() never reaches.
-        names = ("claude", "cursor", "grok", "codex")
+        # all are inside their fetch, which a sequential main() never reaches.
+        names = ("claude", "cursor", "grok", "codex", "opencode_go")
         started = threading.Barrier(len(names), timeout=10)
         patches = [
             patch.object(
@@ -3506,6 +3653,10 @@ _REPLAY_CREDENTIALS = {
         {"x": {"key": "tok", "oidc_client_id": "c", "refresh_token": "r"}},
     ),
     "CURSOR_AUTH_JSON": ("cursor.json", {"accessToken": _fake_jwt("user_01TEST")}),
+    "OPENCODE_AUTH": (
+        "opencode.json",
+        {"opencode-go": {"type": "api", "key": "go-replay-key"}},
+    ),
 }
 
 
@@ -3544,7 +3695,7 @@ class ReplayTest(unittest.TestCase):
         data: bytes | None = None,
         method: str | None = None,
     ) -> tuple[int, object, object]:
-        # Only Claude reads its answer through fetch_http; the other three
+        # Only Claude reads its answer through fetch_http; the other
         # providers go through fetch_json, so a body returned here would never
         # reach them.
         return 200, {"limits": [{"kind": "weekly_all", "percent": 12}]}, None
@@ -3558,6 +3709,12 @@ class ReplayTest(unittest.TestCase):
         data: bytes | None = None,
         method: str | None = None,
     ) -> tuple[int, object]:
+        if url == fetch_quota.OPENCODE_GO_USAGE_URL:
+            return 200, {
+                "usage": {
+                    "rolling": {"percent": 12, "resetsAt": "2026-10-01T12:00:00Z"}
+                }
+            }
         if "cursor.com" in url:
             return 200, {
                 "membershipType": "pro",
@@ -3599,14 +3756,16 @@ class ReplayTest(unittest.TestCase):
         # A poll that answered nothing is byte-identical to itself, so the
         # replay above only means something once each provider has run.
         payload = json.loads(self._poll())
-        for provider in ("claude", "cursor", "grok", "codex"):
+        for provider in ("claude", "cursor", "grok", "codex", "opencode_go"):
             with self.subTest(provider=provider):
                 self.assertTrue(payload[provider]["ok"], payload[provider])
 
     def test_replay_does_not_depend_on_a_running_cache(self) -> None:
         first = self._poll()
         for cached in self.root.glob("*.json"):
-            if cached.name.startswith(("claude", "cursor", "grok", "codex")):
+            if cached.name.startswith(
+                ("claude", "cursor", "grok", "codex", "opencode_go")
+            ):
                 cached.unlink()
         self.assertEqual(self._poll(), first)
 
@@ -3645,7 +3804,7 @@ class ReplayTest(unittest.TestCase):
         # fields a replay cannot reproduce.
         first = json.loads(self._poll_on_a_fresh_install())
         second = json.loads(self._poll_on_a_fresh_install())
-        for provider in ("claude", "cursor", "grok", "codex"):
+        for provider in ("claude", "cursor", "grok", "codex", "opencode_go"):
             with self.subTest(provider=provider):
                 self.assertNotEqual(
                     first[provider]["account"], second[provider]["account"]

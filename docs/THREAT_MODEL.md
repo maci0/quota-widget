@@ -4,7 +4,7 @@ Last reviewed: 2026-09-28, against `package/contents/code/fetch_quota.py` at
 `package/metadata.json` version 1.2.0.
 
 Scope: the plasmoid as installed on a single user session. It runs as that
-user, holds that user's vendor credentials, and talks to four vendor APIs.
+user, holds that user's vendor credentials, and talks to five vendor APIs.
 It listens on nothing and serves nothing, so there is no remote attacker with
 a socket; every hostile input in this model is either a local file on the same
 account, the environment the fetcher inherits, or a response from a vendor
@@ -44,7 +44,8 @@ no signing key, and can only read what its own user can already read.
 | Codex credentials | `fetch_codex`, `fetch_quota.py:2042` | `~/.codex/auth.json` |
 | Grok credentials | `_load_grok_auth`, `fetch_quota.py:1588` | `~/.grok/auth.json` |
 | Cursor credentials | `_load_cursor_auth`, `fetch_quota.py:2312` | `~/.config/cursor/auth.json`, or a SQLite database at `~/.config/Cursor/User/globalStorage/state.vscdb` opened read-only (`_read_cursor_state_db`, `fetch_quota.py:2278`) |
-| Vendor usage APIs | `fetch_http`, `fetch_quota.py:1252`; URLs at `fetch_quota.py:338,345,348,369` | JSON bodies and headers from four third parties |
+| Go credentials | `fetch_opencode_go`, path from `Config.opencode_auth` | `$XDG_DATA_HOME/opencode/auth.json` (`~/.local/share` by default), read only; only the `opencode-go` API entry is used |
+| Vendor usage APIs | `fetch_http`, fixed URL constants in `fetch_quota.py` | JSON bodies and headers from five third parties |
 | OAuth token endpoints | `fetch_quota.py:341,342` (two Claude hosts), `fetch_quota.py:349` (OpenAI), and the Grok endpoint read out of the discovery document at `fetch_quota.py:346` | JSON bodies, plus `Retry-After` headers parsed at `parse_retry_after`, `fetch_quota.py:789` |
 | Poll interval | `package/contents/ui/main.qml:35`, clamped to 30..3600 s | Widget setting |
 | Stale window in the UI | `package/contents/ui/main.qml:47` (`defaultStaleKeepMs`), overridden from the payload at `package/contents/ui/main.qml:145` | Fixed fallback; the effective value arrives in `cache_max_age_s` |
@@ -52,7 +53,7 @@ no signing key, and can only read what its own user can already read.
 
 ### Outbound requests
 
-Eight fixed hosts can receive a request, not four:
+Nine fixed hosts can receive a request:
 
 | Host | Request | Where |
 | --- | --- | --- |
@@ -64,10 +65,13 @@ Eight fixed hosts can receive a request, not four:
 | `auth.openai.com` | `POST /oauth/token` | `fetch_quota.py:349` |
 | `cli-chat-proxy.grok.com` | `GET /v1/billing` | `fetch_quota.py:345` |
 | `auth.x.ai` | `GET /.well-known/openid-configuration` | `fetch_quota.py:346` |
+| `opencode.ai` | `GET /zen/go/v1/usage`, Bearer API key | `OPENCODE_GO_USAGE_URL`, `fetch_opencode_go` |
 | the `token_endpoint` that document names | `POST` with the Grok refresh token, only when it is `https` on `auth.x.ai` | `fetch_quota.py:1690`, `fetch_quota.py:1653` |
 
 No other host is contacted. `api.openai.com` appears in a JWT claim path
 (`fetch_quota.py:2066`), not as a request target.
+
+Go usage returns no account id. Its cache is scoped to a keyed digest of the API key, so a key change invalidates that reading. The credential file is never written, and the key is sent only to the fixed HTTPS origin above. Invalid or absent percentages are omitted; a response with no usable windows is a transient `bad-body` failure.
 
 ### Outbound channels
 
