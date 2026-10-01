@@ -12,6 +12,7 @@ Every surface that carries bytes or JSON this process does not control:
 - ``_codex_window`` and ``_codex_reset_credits`` read the Codex usage body,
   where the window's numbers are rescaled into an instant before they reach
   the panel.
+- ``fetch_opencode_go`` reads the API key entry and the Go usage windows.
 - ``parse_retry_after`` reads the Retry-After header, which reaches sleep().
 - ``_vscdb_str`` and ``_jwt_payload`` read cells and tokens out of a Cursor
   SQLite state DB and a vendor credential file.
@@ -37,6 +38,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import fetch_quota
 
@@ -885,6 +887,44 @@ class CodexWindowFuzz(unittest.TestCase):
             self.assertTrue(label.encode("utf-8"))
 
 
+class OpenCodeGoFuzz(unittest.TestCase):
+    def test_random_credentials_and_usage_produce_serializable_readings(self) -> None:
+        auth = {"opencode-go": {"type": "api", "key": "go-fuzz-key"}}
+        with (
+            patch.object(
+                fetch_quota, "_read_json_dict", return_value=auth
+            ) as credentials,
+            patch.object(fetch_quota, "_digest", return_value="acct-fuzz"),
+            patch.object(fetch_quota, "_read_provider_cache", return_value=None),
+            patch.object(fetch_quota, "_write_provider_cache"),
+            patch.object(fetch_quota, "fetch_json") as request,
+        ):
+            for iteration in range(ITERATIONS):
+                rng = random.Random(BASE_SEED + 90_000 + iteration)
+                credentials.return_value = (
+                    auth if rng.random() < 0.5 else {"opencode-go": _rand_json(rng)}
+                )
+                body = {
+                    "usage": {
+                        name: {"percent": _rand_json(rng), "resetsAt": _rand_json(rng)}
+                        for name in ("rolling", "weekly", "monthly")
+                    }
+                }
+                request.return_value = (
+                    200,
+                    body if rng.random() < 0.8 else _rand_json(rng),
+                )
+                with self.subTest(seed=BASE_SEED + 90_000 + iteration):
+                    out = fetch_quota.fetch_opencode_go()
+                    json.dumps(out, allow_nan=False)
+                    for window in out.get("windows", []):
+                        self.assertTrue(0 <= window["util"] <= 100)
+                        self.assertTrue(
+                            window["resets_ms"] is None
+                            or isinstance(window["resets_ms"], int)
+                        )
+
+
 class TimestampFuzz(unittest.TestCase):
     """Invariants for the ISO-8601 reader every provider body feeds."""
 
@@ -993,7 +1033,8 @@ class ProviderCacheRoundTripFuzz(unittest.TestCase):
                 }
             )
             with self.subTest(iteration=iteration, seed=BASE_SEED + 90_000 + iteration):
-                self._check(payload)
+                with _cache_dir(Path(self.tmp.name) / f"case{iteration}"):
+                    self._check(payload)
 
     def test_fuzz_unserializable_readings_leave_no_entry(self) -> None:
         for iteration in range(CACHE_ITERATIONS):

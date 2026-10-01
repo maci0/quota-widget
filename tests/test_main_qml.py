@@ -343,9 +343,9 @@ class MainQmlProviderRosterTest(unittest.TestCase):
         for name in self.roster:
             self.assertNotIn(f"root.{name}", body)
 
-    def test_the_roster_is_the_one_main_runs(self) -> None:
-        # The payload keys come from the fetcher's providers dict, so a
-        # provider added there and not here is a card that never fills.
+    def test_roster_matches_fetcher_except_quickshell_only_go(self) -> None:
+        # Go is consumed by the Quickshell frontend; the Plasma roster must
+        # still account for every other provider the shared fetcher emits.
         tree = ast.parse(FETCHER_SOURCE)
         main = next(
             node
@@ -361,7 +361,7 @@ class MainQmlProviderRosterTest(unittest.TestCase):
         )
         assert isinstance(table, ast.Dict)
         emitted = [key.value for key in table.keys if isinstance(key, ast.Constant)]
-        self.assertEqual(sorted(emitted), sorted(self.roster))
+        self.assertEqual(sorted(emitted), sorted([*self.roster, "opencode_go"]))
 
 
 class MainQmlBlockScanTest(unittest.TestCase):
