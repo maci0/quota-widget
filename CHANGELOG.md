@@ -16,12 +16,16 @@ reconstruction of the release history, not a record written at the time.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-21
+
 ### Changed
 
 - Go usage reads a plain API key from `~/.secrets/opencode-go`, strips
   surrounding whitespace, and no longer requires a client login. The file
   remains read only. `QUOTA_WIDGET_OPENCODE_AUTH` now names a plain key file
   instead of the client's JSON store; update any existing override accordingly.
+- Development checks use Black 26.10.1, mypy 2.4.0, and Ruff 0.17.1. The CI
+  setup action is pinned to version 10.3.0's commit.
 
 ## [1.3.0] - 2026-10-01
 

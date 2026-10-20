@@ -17,3 +17,18 @@ the changelog and Git history.
 - Verification: `OpenCodeGoTest`, the credential-path config test, `ReplayTest`,
   and `OpenCodeGoFuzz` cover credentials, usage parsing, caching, and replay.
   The release gate is `./scripts/gate.sh`.
+
+## 2026-10-21: integrate maintenance branches and release 1.4.0
+
+- Request: merge all intended work, cut the next minor release, and publish
+  to the existing owned remote. Release `v1.3.0` was already published.
+- Change: merge the four pending dependency branches; raise the declared
+  minimums to the reviewed tool versions and synchronize release metadata.
+- Evidence: dependency commits `9be4096`, `8e6b918`, `798ef05`, and `b1b34eb`;
+  `pyproject.toml`, `uv.lock`, `.github/workflows/test.yml`,
+  `package/metadata.json`, `package/metainfo.xml`, and `CHANGELOG.md`.
+- Verification: the credential-change gate passed with 432 tests and two
+  skips. Run `./scripts/gate.sh` on Python 3.12.12 and with `UV_PYTHON=3.11`
+  against the release tree before publication. Version and metadata tests
+  compare all release values. The configured workflows contain no deployment
+  job or production environment.

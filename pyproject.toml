@@ -1,6 +1,6 @@
 [project]
 name = "quota-widget"
-version = "1.3.0"
+version = "1.4.0"
 description = "KDE Plasma 6 widget for Claude, Cursor, Codex, and Grok usage quotas"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,10 +14,10 @@ license = { text = "MIT" }
 # that fails or silently rewrites the gate.
 [project.optional-dependencies]
 dev = [
-    "black>=26.5,<27",
-    "mypy>=2.3,<3",
+    "black>=26.10,<27",
+    "mypy>=2.4,<3",
     "pytest>=9.1,<10",
-    "ruff>=0.16,<1",
+    "ruff>=0.17,<1",
 ]
 
 [tool.black]
@@ -104,8 +104,8 @@ files = ["package/contents/code/fetch_quota.py", "tests", "scripts"]
 testpaths = ["tests"]
 pythonpath = ["package/contents/code", "scripts", "tests"]
 
-# CI pins setup-uv to this release, and uv.lock is revision 3. An older uv
-# cannot read that revision, so the mismatch would otherwise surface as a lock
+# CI pins setup-uv to this release. An older uv may not read the lock
+# format, so the mismatch would otherwise surface as a lock
 # parse error or a silently different resolution. Failing on the first uv
 # command in a clean clone names the actual problem instead.
 [tool.uv]
