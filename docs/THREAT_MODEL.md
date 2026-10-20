@@ -44,7 +44,7 @@ no signing key, and can only read what its own user can already read.
 | Codex credentials | `fetch_codex`, `fetch_quota.py:2042` | `~/.codex/auth.json` |
 | Grok credentials | `_load_grok_auth`, `fetch_quota.py:1588` | `~/.grok/auth.json` |
 | Cursor credentials | `_load_cursor_auth`, `fetch_quota.py:2312` | `~/.config/cursor/auth.json`, or a SQLite database at `~/.config/Cursor/User/globalStorage/state.vscdb` opened read-only (`_read_cursor_state_db`, `fetch_quota.py:2278`) |
-| Go credentials | `fetch_opencode_go`, path from `Config.opencode_auth` | `$XDG_DATA_HOME/opencode/auth.json` (`~/.local/share` by default), read only; only the `opencode-go` API entry is used |
+| Go credentials | `fetch_opencode_go`, path from `Config.opencode_auth` | `~/.secrets/opencode-go`, read only; plain API key with surrounding whitespace removed |
 | Vendor usage APIs | `fetch_http`, fixed URL constants in `fetch_quota.py` | JSON bodies and headers from five third parties |
 | OAuth token endpoints | `fetch_quota.py:341,342` (two Claude hosts), `fetch_quota.py:349` (OpenAI), and the Grok endpoint read out of the discovery document at `fetch_quota.py:346` | JSON bodies, plus `Retry-After` headers parsed at `parse_retry_after`, `fetch_quota.py:789` |
 | Poll interval | `package/contents/ui/main.qml:35`, clamped to 30..3600 s | Widget setting |

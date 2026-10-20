@@ -18,7 +18,7 @@ Codex:  GET https://chatgpt.com/backend-api/wham/usage
   Auth: ~/.codex/auth.json ChatGPT OAuth tokens (auto-refreshed)
 
 OpenCode Go: GET https://opencode.ai/zen/go/v1/usage
-  Auth: $XDG_DATA_HOME/opencode/auth.json → opencode-go.key
+  Auth: ~/.secrets/opencode-go (plain API key)
 
 Configuration is read once at startup from QUOTA_WIDGET_* environment
 variables and validated before any request; run with --print-config to see the
@@ -113,7 +113,7 @@ ENV_DOCS: tuple[tuple[str, str], ...] = (
     (ENV_GROK_AUTH, "Grok auth file"),
     (ENV_CURSOR_AUTH, "Cursor auth file"),
     (ENV_CURSOR_STATE_DB, "Cursor state db"),
-    (ENV_OPENCODE_AUTH, "OpenCode auth file"),
+    (ENV_OPENCODE_AUTH, "OpenCode Go plain API key file"),
 )
 KNOWN_ENV = frozenset(name for name, _ in ENV_DOCS)
 
@@ -131,7 +131,7 @@ def _unknown_env(env: Mapping[str, str]) -> str | None:
     return None
 
 
-# Every credential, cache, and state file is UTF-8 JSON, including the ones the
+# Every credential, cache, and state file is UTF-8, including the ones the
 # vendor CLIs write. Naming it beats open()'s locale default, which is ASCII
 # under a C locale (a plasmashell started without LANG) and would decode a
 # store holding a non-ASCII account name into a read error.
@@ -169,7 +169,7 @@ def _as_text(value: object) -> str | None:
 
 
 def _read_text(path: Path) -> str:
-    """Read a JSON state file as UTF-8, whatever the process locale says."""
+    """Read a credential or state file as UTF-8, whatever the process locale says."""
     return path.read_text(encoding=JSON_ENCODING)
 
 
@@ -840,9 +840,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         opencode_auth=_env_path(
             values,
             ENV_OPENCODE_AUTH,
-            _xdg_dir(values, "XDG_DATA_HOME", home / ".local" / "share")
-            / "opencode"
-            / "auth.json",
+            home / ".secrets" / "opencode-go",
         ),
         cache_dir=_env_path(values, ENV_CACHE, cache_base / "quota-widget"),
         http_timeout_s=timeout,
@@ -2935,13 +2933,12 @@ def fetch_cursor() -> JsonDict:
 
 
 def fetch_opencode_go() -> JsonDict:
-    auth = _read_json_dict(config().opencode_auth) or {}
-    entry = _as_dict(auth.get("opencode-go"))
-    key = entry.get("key")
+    try:
+        key = _read_text(config().opencode_auth).strip()
+    except (OSError, UnicodeDecodeError):
+        return _failure("no-token")
     if (
-        entry.get("type") != "api"
-        or not isinstance(key, str)
-        or not key
+        not key
         or not key.isascii()
         or not key.isprintable()
         or any(c.isspace() for c in key)

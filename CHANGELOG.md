@@ -16,6 +16,13 @@ reconstruction of the release history, not a record written at the time.
 
 ## [Unreleased]
 
+### Changed
+
+- Go usage reads a plain API key from `~/.secrets/opencode-go`, strips
+  surrounding whitespace, and no longer requires a client login. The file
+  remains read only. `QUOTA_WIDGET_OPENCODE_AUTH` now names a plain key file
+  instead of the client's JSON store; update any existing override accordingly.
+
 ## [1.3.0] - 2026-10-01
 
 ### Added

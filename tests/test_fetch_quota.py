@@ -2647,7 +2647,7 @@ class OpenCodeGoTest(unittest.TestCase):
         tmp = self.enterContext(
             tempfile.TemporaryDirectory(dir=project_root() / ".scratch")
         )
-        self.auth = Path(tmp) / "auth.json"
+        self.auth = Path(tmp) / "opencode-go"
         self.enterContext(
             config_env(
                 QUOTA_WIDGET_OPENCODE_AUTH=str(self.auth),
@@ -2655,10 +2655,7 @@ class OpenCodeGoTest(unittest.TestCase):
                 QUOTA_WIDGET_NOW_MS=str(PINNED_NOW_MS),
             )
         )
-        self.auth.write_text(
-            json.dumps({"opencode-go": {"type": "api", "key": "go-test-key"}}),
-            encoding="utf-8",
-        )
+        self.auth.write_text("go-test-key\n", encoding="utf-8")
         self.body = {
             "usage": {
                 "rolling": {
@@ -2703,20 +2700,14 @@ class OpenCodeGoTest(unittest.TestCase):
         self.auth.unlink()
         with patch.object(fetch_quota, "fetch_json") as request:
             self.assertEqual(fetch_quota.fetch_opencode_go()["error"], "no-token")
-            entry: object
-            for entry in (
-                None,
-                [],
-                {},
-                {"type": "oauth", "key": "x"},
-                {"type": "api", "key": ""},
-                {"type": "api", "key": "x\r\ny"},
-                {"type": "api", "key": "é"},
-            ):
-                self.auth.write_text(
-                    json.dumps({"opencode-go": entry}), encoding="utf-8"
-                )
+            for key in ("", "  \n", "x\r\ny", "x y", "x\x00y", "é"):
+                self.auth.write_text(key, encoding="utf-8")
                 self.assertEqual(fetch_quota.fetch_opencode_go()["error"], "no-token")
+            self.auth.write_bytes(b"\xff")
+            self.assertEqual(fetch_quota.fetch_opencode_go()["error"], "no-token")
+            self.auth.unlink()
+            self.auth.mkdir()
+            self.assertEqual(fetch_quota.fetch_opencode_go()["error"], "no-token")
             request.assert_not_called()
 
     def test_invalid_usage_is_unavailable_and_invalid_resets_are_absent(self) -> None:
@@ -2759,10 +2750,7 @@ class OpenCodeGoTest(unittest.TestCase):
                 self.assertEqual(
                     fetch_quota.fetch_opencode_go()["error"], f"http-{status}"
                 )
-        self.auth.write_text(
-            json.dumps({"opencode-go": {"type": "api", "key": "another-key"}}),
-            encoding="utf-8",
-        )
+        self.auth.write_text("another-key\n", encoding="utf-8")
         with patch.object(fetch_quota, "fetch_json", return_value=(429, None)):
             changed = fetch_quota.fetch_opencode_go()
         self.assertFalse(changed["ok"])
@@ -2783,9 +2771,7 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertEqual(cfg.codex_auth, Path("/home/widget/.codex/auth.json"))
         self.assertEqual(cfg.grok_auth, Path("/home/widget/.grok/auth.json"))
-        self.assertEqual(
-            cfg.opencode_auth, Path("/home/widget/.local/share/opencode/auth.json")
-        )
+        self.assertEqual(cfg.opencode_auth, Path("/home/widget/.secrets/opencode-go"))
         self.assertEqual(cfg.cache_dir, Path("/home/widget/.cache/quota-widget"))
         self.assertEqual(cfg.http_timeout_s, fetch_quota.DEFAULT_HTTP_TIMEOUT_S)
         self.assertEqual(cfg.cache_max_age_s, fetch_quota.DEFAULT_CACHE_MAX_AGE_S)
@@ -2799,21 +2785,19 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertEqual(cfg.cache_dir, Path("/xdg/cache/quota-widget"))
 
-    def test_opencode_auth_honors_xdg_data_and_path_override(self) -> None:
+    def test_opencode_key_ignores_xdg_data_and_honors_path_override(self) -> None:
         cfg = fetch_quota.load_config(
             {"QUOTA_WIDGET_HOME": "/home/widget", "XDG_DATA_HOME": "/xdg/data"}
         )
-        self.assertEqual(cfg.opencode_auth, Path("/xdg/data/opencode/auth.json"))
+        self.assertEqual(cfg.opencode_auth, Path("/home/widget/.secrets/opencode-go"))
         cfg = fetch_quota.load_config(
             {"QUOTA_WIDGET_HOME": "/home/widget", "XDG_DATA_HOME": "relative/data"}
         )
-        self.assertEqual(
-            cfg.opencode_auth, Path("/home/widget/.local/share/opencode/auth.json")
-        )
+        self.assertEqual(cfg.opencode_auth, Path("/home/widget/.secrets/opencode-go"))
         cfg = fetch_quota.load_config(
-            {"QUOTA_WIDGET_OPENCODE_AUTH": "/opt/opencode/auth.json"}
+            {"QUOTA_WIDGET_OPENCODE_AUTH": "/opt/secrets/opencode-go"}
         )
-        self.assertEqual(cfg.opencode_auth, Path("/opt/opencode/auth.json"))
+        self.assertEqual(cfg.opencode_auth, Path("/opt/secrets/opencode-go"))
 
     def test_relative_xdg_dirs_are_ignored(self) -> None:
         cfg = fetch_quota.load_config(
@@ -3654,8 +3638,8 @@ _REPLAY_CREDENTIALS = {
     ),
     "CURSOR_AUTH_JSON": ("cursor.json", {"accessToken": _fake_jwt("user_01TEST")}),
     "OPENCODE_AUTH": (
-        "opencode.json",
-        {"opencode-go": {"type": "api", "key": "go-replay-key"}},
+        "opencode-go",
+        "go-replay-key\n",
     ),
 }
 
@@ -3683,7 +3667,9 @@ class ReplayTest(unittest.TestCase):
             self.addCleanup(os.environ.pop, CREDENTIAL_ENV[name], None)
 
     def _write(self, path: Path, obj: object) -> Path:
-        path.write_text(json.dumps(obj))
+        path.write_text(
+            obj if isinstance(obj, str) else json.dumps(obj), encoding="utf-8"
+        )
         return path
 
     def _fake_http(

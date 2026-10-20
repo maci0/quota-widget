@@ -14,7 +14,7 @@ Every wall-clock read goes through `now_ms()` / `now_utc()`; `QUOTA_WIDGET_NOW_M
 
 A provider timestamp without an offset is UTC. Parse it with `iso_to_utc()`, never `datetime.fromisoformat(...).timestamp()`: that resolves a naive value in plasmashell's host zone, so the same reading lands hours off outside UTC and shifts again at every DST transition.
 
-Every credential, cache, and state file is UTF-8 JSON, read through `fetch_quota._read_text()` and written by `_atomic_write_json()`. Never `Path.read_text()` bare: plasmashell can start under a C locale where `open()` defaults to ASCII, and the merge-write fallback would then rewrite a shared store without the fields it could not decode.
+Every credential, cache, and state file is UTF-8, read through `fetch_quota._read_text()`. JSON stores are written by `_atomic_write_json()`; the Go credential is a read-only plain API key. Never `Path.read_text()` bare: plasmashell can start under a C locale where `open()` defaults to ASCII, and the merge-write fallback would then rewrite a shared store without the fields it could not decode.
 
 Dev and CI use `uv`. The gate is at the end of this file; run it after any edit.
 
@@ -43,6 +43,7 @@ through `flock`, `_atomic_write_json`, and the re-read in `_merge_write_json`.
 
 - `package/`: plasmoid (`metadata.json` for Plasma, `metainfo.xml` for Discover and KNewStuff, QML, fetcher, `contents/config/main.xml` defaults, `contents/icons/com.maci.quota-widget.svg`)
 - `docs/THREAT_MODEL.md`: entry points, trust boundaries, assets, and the threats per boundary
+- `docs/PROVENANCE.md`: append-only change decisions, evidence, and verification
 - `tests/`: pytest. One file per module under test (`test_fetch_quota.py`,
   `test_main_qml.py`, `test_package_metadata.py`, `test_print_smoke.py`,
   `test_release.py`, `test_install_script.py`); `project_paths.py` is the only
@@ -150,7 +151,7 @@ The applet icon is `package/contents/icons/com.maci.quota-widget.svg`, a 270 deg
 
 Fetcher talks to each vendor's own usage endpoint with credentials already on disk (Claude Code, Cursor IDE / cursor-agent, Codex CLI, Grok CLI). Tokens stay on the machine except those HTTPS calls.
 
-OpenCode Go is also emitted as `opencode_go` for the Quickshell frontend in `../dotfiles`. `Config.opencode_auth` reads `$XDG_DATA_HOME/opencode/auth.json` (default `~/.local/share`), overridable through `QUOTA_WIDGET_OPENCODE_AUTH`. Only the `opencode-go` API key is read, and the auth file is never written. The usage endpoint returns no account id, so its cache uses a keyed digest of the API key; changing the key discards the previous reading. Its `windows` carry session, weekly and monthly percentages and reset timestamps. The Plasma roster remains in `providerNames`.
+OpenCode Go is also emitted as `opencode_go` for the Quickshell frontend in `../dotfiles`. `Config.opencode_auth` reads the plain API key from `~/.secrets/opencode-go`, overridable through `QUOTA_WIDGET_OPENCODE_AUTH`, and strips surrounding whitespace. The key file is never written. The client is not required. The usage endpoint returns no account id, so its cache uses a keyed digest of the API key; changing the key discards the previous reading. Its `windows` carry session, weekly and monthly percentages and reset timestamps. The Plasma roster remains in `providerNames`.
 
 ## Caches
 
