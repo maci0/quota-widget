@@ -32,3 +32,19 @@ the changelog and Git history.
   against the release tree before publication. Version and metadata tests
   compare all release values. The configured workflows contain no deployment
   job or production environment.
+
+## 2026-10-21: account-key publication race and release 1.4.1
+
+- Decision: finish the authorized release with the race exposed by the main
+  CI run corrected; retain the already pushed `v1.4.0` tag.
+- Evidence: [failed main run](https://github.com/maci0/quota-widget/actions/runs/39475690819)
+  returned two different keys in the concurrent-install test. The new
+  publication test failed on the old code because it observed an empty key
+  file during serialization.
+- Change: `_install_salt` uses the existing file-lock and atomic-JSON helpers,
+  re-reads the key while locked, and refuses an unguarded write. Document the
+  new `account-salt.lock` file and synchronize patch-release metadata.
+- Verification: `AccountKeyTest` covers complete publication, concurrent
+  installers, corrupt-file repair, private modes, and unavailable locks.
+  `StateInventoryTest` checks the documented lock path. Run the full release
+  gate on Python 3.11 and 3.12 before publishing the patch.

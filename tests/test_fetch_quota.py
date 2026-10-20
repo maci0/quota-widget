@@ -2241,6 +2241,25 @@ class AccountKeyTest(unittest.TestCase):
         self.assertEqual(keys[0], on_disk)
         self.assertEqual(keys[1], on_disk)
 
+    def test_key_is_not_visible_until_its_contents_are_complete(self) -> None:
+        cache = Path(self.tmp.name) / "cache"
+        key = cache / fetch_quota.ACCOUNT_SALT_NAME
+        exposed: list[bytes | None] = []
+        real_dump = json.dump
+
+        def write(obj: object, stream: Any, **kwargs: Any) -> None:
+            if key.exists():
+                exposed.append(fetch_quota._salt_on_disk(key))
+            real_dump(obj, stream, **kwargs)
+
+        with (
+            config_env(QUOTA_WIDGET_CACHE=str(cache)),
+            patch.object(json, "dump", write),
+        ):
+            installed = fetch_quota._load_or_create_salt()
+        self.assertEqual(fetch_quota._salt_on_disk(key), installed)
+        self.assertEqual(exposed, [])
+
     def test_a_key_left_empty_by_a_killed_run_is_replaced(self) -> None:
         cache = Path(self.tmp.name) / "cache"
         fetch_quota._private_dir(cache)
@@ -2249,6 +2268,18 @@ class AccountKeyTest(unittest.TestCase):
         with config_env(QUOTA_WIDGET_CACHE=str(cache)):
             installed = fetch_quota._load_or_create_salt()
         self.assertEqual(fetch_quota._salt_on_disk(key), installed)
+
+    def test_an_unavailable_lock_never_publishes_an_unguarded_key(self) -> None:
+        cache = Path(self.tmp.name) / "cache"
+        with (
+            config_env(QUOTA_WIDGET_CACHE=str(cache)),
+            patch.object(fetch_quota, "fcntl", None),
+            contextlib.redirect_stderr(io.StringIO()) as journal,
+        ):
+            chosen = fetch_quota._load_or_create_salt()
+        self.assertEqual(len(chosen), fetch_quota.ACCOUNT_SALT_BYTES)
+        self.assertFalse((cache / fetch_quota.ACCOUNT_SALT_NAME).exists())
+        self.assertIn("account key lock unavailable", journal.getvalue())
 
     def test_entries_without_their_key_are_reported(self) -> None:
         # A cache directory restored without the key it scoped them under
@@ -3128,8 +3159,10 @@ class ConfigTest(unittest.TestCase):
         # The advisory locks carry no reading and a poll may hold one, so they
         # are the only thing left in the directory, and they stay empty.
         left = sorted(p for p in cache_dir.iterdir())
-        self.assertEqual([p.name for p in left], ["grok.json.lock"])
-        self.assertEqual(left[0].stat().st_size, 0)
+        self.assertEqual(
+            [p.name for p in left], ["account-salt.lock", "grok.json.lock"]
+        )
+        self.assertEqual([p.stat().st_size for p in left], [0, 0])
 
     def test_clear_cache_on_an_empty_cache_dir_is_not_an_error(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -4831,6 +4864,7 @@ class StateInventoryTest(unittest.TestCase):
                 "~/" + config.grok_auth.relative_to(home).as_posix(),
                 "~/" + config.cursor_auth.relative_to(home).as_posix(),
                 f"{cache}/{fetch_quota.ACCOUNT_SALT_NAME}",
+                f"{cache}/{fetch_quota.ACCOUNT_SALT_NAME}{fetch_quota.ENTRY_LOCK_SUFFIX}",
                 f"{cache}/{fetch_quota.REFRESH_LOCK_NAME}",
             ]
         for path in paths:

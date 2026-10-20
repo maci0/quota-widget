@@ -227,9 +227,11 @@ Everything the widget writes to disk, and what it costs to lose each:
 | --- | --- | --- |
 | `~/.cache/quota-widget/*.json` | Last successful usage payload per provider, used when an API call 429s, 5xxs, or does not reach the vendor | Nothing. Refills on the next successful poll. |
 | `~/.cache/quota-widget/account-salt` | The per-installation key every entry's account digest is taken under | Nothing on its own. The next poll mints a new one, and every entry written under the old key stops matching, so the entries it scoped read as another account's and are ignored. |
-| `~/.cache/quota-widget/refresh.lock`, `~/.cache/quota-widget/*.json.lock` | Empty lock files, held open with `flock` while a poll is in its critical section | Nothing. Created again on the next poll. Never copy a lock: a copy of one is a file two polls can hold at once. |
+| `~/.cache/quota-widget/refresh.lock`, `~/.cache/quota-widget/*.json.lock`, `~/.cache/quota-widget/account-salt.lock` | Empty lock files, held open with `flock` while a poll is in its critical section | Nothing. Created again on the next poll. Never copy a lock: a copy of one is a file two polls can hold at once. |
 | `~/.config/plasmoids/org.kde.plasma.plasmoid/com.maci.quota-widget.json` | The widget settings above, written by plasmashell | Re-set them in Configure, or copy the file back. The widget cannot regenerate this one. |
 | `~/.claude/.credentials.json`, `~/.grok/auth.json`, `~/.codex/auth.json`, `~/.config/cursor/auth.json` | Rotated OAuth tokens, written by the fetcher during a refresh | Re-run that CLI's login. The widget never creates these, and it cannot restore them. |
+
+The account key is re-read under its lock and published only after its contents are complete. If that lock cannot be taken, the poll warns and uses an unwritten key, so later polls cannot reuse its cached readings.
 
 Token writes go through a temp file that is flushed and renamed, then the directory is flushed, so a crash leaves either the old tokens or the new ones. The token files are shared with the vendor CLIs: the fetcher re-reads and re-applies its refresh if a CLI writes the same file in between, so the two do not clobber each other's rotation. The cache files are disposable; deleting `~/.cache/quota-widget` costs one poll of 429 fallback.
 

@@ -16,6 +16,17 @@ reconstruction of the release history, not a record written at the time.
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-10-21
+
+### Fixed
+
+- Concurrent first polls now adopt one complete account key. The previous
+  exclusive create exposed an empty file before its write completed, so a
+  second poll could replace the key and invalidate the first poll's cached
+  readings. Creation and corrupt-key repair now re-read under
+  `account-salt.lock` and publish atomically. An unavailable lock leaves the
+  key in memory and reports why those cached readings cannot be reused.
+
 ## [1.4.0] - 2026-10-21
 
 ### Changed
